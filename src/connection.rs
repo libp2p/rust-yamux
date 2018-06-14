@@ -11,12 +11,7 @@ use frame::{
     WindowUpdate
 };
 use futures::{prelude::*, self, sync::{mpsc, oneshot}};
-use std::{
-    collections::BTreeMap,
-    sync::{atomic::{AtomicUsize, Ordering}, Arc},
-    u32,
-    usize
-};
+use std::{collections::BTreeMap, sync::{atomic::AtomicUsize, Arc}, u32, usize};
 use stream::{Item, Stream, StreamId, Window};
 use tokio_codec::Framed;
 use tokio_io::{AsyncRead, AsyncWrite};
@@ -75,7 +70,7 @@ pub struct Connection<T> {
     mode: Mode,
     resource: Framed<T, FrameCodec>,
     config: Arc<Config>,
-    id_counter: AtomicUsize,
+    id_counter: usize,
     streams: BTreeMap<StreamId, StreamInbox>,
     from_streams: mpsc::UnboundedReceiver<(StreamId, Item)>,
     stream_sender: mpsc::UnboundedSender<(StreamId, Item)>,
@@ -90,10 +85,7 @@ where
 {
     /// Create a new connection either in client or server mode.
     pub fn new(resource: T, config: Arc<Config>, mode: Mode) -> Self {
-        let seed = match mode {
-            Mode::Client => 1,
-            Mode::Server => 2
-        };
+        trace!("new connection");
         let (stream_tx, stream_rx) = mpsc::unbounded();
         let (ctrl_tx, ctrl_rx) = mpsc::channel(1024);
         Connection {
@@ -102,7 +94,10 @@ where
             is_dead: false,
             resource: Framed::new(resource, FrameCodec::new()),
             config,
-            id_counter: AtomicUsize::new(seed),
+            id_counter: match mode {
+                Mode::Client => 1,
+                Mode::Server => 2
+            },
             streams: BTreeMap::new(),
             from_streams: stream_rx,
             stream_sender: stream_tx,
@@ -126,7 +121,7 @@ where
         let id = self.next_stream_id()?;
         let credit = self.config.receive_window;
         let stream = self.new_stream(id, credit);
-        let mut frame = Frame::data(id, data.unwrap_or(Body::empty()));
+        let mut frame = Frame::data(id, data.unwrap_or_else(Body::empty));
         frame.header_mut().syn();
         Ok((stream, frame))
     }
@@ -165,7 +160,7 @@ where
         }
     }
 
-    fn on_data(&mut self, frame: Frame<Data>) -> Result<Option<Stream>, Frame<GoAway>> {
+    fn on_data(&mut self, frame: &Frame<Data>) -> Result<Option<Stream>, Frame<GoAway>> {
         let stream_id = frame.header().id();
 
         if frame.header().flags().contains(RST) {
@@ -194,7 +189,7 @@ where
             if is_finish {
                 assert!(self.deliver(stream_id, Item::Finish))
             }
-            if body.bytes().len() > 0 {
+            if !body.bytes().is_empty() {
                 assert!(self.deliver(stream_id, Item::Data(body)))
             }
             return Ok(Some(stream))
@@ -208,7 +203,7 @@ where
         Ok(None)
     }
 
-    fn on_window_update(&mut self, frame: Frame<WindowUpdate>) -> Result<Option<Stream>, Frame<GoAway>> {
+    fn on_window_update(&mut self, frame: &Frame<WindowUpdate>) -> Result<Option<Stream>, Frame<GoAway>> {
         let stream_id = frame.header().id();
 
         if frame.header().flags().contains(RST) { // reset stream
@@ -243,23 +238,21 @@ where
         Ok(None)
     }
 
-    fn on_ping(&mut self, frame: Frame<Ping>) -> Result<Option<Frame<Ping>>, ConnectionError> {
+    fn on_ping(&mut self, frame: &Frame<Ping>) -> Result<Option<Frame<Ping>>, ConnectionError> {
         let stream_id = frame.header().id();
         if frame.header().flags().contains(ACK) { // pong
             Ok(None) // TODO
+        } else if self.streams.contains_key(&stream_id) {
+            let mut hdr = Header::ping(frame.header().nonce());
+            hdr.ack();
+            Ok(Some(Frame::new(hdr)))
         } else {
-            if self.streams.contains_key(&stream_id) {
-                let mut hdr = Header::ping(frame.header().nonce());
-                hdr.ack();
-                Ok(Some(Frame::new(hdr)))
-            } else {
-                debug!("{}received ping for unknown stream {}", self.label, stream_id);
-                Ok(None)
-            }
+            debug!("{}received ping for unknown stream {}", self.label, stream_id);
+            Ok(None)
         }
     }
 
-    fn on_go_away(&mut self, frame: Frame<GoAway>) {
+    fn on_go_away(&mut self, frame: &Frame<GoAway>) {
         info!("{}received go_away frame; error code = {}", self.label, frame.header().error_code());
         self.terminate()
     }
@@ -272,11 +265,12 @@ where
         self.deliver(id, Item::Finish);
     }
 
-    fn next_stream_id(&self) -> Result<StreamId, ConnectionError> {
-        if self.id_counter.load(Ordering::SeqCst) >= u32::MAX as usize - 2 {
+    fn next_stream_id(&mut self) -> Result<StreamId, ConnectionError> {
+        if self.id_counter >= u32::MAX as usize - 2 {
             return Err(ConnectionError::NoMoreStreamIds)
         }
-        let proposed = StreamId::new(self.id_counter.fetch_add(2, Ordering::SeqCst) as u32);
+        let proposed = StreamId::new(self.id_counter as u32);
+        self.id_counter += 2;
         match self.mode {
             Mode::Client => assert!(proposed.is_client()),
             Mode::Server => assert!(proposed.is_server())
@@ -385,35 +379,34 @@ where
 
         // Check for items streams want to send.
         while let Ok(Async::Ready(Some(item))) = self.from_streams.poll() {
-            let raw_frame = self.on_item(item);
-            try_ready!(self.send(raw_frame))
+            let frame = self.on_item(item);
+            try_ready!(self.send(frame))
         }
 
         // Finally, check for incoming data from remote.
         loop {
             try_ready!(self.flush());
-            let to_check = self.resource.poll();
-            match to_check {
+            match self.resource.poll() {
                 Ok(Async::Ready(Some(frame))) => {
                     trace!("{}recv: {:?}", self.label, frame.header);
                     match frame.dyn_type() {
                         Type::Data => {
-                            match self.on_data(Frame::assert(frame)) {
-                                Ok(None) => {}
+                            match self.on_data(&Frame::assert(frame)) {
+                                Ok(None) => continue,
                                 Ok(Some(stream)) => return Ok(Async::Ready(Some(stream))),
                                 Err(frame) => try_ready!(self.send(frame.into_raw()))
                             }
                         }
                         Type::WindowUpdate => {
-                            match self.on_window_update(Frame::assert(frame)) {
-                                Ok(None) => {}
+                            match self.on_window_update(&Frame::assert(frame)) {
+                                Ok(None) => continue,
                                 Ok(Some(stream)) => return Ok(Async::Ready(Some(stream))),
                                 Err(frame) => try_ready!(self.send(frame.into_raw()))
                             }
                         }
                         Type::Ping => {
-                            match self.on_ping(Frame::assert(frame)) {
-                                Ok(None) => {}
+                            match self.on_ping(&Frame::assert(frame)) {
+                                Ok(None) => continue,
                                 Ok(Some(pong)) => try_ready!(self.send(pong.into_raw())),
                                 Err(e) => {
                                     self.terminate();
@@ -422,7 +415,7 @@ where
                             }
                         }
                         Type::GoAway => {
-                            self.on_go_away(Frame::assert(frame));
+                            self.on_go_away(&Frame::assert(frame));
                             return Ok(Async::Ready(None))
                         }
                     }

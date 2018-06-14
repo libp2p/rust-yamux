@@ -161,9 +161,9 @@ impl futures::Stream for Stream {
         match self.receiver.poll() {
             Err(()) => {
                 self.state = State::RecvClosed;
-                return Err(StreamError::StreamClosed(self.id))
+                Err(StreamError::StreamClosed(self.id))
             }
-            Ok(Async::NotReady) => return Ok(Async::NotReady),
+            Ok(Async::NotReady) => Ok(Async::NotReady),
             Ok(Async::Ready(item)) => match item {
                 Some(Item::Data(body)) => {
                     let remaining = self.recv_window.decrement(body.bytes().len());
