@@ -8,6 +8,7 @@ extern crate quickcheck;
 #[macro_use]
 extern crate quick_error;
 extern crate tokio_io;
+extern crate tokio_codec;
 
 mod connection;
 mod stream;

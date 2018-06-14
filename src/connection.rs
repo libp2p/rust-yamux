@@ -18,7 +18,8 @@ use std::{
     usize
 };
 use stream::{Item, Stream, StreamId, Window};
-use tokio_io::{codec::Framed, AsyncRead, AsyncWrite};
+use tokio_codec::Framed;
+use tokio_io::{AsyncRead, AsyncWrite};
 use Config;
 
 
@@ -99,7 +100,7 @@ where
             mode,
             label: "",
             is_dead: false,
-            resource: resource.framed(FrameCodec::new()),
+            resource: Framed::new(resource, FrameCodec::new()),
             config,
             id_counter: AtomicUsize::new(seed),
             streams: BTreeMap::new(),

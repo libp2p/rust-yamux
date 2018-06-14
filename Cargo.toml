@@ -9,6 +9,7 @@ bytes = "0.4"
 futures = "0.1"
 log = "0.4"
 quick-error = "0.1"
+tokio-codec = "0.1"
 tokio-io = "0.1"
 
 [dev-dependencies]

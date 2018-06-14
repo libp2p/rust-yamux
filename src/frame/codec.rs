@@ -3,7 +3,7 @@ use error::DecodeError;
 use frame::{header::{Flags, Len, RawHeader, Type, Version}, Body, RawFrame};
 use std::io;
 use stream::StreamId;
-use tokio_io::codec::{BytesCodec, Decoder, Encoder};
+use tokio_codec::{BytesCodec, Decoder, Encoder};
 
 
 #[derive(Debug)]
