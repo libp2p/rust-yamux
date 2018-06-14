@@ -207,10 +207,9 @@ impl futures::Sink for Stream {
             return Err(StreamError::StreamClosed(self.id))
         }
         if self.outgoing.is_some() {
-            self.poll_complete()?;
-        }
-        if self.outgoing.is_some() {
-            return Ok(AsyncSink::NotReady(item))
+            if let Async::NotReady = self.poll_complete()? {
+                return Ok(AsyncSink::NotReady(item))
+            }
         }
         self.outgoing = Some(item);
         Ok(AsyncSink::Ready)
