@@ -9,15 +9,24 @@ use tokio_codec::{BytesCodec, Decoder, Encoder};
 #[derive(Debug)]
 pub struct FrameCodec {
     header_codec: HeaderCodec,
-    body_codec: BytesCodec
+    body_codec: BytesCodec,
+    header: Option<RawHeader>
 }
 
 impl FrameCodec {
     pub fn new() -> FrameCodec {
         FrameCodec {
             header_codec: HeaderCodec::new(),
-            body_codec: BytesCodec::new()
+            body_codec: BytesCodec::new(),
+            header: None
         }
+    }
+
+    fn get_header(&mut self, src: &mut BytesMut) -> Result<Option<RawHeader>, DecodeError> {
+        if let Some(header) = self.header.take() {
+            return Ok(Some(header))
+        }
+        self.header_codec.decode(src)
     }
 }
 
@@ -37,7 +46,7 @@ impl Decoder for FrameCodec {
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         let header =
-            if let Some(header) = self.header_codec.decode(src)? {
+            if let Some(header) = self.get_header(src)? {
                 header
             } else {
                 return Ok(None)
@@ -47,11 +56,13 @@ impl Decoder for FrameCodec {
         }
         let len = header.length.0 as usize;
         if src.len() < len {
+            self.header = Some(header);
             return Ok(None)
         }
         if let Some(b) = self.body_codec.decode(&mut src.split_to(len))? {
             Ok(Some(RawFrame { header, body: Body(b.freeze()) }))
         } else {
+            self.header = Some(header);
             Ok(None)
         }
     }
