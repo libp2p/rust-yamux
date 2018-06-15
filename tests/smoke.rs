@@ -6,7 +6,7 @@ extern crate tokio;
 extern crate yamux;
 
 use futures::{future::{self, Loop}, prelude::*, stream};
-use std::sync::Arc;
+use std::{borrow::Cow, sync::Arc};
 use tokio::{net::{TcpListener, TcpStream}, runtime::Runtime};
 use yamux::{Body, Config, Connection, Mode};
 
@@ -36,7 +36,7 @@ fn connect_two_endpoints() {
 
     let echo_stream_ids = server_conn("127.0.0.1:12345", cfg.clone())
         .and_then(|mut conn| {
-            conn.set_label("S: ");
+            conn.set_label(Cow::Borrowed("S: "));
             conn.for_each(|stream| {
                 debug!("S: new stream {}", stream.id());
                 let body = vec![
@@ -53,7 +53,7 @@ fn connect_two_endpoints() {
         });
 
     let client = client_conn("127.0.0.1:12345", cfg.clone()).and_then(|mut conn| {
-        conn.set_label("C: ");
+        conn.set_label(Cow::Borrowed("C: "));
         let ctrl = conn.control();
         let future = conn.for_each(|_stream| Ok(()))
             .map_err(|e| error!("C: connection error: {}", e));

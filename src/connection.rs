@@ -10,8 +10,8 @@ use frame::{
     RawFrame,
     WindowUpdate
 };
-use futures::{prelude::*, self, sync::{mpsc, oneshot}};
-use std::{collections::BTreeMap, sync::{atomic::AtomicUsize, Arc}, u32, usize};
+use futures::{prelude::*, self, stream::{Fuse, Stream as FuturesStream}, sync::{mpsc, oneshot}};
+use std::{borrow::Cow, collections::BTreeMap, sync::{atomic::AtomicUsize, Arc}, u32, usize};
 use stream::{Item, Stream, StreamId, Window};
 use tokio_codec::Framed;
 use tokio_io::{AsyncRead, AsyncWrite};
@@ -66,15 +66,15 @@ struct StreamInbox {
 /// A connection which multiplexes streams to the remote endpoint.
 pub struct Connection<T> {
     is_dead: bool,
-    label: &'static str,
+    label: Cow<'static, str>,
     mode: Mode,
     resource: Framed<T, FrameCodec>,
     config: Arc<Config>,
     id_counter: usize,
     streams: BTreeMap<StreamId, StreamInbox>,
-    from_streams: mpsc::UnboundedReceiver<(StreamId, Item)>,
+    from_streams: Fuse<mpsc::UnboundedReceiver<(StreamId, Item)>>,
     stream_sender: mpsc::UnboundedSender<(StreamId, Item)>,
-    from_ctrl: mpsc::Receiver<Cmd>,
+    from_ctrl: Fuse<mpsc::Receiver<Cmd>>,
     ctrl: Ctrl,
     pending: Option<RawFrame>
 }
@@ -85,12 +85,12 @@ where
 {
     /// Create a new connection either in client or server mode.
     pub fn new(resource: T, config: Arc<Config>, mode: Mode) -> Self {
-        trace!("new connection");
+        info!("new connection");
         let (stream_tx, stream_rx) = mpsc::unbounded();
         let (ctrl_tx, ctrl_rx) = mpsc::channel(1024);
         Connection {
             mode,
-            label: "",
+            label: Cow::Borrowed(""),
             is_dead: false,
             resource: Framed::new(resource, FrameCodec::new()),
             config,
@@ -99,16 +99,16 @@ where
                 Mode::Server => 2
             },
             streams: BTreeMap::new(),
-            from_streams: stream_rx,
+            from_streams: stream_rx.fuse(),
             stream_sender: stream_tx,
-            from_ctrl: ctrl_rx,
+            from_ctrl: ctrl_rx.fuse(),
             ctrl: Ctrl::new(ctrl_tx),
             pending: None
         }
     }
 
     /// Optionally set a label which shows up in log messages.
-    pub fn set_label(&mut self, label: &'static str) {
+    pub fn set_label(&mut self, label: Cow<'static, str>) {
         self.label = label
     }
 
@@ -298,7 +298,9 @@ where
             ack: true
         };
         self.streams.insert(id, inbox);
-        Stream::new(id, self.config.clone(), self.stream_sender.clone(), rx_stream, recv_win)
+        let mut s = Stream::new(id, self.config.clone(), self.stream_sender.clone(), rx_stream, recv_win);
+        s.set_label(self.label.clone());
+        s
     }
 
     fn deliver(&mut self, id: StreamId, item: Item) -> bool {
@@ -307,19 +309,19 @@ where
                 return true
             }
         }
-        debug!("{}can not deliver; stream {} is gone", self.label, id);
+        info!("{}can not deliver; stream {} is gone", self.label, id);
         self.streams.remove(&id);
         false
     }
 
     fn terminate(&mut self) {
-        debug!("{}terminating connection", self.label);
+        info!("{}terminating connection", self.label);
         self.is_dead = true;
         self.streams.clear()
     }
 
     fn send(&mut self, frame: RawFrame) -> Poll<(), ConnectionError> {
-        trace!("{}send: {:?}", self.label, frame.header);
+        trace!("{}send: {:?}", self.label, frame);
         match self.resource.start_send(frame) {
             Ok(AsyncSink::Ready) => Ok(Async::Ready(())),
             Ok(AsyncSink::NotReady(frame)) => {
@@ -334,6 +336,7 @@ where
     }
 
     fn flush(&mut self) -> Poll<(), ConnectionError> {
+        trace!("{}flush", self.label);
         self.resource.poll_complete().map_err(|e| {
             self.terminate();
             e.into()
@@ -349,12 +352,14 @@ where
     type Error = ConnectionError;
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+        trace!("{}poll", self.label);
         if self.is_dead {
             return Ok(Async::Ready(None))
         }
 
         // First, check for pending frames we need to send.
         if let Some(frame) = self.pending.take() {
+            trace!("{}send pending: {:?}", self.label, frame);
             try_ready!(self.send(frame))
         }
 
@@ -379,16 +384,18 @@ where
 
         // Check for items streams want to send.
         while let Ok(Async::Ready(Some(item))) = self.from_streams.poll() {
+            trace!("{}handle stream item: {:?}", self.label, item);
             let frame = self.on_item(item);
             try_ready!(self.send(frame))
         }
 
         // Finally, check for incoming data from remote.
         loop {
+            trace!("{}receive loop", self.label);
             try_ready!(self.flush());
             match self.resource.poll() {
                 Ok(Async::Ready(Some(frame))) => {
-                    trace!("{}recv: {:?}", self.label, frame.header);
+                    trace!("{}recv: {:?}", self.label, frame);
                     match frame.dyn_type() {
                         Type::Data => {
                             match self.on_data(&Frame::assert(frame)) {
@@ -424,7 +431,10 @@ where
                     self.terminate();
                     return Ok(Async::Ready(None))
                 }
-                Ok(Async::NotReady) => return Ok(Async::NotReady),
+                Ok(Async::NotReady) => {
+                    trace!("{}resource not ready", self.label);
+                    return Ok(Async::NotReady)
+                }
                 Err(e) => {
                     self.terminate();
                     return Err(e.into())

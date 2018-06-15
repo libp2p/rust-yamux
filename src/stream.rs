@@ -2,7 +2,7 @@ use bytes::Bytes;
 use error::StreamError;
 use frame::Body;
 use futures::{self, prelude::*, sync::mpsc, task::{self, Task}};
-use std::{fmt, sync::{atomic::{AtomicUsize, Ordering}, Arc}, u32, usize};
+use std::{borrow::Cow, fmt, sync::{atomic::{AtomicUsize, Ordering}, Arc}, u32, usize};
 use Config;
 
 
@@ -71,6 +71,7 @@ impl Window {
 }
 
 
+#[derive(Debug)]
 pub enum Item {
     Data(Body),
     WindowUpdate(u32),
@@ -85,6 +86,7 @@ pub type Receiver = mpsc::UnboundedReceiver<Item>;
 
 pub struct Stream {
     id: StreamId,
+    label: Cow<'static, str>,
     state: State,
     config: Arc<Config>,
     recv_window: Arc<Window>,
@@ -106,6 +108,7 @@ impl Stream {
         let send_window = c.receive_window;
         Stream {
             id,
+            label: Cow::Borrowed(""),
             state: State::Open,
             config: c,
             recv_window: rw,
@@ -115,6 +118,10 @@ impl Stream {
             receiver: r,
             writer_task: None
         }
+    }
+
+    pub fn set_label(&mut self, label: Cow<'static, str>) {
+        self.label = label
     }
 
     pub fn id(&self) -> StreamId {
@@ -164,34 +171,37 @@ impl futures::Stream for Stream {
                 Err(StreamError::StreamClosed(self.id))
             }
             Ok(Async::NotReady) => Ok(Async::NotReady),
-            Ok(Async::Ready(item)) => match item {
-                Some(Item::Data(body)) => {
-                    let remaining = self.recv_window.decrement(body.bytes().len());
-                    if remaining == 0 {
-                        let item = Item::WindowUpdate(self.config.receive_window);
-                        self.send_item(item)?;
-                        self.recv_window.set(self.config.receive_window as usize);
+            Ok(Async::Ready(item)) => {
+                trace!("{}[{}] recv: {:?}", self.label, self.id, item);
+                match item {
+                    Some(Item::Data(body)) => {
+                        let remaining = self.recv_window.decrement(body.bytes().len());
+                        if remaining == 0 {
+                            let item = Item::WindowUpdate(self.config.receive_window);
+                            self.send_item(item)?;
+                            self.recv_window.set(self.config.receive_window as usize);
+                        }
+                        Ok(Async::Ready(Some(body.into_bytes())))
                     }
-                    Ok(Async::Ready(Some(body.into_bytes())))
-                }
-                Some(Item::WindowUpdate(n)) => {
-                    self.send_window = self.send_window.checked_add(n).unwrap_or(u32::MAX);
-                    if let Some(writer) = self.writer_task.take() {
-                        writer.notify()
+                    Some(Item::WindowUpdate(n)) => {
+                        self.send_window = self.send_window.checked_add(n).unwrap_or(u32::MAX);
+                        if let Some(writer) = self.writer_task.take() {
+                            writer.notify()
+                        }
+                        Ok(Async::NotReady)
                     }
-                    Ok(Async::NotReady)
-                }
-                Some(Item::Finish) => {
-                    if self.state == State::SendClosed {
-                        self.state = State::Closed
-                    } else {
-                        self.state = State::RecvClosed
+                    Some(Item::Finish) => {
+                        if self.state == State::SendClosed {
+                            self.state = State::Closed
+                        } else {
+                            self.state = State::RecvClosed
+                        }
+                        Ok(Async::Ready(None))
                     }
-                    Ok(Async::Ready(None))
-                }
-                Some(Item::Reset) | None => {
-                    self.state = State::Closed;
-                    Ok(Async::Ready(None))
+                    Some(Item::Reset) | None => {
+                        self.state = State::Closed;
+                        Ok(Async::Ready(None))
+                    }
                 }
             }
         }
@@ -203,10 +213,12 @@ impl futures::Sink for Stream {
     type SinkError = StreamError;
 
     fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, Self::SinkError> {
+        trace!("{}[{}] send: {:?}", self.label, self.id, item);
         if self.state == State::Closed || self.state == State::SendClosed {
             return Err(StreamError::StreamClosed(self.id))
         }
         if self.outgoing.is_some() {
+            trace!("{}[{}] send outgoing: {:?}", self.label, self.id, self.outgoing);
             if let Async::NotReady = self.poll_complete()? {
                 return Ok(AsyncSink::NotReady(item))
             }
@@ -216,6 +228,7 @@ impl futures::Sink for Stream {
     }
 
     fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
+        trace!("{}[{}] poll_complete: {:?}", self.label, self.id, self.outgoing);
         if self.state == State::Closed || self.state == State::SendClosed {
             return Err(StreamError::StreamClosed(self.id))
         }
@@ -228,6 +241,7 @@ impl futures::Sink for Stream {
                 self.send_window -= b.len() as u32;
                 let body = Body::from_bytes(b).ok_or(StreamError::BodyTooLarge)?;
                 self.send_item(Item::Data(body))?;
+                trace!("{}[{}] poll_complete done", self.label, self.id);
                 return Ok(Async::Ready(()))
             }
             let bytes = b.split_to(self.send_window as usize);
@@ -238,6 +252,7 @@ impl futures::Sink for Stream {
             self.writer_task = Some(task::current());
             Ok(Async::NotReady)
         } else {
+            trace!("{}[{}] poll_complete done", self.label, self.id);
             Ok(Async::Ready(()))
         }
     }
