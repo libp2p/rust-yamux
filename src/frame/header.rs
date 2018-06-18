@@ -1,5 +1,5 @@
 use std::marker::PhantomData;
-use stream::StreamId;
+use stream;
 use super::{Data, WindowUpdate, Ping, GoAway};
 
 
@@ -51,7 +51,7 @@ pub struct RawHeader {
     pub version: Version,
     pub typ: Type,
     pub flags: Flags,
-    pub stream_id: StreamId,
+    pub stream_id: stream::Id,
     pub length: Len
 }
 
@@ -70,7 +70,7 @@ impl<T> Header<T> {
         }
     }
 
-    pub fn id(&self) -> StreamId {
+    pub fn id(&self) -> stream::Id {
         self.raw_header.stream_id
     }
 
@@ -84,7 +84,7 @@ impl<T> Header<T> {
 }
 
 impl Header<Data> {
-    pub fn data(id: StreamId, len: u32) -> Self {
+    pub fn data(id: stream::Id, len: u32) -> Self {
         Header {
             raw_header: RawHeader {
                 version: Version(0),
@@ -119,7 +119,7 @@ impl Header<Data> {
 }
 
 impl Header<WindowUpdate> {
-    pub fn window_update(id: StreamId, credit: u32) -> Self {
+    pub fn window_update(id: stream::Id, credit: u32) -> Self {
         Header {
             raw_header: RawHeader {
                 version: Version(0),
@@ -160,7 +160,7 @@ impl Header<Ping> {
                 version: Version(0),
                 typ: Type::Ping,
                 flags: Flags(0),
-                stream_id: StreamId::new(0),
+                stream_id: stream::Id::new(0),
                 length: Len(nonce)
             },
             header_type: PhantomData
@@ -187,7 +187,7 @@ impl Header<GoAway> {
                 version: Version(0),
                 typ: Type::GoAway,
                 flags: Flags(0),
-                stream_id: StreamId::new(0),
+                stream_id: stream::Id::new(0),
                 length: Len(error_code)
             },
             header_type: PhantomData

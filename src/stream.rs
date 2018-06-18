@@ -1,17 +1,18 @@
-use bytes::Bytes;
+use bytes::BytesMut;
 use error::StreamError;
 use frame::Body;
-use futures::{self, prelude::*, sync::mpsc, task::{self, Task}};
-use std::{borrow::Cow, fmt, sync::{atomic::{AtomicUsize, Ordering}, Arc}, u32, usize};
+use futures::{prelude::*, stream::{Fuse, Stream as FuturesStream}, sync::mpsc, task::{self, Task}};
+use std::{cmp::min, fmt, io, sync::{atomic::{AtomicUsize, Ordering}, Arc}, u32, usize};
+use tokio_io::{AsyncRead, AsyncWrite};
 use Config;
 
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct StreamId(u32);
+pub struct Id(u32);
 
-impl StreamId {
-    pub(crate) fn new(id: u32) -> StreamId {
-        StreamId(id)
+impl Id {
+    pub(crate) fn new(id: u32) -> Id {
+        Id(id)
     }
 
     pub fn is_server(&self) -> bool {
@@ -31,7 +32,7 @@ impl StreamId {
     }
 }
 
-impl fmt::Display for StreamId {
+impl fmt::Display for Id {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{}", self.0)
     }
@@ -48,14 +49,14 @@ enum State {
 
 
 #[derive(Debug)]
-pub struct Window(AtomicUsize);
+pub(crate) struct Window(AtomicUsize);
 
 impl Window {
-    pub fn new(n: AtomicUsize) -> Window {
+    pub(crate) fn new(n: AtomicUsize) -> Window {
         Window(n)
     }
 
-    pub fn decrement(&self, amount: usize) -> usize {
+    pub(crate) fn decrement(&self, amount: usize) -> usize {
         loop {
             let prev = self.0.load(Ordering::SeqCst);
             let next = prev.checked_sub(amount).unwrap_or(0);
@@ -65,14 +66,14 @@ impl Window {
         }
     }
 
-    pub fn set(&self, val: usize) {
+    pub(crate) fn set(&self, val: usize) {
         self.0.store(val, Ordering::SeqCst)
     }
 }
 
 
 #[derive(Debug)]
-pub enum Item {
+pub(crate) enum Item {
     Data(Body),
     WindowUpdate(u32),
     Reset,
@@ -80,18 +81,17 @@ pub enum Item {
 }
 
 
-pub type Sender = mpsc::UnboundedSender<(StreamId, Item)>;
-pub type Receiver = mpsc::UnboundedReceiver<Item>;
+pub(crate) type Sender = mpsc::UnboundedSender<(Id, Item)>;
+pub(crate) type Receiver = Fuse<mpsc::UnboundedReceiver<Item>>;
 
 
 pub struct Stream {
-    id: StreamId,
-    label: Cow<'static, str>,
+    id: Id,
     state: State,
     config: Arc<Config>,
     recv_window: Arc<Window>,
     send_window: u32,
-    outgoing: Option<Bytes>,
+    buffer: BytesMut,
     sender: Sender,
     receiver: Receiver,
     writer_task: Option<Task>
@@ -110,27 +110,22 @@ impl fmt::Debug for Stream {
 }
 
 impl Stream {
-    pub(crate) fn new(id: StreamId, c: Arc<Config>, s: Sender, r: Receiver, rw: Arc<Window>) -> Stream {
+    pub(crate) fn new(id: Id, c: Arc<Config>, tx: Sender, rx: Receiver, rw: Arc<Window>) -> Stream {
         let send_window = c.receive_window;
         Stream {
             id,
-            label: Cow::Borrowed(""),
             state: State::Open,
             config: c,
             recv_window: rw,
             send_window,
-            outgoing: None,
-            sender: s,
-            receiver: r,
+            buffer: BytesMut::new(),
+            sender: tx,
+            receiver: rx,
             writer_task: None
         }
     }
 
-    pub fn set_label(&mut self, label: Cow<'static, str>) {
-        self.label = label
-    }
-
-    pub fn id(&self) -> StreamId {
+    pub fn id(&self) -> Id {
         self.id
     }
 
@@ -161,52 +156,62 @@ impl Stream {
         }
         Ok(())
     }
-}
 
-impl futures::Stream for Stream {
-    type Item = Bytes;
-    type Error = StreamError;
-
-    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        if self.state == State::Closed || self.state == State::RecvClosed {
-            return Ok(Async::Ready(None))
-        }
-        match self.receiver.poll() {
-            Err(()) => {
-                self.state = State::RecvClosed;
-                Err(StreamError::StreamClosed(self.id))
-            }
-            Ok(Async::NotReady) => Ok(Async::NotReady),
-            Ok(Async::Ready(item)) => {
-                trace!("{}[{}] recv: {:?}", self.label, self.id, item);
-                match item {
+    fn poll_receiver(&mut self) -> Async<()> {
+        loop {
+            match self.receiver.poll() {
+                Err(()) => {
+                    self.state = State::RecvClosed;
+                    return Async::Ready(())
+                }
+                Ok(Async::NotReady) => {
+                    return Async::NotReady
+                }
+                Ok(Async::Ready(item)) => match item {
                     Some(Item::Data(body)) => {
-                        let remaining = self.recv_window.decrement(body.bytes().len());
+                        trace!("[{}] received data: {:?}", self.id, body);
+                        let body_len = body.bytes().len();
+                        self.buffer.extend(body.into_bytes());
+                        let remaining = self.recv_window.decrement(body_len);
                         if remaining == 0 {
+                            trace!("[{}] received window exhausted", self.id);
                             let item = Item::WindowUpdate(self.config.receive_window);
-                            self.send_item(item)?;
+                            if let Err(e) = self.send_item(item) {
+                                error!("[{}] failed to send window update: {}", self.id, e);
+                                self.state = State::Closed;
+                            }
                             self.recv_window.set(self.config.receive_window as usize);
                         }
-                        Ok(Async::Ready(Some(body.into_bytes())))
+                        continue
                     }
                     Some(Item::WindowUpdate(n)) => {
+                        trace!("[{}] received window update: {}", self.id, n);
                         self.send_window = self.send_window.checked_add(n).unwrap_or(u32::MAX);
-                        if let Some(writer) = self.writer_task.take() {
-                            writer.notify()
+                        if let Some(task) = self.writer_task.take() {
+                            trace!("[{}] notifying writer task", self.id);
+                            task.notify()
                         }
-                        Ok(Async::NotReady)
+                        continue
                     }
                     Some(Item::Finish) => {
+                        trace!("[{}] received finish", self.id);
                         if self.state == State::SendClosed {
-                            self.state = State::Closed
+                            self.state = State::Closed;
+                            return Async::Ready(())
                         } else {
                             self.state = State::RecvClosed
                         }
-                        Ok(Async::Ready(None))
+                        continue
                     }
-                    Some(Item::Reset) | None => {
+                    Some(Item::Reset) => {
+                        trace!("[{}] received reset", self.id);
                         self.state = State::Closed;
-                        Ok(Async::Ready(None))
+                        return Async::Ready(())
+                    }
+                    None => {
+                        trace!("[{}] receiver returned None", self.id);
+                        self.state = State::Closed;
+                        return Async::Ready(())
                     }
                 }
             }
@@ -214,52 +219,64 @@ impl futures::Stream for Stream {
     }
 }
 
-impl futures::Sink for Stream {
-    type SinkItem = Bytes;
-    type SinkError = StreamError;
+impl io::Read for Stream {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.state == State::Closed || self.state == State::RecvClosed {
+            return Ok(0)
+        }
+        if self.poll_receiver().is_ready() {
+            return Ok(0)
+        }
+        if self.buffer.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::WouldBlock, "not ready"))
+        }
+        let n = min(buf.len(), self.buffer.len());
+        (&mut buf[0..n]).copy_from_slice(&self.buffer.split_to(n));
+        Ok(n)
+    }
+}
 
-    fn start_send(&mut self, item: Self::SinkItem) -> StartSend<Self::SinkItem, Self::SinkError> {
-        trace!("{}[{}] send: {:?}", self.label, self.id, item);
+impl AsyncRead for Stream { }
+
+impl io::Write for Stream {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if self.state == State::Closed || self.state == State::SendClosed {
-            return Err(StreamError::StreamClosed(self.id))
+            return Err(io::Error::new(io::ErrorKind::Other, "connection closed"))
         }
-        if self.outgoing.is_some() {
-            trace!("{}[{}] send outgoing: {:?}", self.label, self.id, self.outgoing);
-            if let Async::NotReady = self.poll_complete()? {
-                return Ok(AsyncSink::NotReady(item))
-            }
+
+        self.poll_receiver();
+
+        if self.state == State::Closed {
+            return Ok(0)
         }
-        self.outgoing = Some(item);
-        Ok(AsyncSink::Ready)
+
+        if self.send_window == 0 {
+            trace!("[{}] write: send window exhausted", self.id);
+            self.writer_task = Some(task::current());
+            return Err(io::Error::new(io::ErrorKind::WouldBlock, "window empty"))
+        }
+
+        let len = min(buf.len(), self.send_window as usize);
+        self.send_window -= len as u32;
+        let body = Body::from_bytes((&buf[0..len]).into()).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, StreamError::BodyTooLarge)
+        })?;
+
+        trace!("[{}] write: {:?}", self.id, body);
+        if self.send_item(Item::Data(body)).is_err() {
+            Err(io::Error::new(io::ErrorKind::Other, "connection closed"))
+        } else {
+            Ok(len)
+        }
     }
 
-    fn poll_complete(&mut self) -> Poll<(), Self::SinkError> {
-        trace!("{}[{}] poll_complete: {:?}", self.label, self.id, self.outgoing);
-        if self.state == State::Closed || self.state == State::SendClosed {
-            return Err(StreamError::StreamClosed(self.id))
-        }
-        if self.send_window == 0 {
-            self.writer_task = Some(task::current());
-            return Ok(Async::NotReady)
-        }
-        if let Some(mut b) = self.outgoing.take() {
-            if b.len() < self.send_window as usize {
-                self.send_window -= b.len() as u32;
-                let body = Body::from_bytes(b).ok_or(StreamError::BodyTooLarge)?;
-                self.send_item(Item::Data(body))?;
-                trace!("{}[{}] poll_complete done", self.label, self.id);
-                return Ok(Async::Ready(()))
-            }
-            let bytes = b.split_to(self.send_window as usize);
-            self.send_window = 0;
-            let body = Body::from_bytes(bytes).ok_or(StreamError::BodyTooLarge)?;
-            self.send_item(Item::Data(body))?;
-            self.outgoing = Some(b);
-            self.writer_task = Some(task::current());
-            Ok(Async::NotReady)
-        } else {
-            trace!("{}[{}] poll_complete done", self.label, self.id);
-            Ok(Async::Ready(()))
-        }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl AsyncWrite for Stream {
+    fn shutdown(&mut self) -> Poll<(), io::Error> {
+        Ok(Async::Ready(()))
     }
 }

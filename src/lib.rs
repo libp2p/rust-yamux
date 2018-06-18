@@ -11,14 +11,16 @@ extern crate tokio_io;
 extern crate tokio_codec;
 
 mod connection;
-mod stream;
+
+#[allow(dead_code)]
+mod frame;
 
 pub mod error;
-pub mod frame;
+pub mod stream;
 
 pub use connection::{Connection, Ctrl, Mode};
 pub use frame::Body;
-pub use stream::{Stream, StreamId};
+pub use stream::Stream;
 
 #[derive(Debug)]
 pub struct Config {

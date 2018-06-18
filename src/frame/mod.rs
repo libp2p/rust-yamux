@@ -1,7 +1,7 @@
 use std::u32;
 use bytes::Bytes;
 use self::header::{Header, RawHeader};
-use stream::StreamId;
+use stream;
 
 pub mod codec;
 pub mod header;
@@ -61,7 +61,7 @@ impl<T> Frame<T> {
 }
 
 impl Frame<Data> {
-    pub fn data(id: StreamId, b: Body) -> Self {
+    pub fn data(id: stream::Id, b: Body) -> Self {
         Frame {
             header: Header::data(id, b.0.len() as u32),
             body: b
@@ -74,7 +74,7 @@ impl Frame<Data> {
 }
 
 impl Frame<WindowUpdate> {
-    pub fn window_update(id: StreamId, n: u32) -> Self {
+    pub fn window_update(id: stream::Id, n: u32) -> Self {
         Frame {
             header: Header::window_update(id, n),
             body: Body::empty()

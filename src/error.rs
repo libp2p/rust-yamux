@@ -1,5 +1,5 @@
 use std::io;
-use stream::StreamId;
+use stream;
 
 
 quick_error! {
@@ -22,7 +22,7 @@ quick_error! {
 quick_error! {
     #[derive(Debug)]
     pub enum StreamError {
-        StreamClosed(id: StreamId) {
+        StreamClosed(id: stream::Id) {
             display("stream {} is closed", id)
         }
         ConnectionClosed {

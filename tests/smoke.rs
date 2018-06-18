@@ -3,12 +3,14 @@ extern crate log;
 extern crate env_logger;
 extern crate futures;
 extern crate tokio;
+extern crate tokio_codec;
 extern crate yamux;
 
 use futures::{future::{self, Loop}, prelude::*, stream};
-use std::{borrow::Cow, sync::Arc};
+use std::{io, sync::Arc};
 use tokio::{net::{TcpListener, TcpStream}, runtime::Runtime};
-use yamux::{Body, Config, Connection, Mode};
+use tokio_codec::{BytesCodec, Framed};
+use yamux::{error::ConnectionError, Body, Config, Connection, Mode};
 
 
 fn server_conn(addr: &str, cfg: Arc<Config>) -> impl Future<Item=Connection<TcpStream>, Error=()> {
@@ -35,25 +37,25 @@ fn connect_two_endpoints() {
     let mut rt = Runtime::new().unwrap();
 
     let echo_stream_ids = server_conn("127.0.0.1:12345", cfg.clone())
-        .and_then(|mut conn| {
-            conn.set_label(Cow::Borrowed("S: "));
+        .and_then(|conn| {
             conn.for_each(|stream| {
                 debug!("S: new stream {}", stream.id());
                 let body = vec![
                     "Hi client!".as_bytes().into(),
                     format!("{}", stream.id()).as_bytes().into()
                 ];
-                stream.send_all(stream::iter_ok(body)).map(|_| ())
-                    .or_else(|e| {
+                let codec = Framed::new(stream, BytesCodec::new());
+                codec.send_all(stream::iter_ok::<_, io::Error>(body))
+                    .map(|_| ())
+                    .map_err(|e| {
                         error!("S: stream error: {}", e);
-                        Ok(())
+                        ConnectionError::Io(e)
                     })
             })
             .map_err(|e| error!("S: connection error: {}", e))
         });
 
-    let client = client_conn("127.0.0.1:12345", cfg.clone()).and_then(|mut conn| {
-        conn.set_label(Cow::Borrowed("C: "));
+    let client = client_conn("127.0.0.1:12345", cfg.clone()).and_then(|conn| {
         let ctrl = conn.control();
         let future = conn.for_each(|_stream| Ok(()))
             .map_err(|e| error!("C: connection error: {}", e));
@@ -63,7 +65,8 @@ fn connect_two_endpoints() {
             ctrl.open_stream(Some(Body::from_bytes("Hi server!".as_bytes().into()).unwrap()))
                 .map_err(|e| error!("C: error opening stream: {}", e))
                 .and_then(move |stream| {
-                    stream.into_future().map(|(data, _rem)| {
+                    let codec = Framed::new(stream, BytesCodec::new());
+                    codec.into_future().map(|(data, _rem)| {
                         debug!("C: received {:?}", data)
                     })
                     .map_err(|(e, _rem)| error!("C: stream error: {}", e))

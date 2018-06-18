@@ -2,7 +2,7 @@ use bytes::{BigEndian, BufMut, ByteOrder, BytesMut};
 use error::DecodeError;
 use frame::{header::{Flags, Len, RawHeader, Type, Version}, Body, RawFrame};
 use std::io;
-use stream::StreamId;
+use stream;
 use tokio_codec::{BytesCodec, Decoder, Encoder};
 
 
@@ -112,7 +112,7 @@ impl Decoder for HeaderCodec {
                 t => return Err(DecodeError::Type(t))
             },
             flags: Flags(BigEndian::read_u16(&src[2..4])),
-            stream_id: StreamId::new(BigEndian::read_u32(&src[4..8])),
+            stream_id: stream::Id::new(BigEndian::read_u32(&src[4..8])),
             length: Len(BigEndian::read_u32(&src[8..12]))
         };
         Ok(Some(header))
@@ -135,7 +135,7 @@ mod tests {
                 version: Version(g.gen()),
                 typ: ty,
                 flags: Flags(g.gen()),
-                stream_id: StreamId::new(g.gen()),
+                stream_id: stream::Id::new(g.gen()),
                 length: Len(len)
             };
             let body =
