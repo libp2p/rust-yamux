@@ -97,6 +97,12 @@ pub struct Stream {
     writer_task: Option<Task>
 }
 
+impl Drop for Stream {
+    fn drop(&mut self) {
+        let _ = self.sender.unbounded_send((self.id, Item::Reset));
+    }
+}
+
 impl fmt::Debug for Stream {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Stream {{ id: {}, state: {:?} }}", self.id, self.state)

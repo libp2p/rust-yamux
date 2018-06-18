@@ -127,15 +127,12 @@ where
     }
 
     fn on_item(&mut self, item: (StreamId, Item)) -> RawFrame {
-        let set_ack_flag = self.streams.get_mut(&item.0).map(|inbox| {
-            let prev = inbox.ack;
-            inbox.ack = false;
-            prev
-        }).unwrap_or(false);
+        let set_ack_flag = self.streams.get(&item.0).map(|inbox| inbox.ack).unwrap_or(false);
         match item.1 {
             Item::Data(body) => {
                 let mut frame = Frame::data(item.0, body);
                 if set_ack_flag {
+                    self.streams.get_mut(&item.0).map(|inbox| inbox.ack = false);
                     frame.header_mut().ack()
                 }
                 frame.into_raw()
@@ -143,11 +140,13 @@ where
             Item::WindowUpdate(n) => {
                 let mut frame = Frame::window_update(item.0, n);
                 if set_ack_flag {
+                    self.streams.get_mut(&item.0).map(|inbox| inbox.ack = false);
                     frame.header_mut().ack()
                 }
                 frame.into_raw()
             }
             Item::Reset => {
+                self.streams.remove(&item.0);
                 let mut header = Header::data(item.0, 0);
                 header.rst();
                 Frame::new(header).into_raw()
@@ -259,6 +258,7 @@ where
 
     fn on_reset(&mut self, id: StreamId) {
         self.deliver(id, Item::Reset);
+        self.streams.remove(&id);
     }
 
     fn on_finish(&mut self, id: StreamId) {
