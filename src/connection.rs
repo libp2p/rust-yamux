@@ -94,6 +94,14 @@ struct StreamHandle {
 }
 
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Delivery {
+    Despatched,
+    StreamNotFound,
+    ReceiverFull
+}
+
+
 struct Controller {
     sender: Ctrl,
     receiver: Fuse<mpsc::Receiver<Cmd>>
@@ -162,12 +170,12 @@ where
     }
 
     fn on_stream_item(&mut self, item: (stream::Id, Item)) -> RawFrame {
-        let set_ack_flag = self.streams.get(&item.0).map(|inbox| inbox.ack).unwrap_or(false);
+        let set_ack_flag = self.streams.get(&item.0).map(|stream| stream.ack).unwrap_or(false);
         match item.1 {
             Item::Data(body) => {
                 let mut frame = Frame::data(item.0, body);
                 if set_ack_flag {
-                    self.streams.get_mut(&item.0).map(|inbox| inbox.ack = false);
+                    self.streams.get_mut(&item.0).map(|stream| stream.ack = false);
                     frame.header_mut().ack()
                 }
                 frame.into_raw()
@@ -175,7 +183,7 @@ where
             Item::WindowUpdate(n) => {
                 let mut frame = Frame::window_update(item.0, n);
                 if set_ack_flag {
-                    self.streams.get_mut(&item.0).map(|inbox| inbox.ack = false);
+                    self.streams.get_mut(&item.0).map(|stream| stream.ack = false);
                     frame.header_mut().ack()
                 }
                 frame.into_raw()
@@ -211,7 +219,7 @@ where
                 return Err(Frame::go_away(ECODE_PROTO))
             }
             let credit = self.config.receive_window;
-            if body.len() >= credit as usize {
+            if body.len() > credit as usize {
                 warn!("initial data exceeds receive window");
                 return Err(Frame::go_away(ECODE_PROTO))
             }
@@ -221,20 +229,26 @@ where
             }
             let stream = self.new_stream(stream_id, true, credit);
             if is_finish {
-                assert!(self.deliver(stream_id, Item::Finish))
+                assert_eq!(self.deliver(stream_id, Item::Finish), Delivery::Despatched)
             }
             if !body.is_empty() {
-                assert!(self.deliver(stream_id, Item::Data(body)))
+                assert_eq!(self.deliver(stream_id, Item::Data(body)), Delivery::Despatched)
             }
             return Ok(Some(stream))
         }
-        if !self.deliver(stream_id, Item::Data(body)) {
-            return Ok(None)
+        match self.deliver(stream_id, Item::Data(body)) {
+            Delivery::Despatched => {
+                if is_finish {
+                    self.on_finish(stream_id)
+                }
+                Ok(None)
+            }
+            Delivery::StreamNotFound => Ok(None),
+            Delivery::ReceiverFull => {
+                warn!("data exceeds receive window of stream {}", stream_id);
+                Err(Frame::go_away(ECODE_PROTO))
+            }
         }
-        if is_finish {
-            self.on_finish(stream_id)
-        }
-        Ok(None)
     }
 
     fn on_window_update(&mut self, frame: &Frame<WindowUpdate>) -> Result<Option<Stream>, Frame<GoAway>> {
@@ -259,11 +273,11 @@ where
             }
             let stream = self.new_stream(stream_id, true, credit);
             if is_finish {
-                assert!(self.deliver(stream_id, Item::Finish))
+                assert_eq!(self.deliver(stream_id, Item::Finish), Delivery::Despatched)
             }
             return Ok(Some(stream))
         }
-        if !self.deliver(stream_id, Item::WindowUpdate(credit)) {
+        if self.deliver(stream_id, Item::WindowUpdate(credit)) == Delivery::StreamNotFound {
             return Ok(None)
         }
         if is_finish {
@@ -327,24 +341,29 @@ where
     fn new_stream(&mut self, id: stream::Id, ack: bool, recv_window: u32) -> Stream {
         let recv_win = Arc::new(Window::new(AtomicUsize::new(recv_window as usize)));
         let (stream_tx, stream_rx) = mpsc::unbounded();
-        let inbox = StreamHandle {
+        let stream = StreamHandle {
             recv_win: recv_win.clone(),
             sender: stream_tx,
             ack
         };
-        self.streams.insert(id, inbox);
+        self.streams.insert(id, stream);
         Stream::new(id, self.config.clone(), self.stream_tx.clone(), stream_rx.fuse(), recv_win)
     }
 
-    fn deliver(&mut self, id: stream::Id, item: Item) -> bool {
-        if let Some(ref inbox) = self.streams.get(&id) {
-            if inbox.sender.unbounded_send(item).is_ok() {
-                return true
+    fn deliver(&mut self, id: stream::Id, item: Item) -> Delivery {
+        if let Some(ref stream) = self.streams.get(&id) {
+            if let Item::Data(ref body) = item {
+                if body.len() > stream.recv_win.get() {
+                    return Delivery::ReceiverFull
+                }
+            }
+            if stream.sender.unbounded_send(item).is_ok() {
+                return Delivery::Despatched
             }
         }
         trace!("can not deliver; stream {} is gone", id);
         self.streams.remove(&id);
-        false
+        Delivery::StreamNotFound
     }
 
 

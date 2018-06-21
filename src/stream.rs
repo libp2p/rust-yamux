@@ -85,6 +85,10 @@ impl Window {
         }
     }
 
+    pub(crate) fn get(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
+    }
+
     pub(crate) fn set(&self, val: usize) {
         self.0.store(val, Ordering::SeqCst)
     }
