@@ -170,21 +170,24 @@ where
     }
 
     fn on_stream_item(&mut self, item: (stream::Id, Item)) -> RawFrame {
-        let set_ack_flag = self.streams.get(&item.0).map(|stream| stream.ack).unwrap_or(false);
         match item.1 {
             Item::Data(body) => {
                 let mut frame = Frame::data(item.0, body);
-                if set_ack_flag {
-                    self.streams.get_mut(&item.0).map(|stream| stream.ack = false);
-                    frame.header_mut().ack()
+                if let Some(stream) = self.streams.get_mut(&item.0) {
+                    if stream.ack {
+                        stream.ack = false;
+                        frame.header_mut().ack()
+                    }
                 }
                 frame.into_raw()
             }
             Item::WindowUpdate(n) => {
                 let mut frame = Frame::window_update(item.0, n);
-                if set_ack_flag {
-                    self.streams.get_mut(&item.0).map(|stream| stream.ack = false);
-                    frame.header_mut().ack()
+                if let Some(stream) = self.streams.get_mut(&item.0) {
+                    if stream.ack {
+                        stream.ack = false;
+                        frame.header_mut().ack()
+                    }
                 }
                 frame.into_raw()
             }
