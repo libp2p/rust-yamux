@@ -114,7 +114,7 @@ pub struct Connection<T> {
     mode: Mode,
     resource: Framed<T, FrameCodec>,
     config: Arc<Config>,
-    id_counter: usize,
+    id_counter: u32,
     streams: BTreeMap<stream::Id, StreamHandle>,
     controller: Controller,
     stream_rx: mpsc::UnboundedReceiver<(stream::Id, Item)>,
@@ -318,10 +318,10 @@ where
     }
 
     fn next_stream_id(&mut self) -> Result<stream::Id, ConnectionError> {
-        if self.id_counter >= u32::MAX as usize - 2 {
+        if self.id_counter > u32::MAX - 2 {
             return Err(ConnectionError::NoMoreStreamIds)
         }
-        let proposed = stream::Id::new(self.id_counter as u32);
+        let proposed = stream::Id::new(self.id_counter);
         self.id_counter += 2;
         match self.mode {
             Mode::Client => assert!(proposed.is_client()),
