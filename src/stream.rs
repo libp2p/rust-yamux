@@ -225,9 +225,8 @@ impl Stream {
                         if self.state == State::SendClosed {
                             self.state = State::Closed;
                             return Async::Ready(())
-                        } else {
-                            self.state = State::RecvClosed
                         }
+                        self.state = State::RecvClosed;
                         continue
                     }
                     Some(Item::Reset) => {
@@ -244,22 +243,36 @@ impl Stream {
             }
         }
     }
+
+    fn drain_buffer(&mut self, buf: &mut [u8]) -> usize {
+        if self.buffer.is_empty() {
+            return 0
+        }
+        let n = min(buf.len(), self.buffer.len());
+        (&mut buf[0..n]).copy_from_slice(&self.buffer.split_to(n));
+        n
+    }
 }
 
 impl io::Read for Stream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let k = self.drain_buffer(buf);
         if self.state == State::Closed || self.state == State::RecvClosed {
-            return Ok(0)
+            return Ok(k)
         }
-        if self.poll_receiver().is_ready() {
-            return Ok(0)
+        match self.poll_receiver() {
+            Async::NotReady => {
+                if k == 0 && self.buffer.is_empty() {
+                    return Err(io::Error::new(io::ErrorKind::WouldBlock, "not ready"))
+                }
+                let n = self.drain_buffer(&mut buf[k..]);
+                Ok(k + n)
+            }
+            Async::Ready(()) => {
+                let n = self.drain_buffer(&mut buf[k..]);
+                Ok(k + n)
+            }
         }
-        if self.buffer.is_empty() {
-            return Err(io::Error::new(io::ErrorKind::WouldBlock, "not ready"))
-        }
-        let n = min(buf.len(), self.buffer.len());
-        (&mut buf[0..n]).copy_from_slice(&self.buffer.split_to(n));
-        Ok(n)
     }
 }
 
