@@ -43,11 +43,11 @@ pub struct Len(pub u32);
 pub struct Flags(pub u16);
 
 impl Flags {
-    pub fn contains(&self, other: Flags) -> bool {
+    pub fn contains(self, other: Flags) -> bool {
         self.0 & other.0 == other.0
     }
 
-    pub fn and(&self, other: Flags) -> Flags {
+    pub fn and(self, other: Flags) -> Flags {
         Flags(self.0 | other.0)
     }
 }

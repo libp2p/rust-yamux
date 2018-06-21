@@ -34,19 +34,19 @@ impl Id {
         Id(id)
     }
 
-    pub fn is_server(&self) -> bool {
+    pub fn is_server(self) -> bool {
         self.0 % 2 == 0
     }
 
-    pub fn is_client(&self) -> bool {
+    pub fn is_client(self) -> bool {
         !self.is_server()
     }
 
-    pub fn is_session(&self) -> bool {
+    pub fn is_session(self) -> bool {
         self.0 == 0
     }
 
-    pub fn as_u32(&self) -> u32 {
+    pub fn as_u32(self) -> u32 {
         self.0
     }
 }
