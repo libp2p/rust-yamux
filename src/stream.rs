@@ -59,7 +59,7 @@ impl fmt::Display for Id {
 
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum State {
+pub enum State {
     Open,
     SendClosed,
     RecvClosed,
@@ -148,6 +148,10 @@ impl Stream {
         self.id
     }
 
+    pub fn state(&self) -> State {
+        self.state
+    }
+
     pub fn reset(mut self) -> Result<(), StreamError> {
         if self.state == State::Closed || self.state == State::SendClosed {
             return Err(StreamError::StreamClosed(self.id))
@@ -171,7 +175,7 @@ impl Stream {
     fn send_item(&mut self, item: Item) -> Result<(), StreamError> {
         if self.sender.unbounded_send((self.id, item)).is_err() {
             self.state = State::Closed;
-            return Err(StreamError::ConnectionClosed)
+            return Err(StreamError::StreamClosed(self.id))
         }
         Ok(())
     }
