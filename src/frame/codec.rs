@@ -40,13 +40,6 @@ impl FrameCodec {
             header: None
         }
     }
-
-    fn get_header(&mut self, src: &mut BytesMut) -> Result<Option<RawHeader>, DecodeError> {
-        if let Some(header) = self.header.take() {
-            return Ok(Some(header))
-        }
-        self.header_codec.decode(src)
-    }
 }
 
 impl Encoder for FrameCodec {
@@ -65,7 +58,9 @@ impl Decoder for FrameCodec {
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         let header =
-            if let Some(header) = self.get_header(src)? {
+            if let Some(header) = self.header.take() {
+                header
+            } else if let Some(header) = self.header_codec.decode(src)? {
                 header
             } else {
                 return Ok(None)
