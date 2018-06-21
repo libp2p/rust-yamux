@@ -193,7 +193,7 @@ impl Stream {
                 Ok(Async::Ready(item)) => match item {
                     Some(Item::Data(body)) => {
                         trace!("[{}] received data: {:?}", self.id, body);
-                        let body_len = body.bytes().len();
+                        let body_len = body.len();
                         self.buffer.extend(body.into_bytes());
                         let remaining = self.recv_window.decrement(body_len);
                         if remaining == 0 {
@@ -209,7 +209,7 @@ impl Stream {
                     }
                     Some(Item::WindowUpdate(n)) => {
                         trace!("[{}] received window update: {}", self.id, n);
-                        self.send_window = self.send_window.checked_add(n).unwrap_or(u32::MAX);
+                        self.send_window = self.send_window.saturating_add(n);
                         if let Some(task) = self.writer_task.take() {
                             trace!("[{}] notifying writer task", self.id);
                             task.notify()
@@ -233,7 +233,7 @@ impl Stream {
                     }
                     None => {
                         trace!("[{}] receiver returned None", self.id);
-                        self.state = State::Closed;
+                        self.state = State::RecvClosed;
                         return Async::Ready(())
                     }
                 }

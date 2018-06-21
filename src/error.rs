@@ -82,3 +82,17 @@ quick_error! {
         __Nonexhaustive
     }
 }
+
+quick_error! {
+    #[derive(Debug)]
+    pub enum CtrlError {
+        InitialBodyTooLarge(limit: u32) {
+            display("body size too large for new stream; limit is {} bytes", limit)
+        }
+        ConnectionClosed {
+            display("connection is closed")
+        }
+        #[doc(hidden)]
+        __Nonexhaustive
+    }
+}

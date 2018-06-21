@@ -17,7 +17,7 @@
 // WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-use error::ConnectionError;
+use error::{ConnectionError, CtrlError};
 use frame::{
     codec::FrameCodec,
     header::{ACK, ECODE_PROTO, FIN, Header, RST, SYN, Type},
@@ -29,7 +29,13 @@ use frame::{
     RawFrame,
     WindowUpdate
 };
-use futures::{prelude::*, self, stream::{Fuse, Stream as FuturesStream}, sync::{mpsc, oneshot}};
+use futures::{
+    future::{self, Either},
+    prelude::*,
+    self,
+    stream::{Fuse, Stream as FuturesStream},
+    sync::{mpsc, oneshot}
+};
 use std::{collections::BTreeMap, sync::{atomic::AtomicUsize, Arc}, u32, usize};
 use stream::{self, Item, Stream, Window};
 use tokio_codec::Framed;
@@ -54,21 +60,27 @@ enum Cmd {
 /// `Ctrl` allows controlling some connection aspects, e.g. opening new streams.
 #[derive(Clone)]
 pub struct Ctrl {
+    config: Arc<Config>,
     sender: mpsc::Sender<Cmd>
 }
 
 impl Ctrl {
-    fn new(sender: mpsc::Sender<Cmd>) -> Ctrl {
-        Ctrl { sender }
+    fn new(config: Arc<Config>, sender: mpsc::Sender<Cmd>) -> Ctrl {
+        Ctrl { config, sender }
     }
 
     /// Open a new stream optionally sending some initial data to the remote endpoint.
-    pub fn open_stream(&self, data: Option<Body>) -> impl Future<Item=Stream, Error=ConnectionError> {
+    pub fn open_stream(&self, data: Option<Body>) -> impl Future<Item=Stream, Error=CtrlError> {
+        let max_len = self.config.receive_window;
+        if data.as_ref().map(|d| d.len() > max_len as usize).unwrap_or(false) {
+            return Either::A(future::err(CtrlError::InitialBodyTooLarge(max_len)))
+        }
         let (tx, rx) = oneshot::channel();
-        self.sender.clone()
+        let future = self.sender.clone()
             .send(Cmd::OpenStream(data, tx))
-            .map_err(|_| ConnectionError::Closed)
-            .and_then(move |_| rx.map_err(|_| ConnectionError::Closed))
+            .map_err(|_| CtrlError::ConnectionClosed)
+            .and_then(move |_| rx.map_err(|_| CtrlError::ConnectionClosed));
+        Either::B(future)
     }
 }
 
@@ -111,7 +123,10 @@ where
         debug!("new connection");
         let controller = {
             let (tx, rx) = mpsc::channel(1024);
-            Controller { sender: Ctrl::new(tx), receiver: rx.fuse() }
+            Controller {
+                sender: Ctrl::new(config.clone(), tx),
+                receiver: rx.fuse()
+            }
         };
         let (stream_tx, stream_rx) = mpsc::unbounded();
         Connection {
@@ -140,7 +155,7 @@ where
         trace!("open stream");
         let id = self.next_stream_id()?;
         let credit = self.config.receive_window;
-        let stream = self.new_stream(id, credit);
+        let stream = self.new_stream(id, false, credit);
         let mut frame = Frame::data(id, data.unwrap_or_else(Body::empty));
         frame.header_mut().syn();
         Ok((stream, frame))
@@ -196,7 +211,7 @@ where
                 return Err(Frame::go_away(ECODE_PROTO))
             }
             let credit = self.config.receive_window;
-            if body.bytes().len() >= credit as usize {
+            if body.len() >= credit as usize {
                 warn!("initial data exceeds receive window");
                 return Err(Frame::go_away(ECODE_PROTO))
             }
@@ -204,11 +219,11 @@ where
                 warn!("stream {} already exists", stream_id);
                 return Err(Frame::go_away(ECODE_PROTO))
             }
-            let stream = self.new_stream(stream_id, credit);
+            let stream = self.new_stream(stream_id, true, credit);
             if is_finish {
                 assert!(self.deliver(stream_id, Item::Finish))
             }
-            if !body.bytes().is_empty() {
+            if !body.is_empty() {
                 assert!(self.deliver(stream_id, Item::Data(body)))
             }
             return Ok(Some(stream))
@@ -242,7 +257,7 @@ where
                 warn!("stream {} already exists", stream_id);
                 return Err(Frame::go_away(ECODE_PROTO))
             }
-            let stream = self.new_stream(stream_id, credit);
+            let stream = self.new_stream(stream_id, true, credit);
             if is_finish {
                 assert!(self.deliver(stream_id, Item::Finish))
             }
@@ -309,13 +324,13 @@ where
         }
     }
 
-    fn new_stream(&mut self, id: stream::Id, recv_window: u32) -> Stream {
+    fn new_stream(&mut self, id: stream::Id, ack: bool, recv_window: u32) -> Stream {
         let recv_win = Arc::new(Window::new(AtomicUsize::new(recv_window as usize)));
         let (stream_tx, stream_rx) = mpsc::unbounded();
         let inbox = StreamHandle {
             recv_win: recv_win.clone(),
             sender: stream_tx,
-            ack: true
+            ack
         };
         self.streams.insert(id, inbox);
         Stream::new(id, self.config.clone(), self.stream_tx.clone(), stream_rx.fuse(), recv_win)
@@ -344,6 +359,7 @@ where
         match self.resource.start_send(frame) {
             Ok(AsyncSink::Ready) => Ok(Async::Ready(())),
             Ok(AsyncSink::NotReady(frame)) => {
+                assert!(self.pending.is_none());
                 self.pending = Some(frame);
                 Ok(Async::NotReady)
             }
