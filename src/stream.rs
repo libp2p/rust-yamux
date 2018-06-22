@@ -168,17 +168,31 @@ impl Stream {
             return Err(StreamError::StreamClosed(self.id))
         }
         self.send_item(Item::Finish)?;
-        if self.state == State::RecvClosed {
-            self.state = State::Closed
-        } else {
-            self.state = State::SendClosed
-        }
+        self.update_state(State::SendClosed);
         Ok(())
+    }
+
+    fn update_state(&mut self, next: State) {
+        use self::State::*;
+        let current = self.state;
+        match (current, next) {
+            (Closed,              _) => {}
+            (Open,                _) => self.state = next,
+            (RecvClosed,     Closed) => self.state = Closed,
+            (RecvClosed,       Open) => {}
+            (RecvClosed, RecvClosed) => {}
+            (RecvClosed, SendClosed) => self.state = Closed,
+            (SendClosed,     Closed) => self.state = Closed,
+            (SendClosed,       Open) => {}
+            (SendClosed, RecvClosed) => self.state = Closed,
+            (SendClosed, SendClosed) => {}
+        }
+        trace!("[{}] {:?} -> {:?}", self.id, current, next);
     }
 
     fn send_item(&mut self, item: Item) -> Result<(), StreamError> {
         if self.sender.unbounded_send((self.id, item)).is_err() {
-            self.state = State::Closed;
+            self.update_state(State::SendClosed);
             return Err(StreamError::StreamClosed(self.id))
         }
         Ok(())
@@ -188,7 +202,7 @@ impl Stream {
         loop {
             match self.receiver.poll() {
                 Err(()) => {
-                    self.state = State::RecvClosed;
+                    self.update_state(State::RecvClosed);
                     return Async::Ready(())
                 }
                 Ok(Async::NotReady) => {
@@ -203,9 +217,8 @@ impl Stream {
                         if remaining == 0 {
                             trace!("[{}] received window exhausted", self.id);
                             let item = Item::WindowUpdate(self.config.receive_window);
-                            if let Err(e) = self.send_item(item) {
-                                error!("[{}] failed to send window update: {}", self.id, e);
-                                self.state = State::Closed;
+                            if self.send_item(item).is_err() {
+                                error!("[{}] failed to send window update", self.id);
                             }
                             self.recv_window.set(self.config.receive_window as usize);
                         }
@@ -222,21 +235,17 @@ impl Stream {
                     }
                     Some(Item::Finish) => {
                         trace!("[{}] received finish", self.id);
-                        if self.state == State::SendClosed {
-                            self.state = State::Closed;
-                            return Async::Ready(())
-                        }
-                        self.state = State::RecvClosed;
+                        self.update_state(State::SendClosed);
                         continue
                     }
                     Some(Item::Reset) => {
                         trace!("[{}] received reset", self.id);
-                        self.state = State::Closed;
+                        self.update_state(State::Closed);
                         return Async::Ready(())
                     }
                     None => {
                         trace!("[{}] receiver returned None", self.id);
-                        self.state = State::RecvClosed;
+                        self.update_state(State::RecvClosed);
                         return Async::Ready(())
                     }
                 }
@@ -279,7 +288,7 @@ impl AsyncRead for Stream { }
 impl io::Write for Stream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if self.state == State::Closed || self.state == State::SendClosed {
-            return Err(io::Error::new(io::ErrorKind::Other, "connection closed"))
+            return Err(io::Error::new(io::ErrorKind::Other, "stream closed"))
         }
 
         self.poll_receiver();
@@ -300,7 +309,7 @@ impl io::Write for Stream {
 
         trace!("[{}] write: {:?}", self.id, body);
         if self.send_item(Item::Data(body)).is_err() {
-            Err(io::Error::new(io::ErrorKind::Other, "connection closed"))
+            Err(io::Error::new(io::ErrorKind::Other, "stream closed"))
         } else {
             Ok(len)
         }
