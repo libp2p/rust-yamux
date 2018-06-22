@@ -63,7 +63,24 @@ pub enum State {
     Open,
     SendClosed,
     RecvClosed,
-    Closed
+    Closed(View),
+}
+
+impl State {
+    pub fn is_closed(self) -> bool {
+        if let State::Closed(_) = self {
+            true
+        } else {
+            false
+        }
+    }
+}
+
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum View {
+    Local,
+    Remote
 }
 
 
@@ -122,6 +139,10 @@ pub struct Stream {
 
 impl Drop for Stream {
     fn drop(&mut self) {
+        if let State::Closed(View::Remote) = self.state {
+            return () // remote has already reset the stream
+        }
+        trace!("[{}] send reset on drop", self.id);
         let _ = self.sender.unbounded_send((self.id, Item::Reset));
     }
 }
@@ -157,14 +178,15 @@ impl Stream {
     }
 
     pub fn reset(mut self) -> Result<(), StreamError> {
-        if self.state == State::Closed || self.state == State::SendClosed {
+        if self.state.is_closed() || self.state == State::SendClosed {
             return Err(StreamError::StreamClosed(self.id))
         }
-        self.send_item(Item::Reset)
+        self.update_state(State::Closed(View::Local));
+        Ok(()) // `Drop` impl will send `Item::Reset` if necessary.
     }
 
     pub fn finish(&mut self) -> Result<(), StreamError> {
-        if self.state == State::Closed || self.state == State::SendClosed {
+        if self.state.is_closed() || self.state == State::SendClosed {
             return Err(StreamError::StreamClosed(self.id))
         }
         self.send_item(Item::Finish)?;
@@ -174,23 +196,30 @@ impl Stream {
 
     fn update_state(&mut self, next: State) {
         use self::State::*;
+        use self::View::*;
+
         let current = self.state;
+
         match (current, next) {
-            (Closed,              _) => {}
+            (Closed(Local), Closed(Remote)) => self.state = next,
+            (Closed(Local),       _) => {}
+            (Closed(Remote),      _) => {}
             (Open,                _) => self.state = next,
-            (RecvClosed,     Closed) => self.state = Closed,
+            (RecvClosed,  Closed(_)) => self.state = next,
             (RecvClosed,       Open) => {}
             (RecvClosed, RecvClosed) => {}
-            (RecvClosed, SendClosed) => self.state = Closed,
-            (SendClosed,     Closed) => self.state = Closed,
+            (RecvClosed, SendClosed) => self.state = Closed(Local),
+            (SendClosed,  Closed(_)) => self.state = next,
             (SendClosed,       Open) => {}
-            (SendClosed, RecvClosed) => self.state = Closed,
+            (SendClosed, RecvClosed) => self.state = Closed(Local),
             (SendClosed, SendClosed) => {}
         }
+
         trace!("[{}] {:?} -> {:?}", self.id, current, next);
     }
 
     fn send_item(&mut self, item: Item) -> Result<(), StreamError> {
+        trace!("[{}] send item: {:?}", self.id, item);
         if self.sender.unbounded_send((self.id, item)).is_err() {
             self.update_state(State::SendClosed);
             return Err(StreamError::StreamClosed(self.id))
@@ -235,12 +264,12 @@ impl Stream {
                     }
                     Some(Item::Finish) => {
                         trace!("[{}] received finish", self.id);
-                        self.update_state(State::SendClosed);
+                        self.update_state(State::RecvClosed);
                         continue
                     }
                     Some(Item::Reset) => {
                         trace!("[{}] received reset", self.id);
-                        self.update_state(State::Closed);
+                        self.update_state(State::Closed(View::Remote));
                         return Async::Ready(())
                     }
                     None => {
@@ -266,7 +295,7 @@ impl Stream {
 impl io::Read for Stream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let k = self.drain_buffer(buf);
-        if self.state == State::Closed || self.state == State::RecvClosed {
+        if self.state.is_closed() || self.state == State::RecvClosed {
             return Ok(k)
         }
         match self.poll_receiver() {
@@ -287,13 +316,13 @@ impl AsyncRead for Stream { }
 
 impl io::Write for Stream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if self.state == State::Closed || self.state == State::SendClosed {
+        if self.state.is_closed() || self.state == State::SendClosed {
             return Err(io::Error::new(io::ErrorKind::Other, "stream closed"))
         }
 
         self.poll_receiver();
 
-        if self.state == State::Closed {
+        if self.state.is_closed() {
             return Ok(0)
         }
 
