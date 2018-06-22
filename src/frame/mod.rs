@@ -120,7 +120,7 @@ impl Body {
     }
 
     pub fn from_bytes(b: Bytes) -> Option<Body> {
-        if b.len() < u32::MAX as usize {
+        if b.len() <= u32::MAX as usize {
             Some(Body(b))
         } else {
             None

@@ -296,9 +296,7 @@ impl io::Write for Stream {
 
         let len = min(buf.len(), self.send_window as usize);
         self.send_window -= len as u32;
-        let body = Body::from_bytes((&buf[0..len]).into()).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, StreamError::BodyTooLarge)
-        })?;
+        let body = Body::from_bytes((&buf[0..len]).into()).expect("buf len <= max body len");
 
         trace!("[{}] write: {:?}", self.id, body);
         if self.send_item(Item::Data(body)).is_err() {
