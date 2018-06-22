@@ -117,7 +117,7 @@ pub struct Stream {
     buffer: BytesMut,
     sender: Sender,
     receiver: Receiver,
-    writer_task: Option<Task>
+    writer_tasks: Vec<Task>
 }
 
 impl Drop for Stream {
@@ -144,7 +144,7 @@ impl Stream {
             buffer: BytesMut::new(),
             sender: tx,
             receiver: rx,
-            writer_task: None
+            writer_tasks: Vec::new()
         }
     }
 
@@ -214,7 +214,7 @@ impl Stream {
                     Some(Item::WindowUpdate(n)) => {
                         trace!("[{}] received window update: {}", self.id, n);
                         self.send_window = self.send_window.saturating_add(n);
-                        if let Some(task) = self.writer_task.take() {
+                        for task in self.writer_tasks.drain(..) {
                             trace!("[{}] notifying writer task", self.id);
                             task.notify()
                         }
@@ -265,12 +265,10 @@ impl io::Read for Stream {
                 if k == 0 && self.buffer.is_empty() {
                     return Err(io::Error::new(io::ErrorKind::WouldBlock, "not ready"))
                 }
-                let n = self.drain_buffer(&mut buf[k..]);
-                Ok(k + n)
+                Ok(k + self.drain_buffer(&mut buf[k..]))
             }
             Async::Ready(()) => {
-                let n = self.drain_buffer(&mut buf[k..]);
-                Ok(k + n)
+                Ok(k + self.drain_buffer(&mut buf[k..]))
             }
         }
     }
@@ -291,8 +289,8 @@ impl io::Write for Stream {
         }
 
         if self.send_window == 0 {
-            trace!("[{}] write: send window exhausted", self.id);
-            self.writer_task = Some(task::current());
+            trace!("[{}] write: window empty ({} tasks waiting)", self.id, self.writer_tasks.len());
+            self.writer_tasks.push(task::current());
             return Err(io::Error::new(io::ErrorKind::WouldBlock, "window empty"))
         }
 
