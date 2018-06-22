@@ -1,0 +1,19 @@
+[package]
+name = "yamux"
+version = "0.1.0"
+authors = ["Parity Technologies <admin@parity.io>"]
+license = "MIT"
+
+[dependencies]
+bytes = "0.4"
+futures = "0.1"
+log = "0.4"
+quick-error = "0.1"
+tokio-codec = "0.1"
+tokio-io = "0.1"
+
+[dev-dependencies]
+env_logger = "0.5"
+quickcheck = "0.6"
+tokio = "0.1"
+tokio-codec = "0.1"
