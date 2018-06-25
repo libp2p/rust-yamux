@@ -22,6 +22,7 @@ extern crate bytes;
 extern crate futures;
 #[macro_use]
 extern crate log;
+extern crate parking_lot;
 #[cfg(test)]
 extern crate quickcheck;
 #[macro_use]
@@ -30,27 +31,51 @@ extern crate tokio_io;
 extern crate tokio_codec;
 
 mod connection;
-
+mod error;
 #[allow(dead_code)]
 mod frame;
+mod stream;
 
-pub mod error;
-pub mod stream;
+pub use connection::{Connection, Mode, StreamHandle};
+pub use error::{DecodeError, ConnectionError};
 
-pub use connection::{Connection, Ctrl, Mode};
-pub use frame::Body;
-pub use stream::Stream;
 
-#[derive(Debug)]
+pub(crate) const DEFAULT_CREDIT: u32 = 256 * 1024; // as per yamux specification
+
+
+#[derive(Debug, Clone)]
 pub struct Config {
-    pub receive_window: u32
+    pub(crate) receive_window: u32,
+    pub(crate) max_buffer_size: usize,
+    pub(crate) max_num_streams: usize
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
-            receive_window: 256 * 1024
+            receive_window: DEFAULT_CREDIT,
+            max_buffer_size: 1024 * 1024,
+            max_num_streams: 8192
         }
+    }
+}
+
+impl Config {
+    #[must_use]
+    pub fn set_receive_window(&mut self, n: u32) -> bool {
+        if n >= DEFAULT_CREDIT {
+            self.receive_window = n;
+            return true
+        }
+        false
+    }
+
+    pub fn set_max_buffer_size(&mut self, n: usize) {
+        self.max_buffer_size = n
+    }
+
+    pub fn set_max_num_streams(&mut self, n: usize) {
+        self.max_num_streams = n
     }
 }
 

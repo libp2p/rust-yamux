@@ -29,7 +29,7 @@ pub mod header;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RawFrame {
     pub header: RawHeader,
-    pub body: Body
+    pub body: Bytes
 }
 
 impl RawFrame {
@@ -39,16 +39,20 @@ impl RawFrame {
 }
 
 
+#[derive(Debug)]
 pub enum Data {}
+#[derive(Debug)]
 pub enum WindowUpdate {}
+#[derive(Debug)]
 pub enum Ping {}
+#[derive(Debug)]
 pub enum GoAway {}
 
 
 #[derive(Clone, Debug)]
 pub struct Frame<T> {
     header: Header<T>,
-    body: Body
+    body: Bytes
 }
 
 impl<T> Frame<T> {
@@ -60,7 +64,7 @@ impl<T> Frame<T> {
     }
 
     pub fn new(header: Header<T>) -> Frame<T> {
-        Frame { header, body: Body::empty() }
+        Frame { header, body: Bytes::new() }
     }
 
     pub fn header(&self) -> &Header<T> {
@@ -80,14 +84,14 @@ impl<T> Frame<T> {
 }
 
 impl Frame<Data> {
-    pub fn data(id: stream::Id, b: Body) -> Self {
+    pub fn data(id: stream::Id, b: Bytes) -> Self {
         Frame {
-            header: Header::data(id, b.0.len() as u32),
+            header: Header::data(id, b.len() as u32),
             body: b
         }
     }
 
-    pub fn body(&self) -> &Body {
+    pub fn body(&self) -> &Bytes {
         &self.body
     }
 }
@@ -96,7 +100,7 @@ impl Frame<WindowUpdate> {
     pub fn window_update(id: stream::Id, n: u32) -> Self {
         Frame {
             header: Header::window_update(id, n),
-            body: Body::empty()
+            body: Bytes::new()
         }
     }
 }
@@ -105,42 +109,8 @@ impl Frame<GoAway> {
     pub fn go_away(error: u32) -> Self {
         Frame {
             header: Header::go_away(error),
-            body: Body::empty()
+            body: Bytes::new()
         }
-    }
-}
-
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Body(Bytes);
-
-impl Body {
-    pub fn empty() -> Body {
-        Body(Bytes::new())
-    }
-
-    pub fn from_bytes(b: Bytes) -> Option<Body> {
-        if b.len() <= u32::MAX as usize {
-            Some(Body(b))
-        } else {
-            None
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn bytes(&self) -> &Bytes {
-        &self.0
-    }
-
-    pub fn into_bytes(self) -> Bytes {
-        self.0
     }
 }
 
