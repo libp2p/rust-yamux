@@ -64,7 +64,6 @@ where
 
     pub fn open_stream(&self) -> Result<Option<StreamHandle<T>>, ConnectionError> {
         let mut connection = self.inner.lock();
-        trace!("{:?}: open_stream", connection.mode);
         if connection.is_dead {
             return Ok(None)
         }
@@ -79,7 +78,7 @@ where
         let stream = StreamEntry::new(connection.config.receive_window, DEFAULT_CREDIT);
         let buffer = stream.buffer.clone();
         connection.streams.insert(id, stream);
-        trace!("{:?}: connection has {} stream(s)", connection.mode, connection.streams.len());
+        trace!("outgoing stream {}: {:?}", id, *connection);
         Ok(Some(StreamHandle::new(id, buffer, self.clone())))
     }
 }
@@ -93,13 +92,13 @@ where
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
         let mut connection = self.inner.lock();
-        trace!("{:?}: poll", connection.mode);
         connection.process_incoming()?;
         if connection.is_dead {
             return Ok(Async::Ready(None))
         }
         if let Some(id) = connection.incoming.pop_front() {
             if let Some(stream) = connection.streams.get(&id) {
+                debug!("incoming stream {}: {:?}", id, *connection);
                 let s = StreamHandle::new(id, stream.buffer.clone(), self.clone());
                 return Ok(Async::Ready(Some(s)))
             }
@@ -125,12 +124,14 @@ struct Inner<T> {
 impl<T> fmt::Debug for Inner<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Connection {{ \
+                mode: {:?}, \
                 streams: {}, \
                 incoming: {}, \
                 pending: {}, \
                 next_id: {}, \
                 tasks: {} \
             }}",
+            self.mode,
             self.streams.len(),
             self.incoming.len(),
             self.pending.len(),
@@ -192,9 +193,8 @@ where
     }
 
     fn flush_pending(&mut self) -> Poll<(), ConnectionError> {
-        trace!("{:?}: flush_pending: {:?}", self.mode, self);
         while let Some(frame) = self.pending.pop_front() {
-            trace!("{:?}: send pending: {:?}", self.mode, frame);
+            trace!("{:?}: send: {:?}", self.mode, frame.header);
             if let AsyncSink::NotReady(frame) = self.resource.start_send(frame)? {
                 self.pending.push_front(frame);
                 try_ready!(self.resource.poll_complete())
@@ -206,7 +206,6 @@ where
     }
 
     fn process_incoming(&mut self) -> Poll<(), ConnectionError> {
-        trace!("{:?}: process_incoming: {:?}", self.mode, self);
         if self.is_dead {
             return Ok(Async::Ready(()))
         }
@@ -216,7 +215,7 @@ where
             }
             match try_ready!(self.resource.poll()) {
                 Some(frame) => {
-                    trace!("{:?}: recv: {:?}", self.mode, frame);
+                    trace!("{:?}: recv: {:?}", self.mode, frame.header);
                     let response = match frame.dyn_type() {
                         Type::Data =>
                             self.on_data(&Frame::assert(frame))?.map(Frame::into_raw),
@@ -245,7 +244,6 @@ where
     }
 
     fn on_data(&mut self, frame: &Frame<Data>) -> Result<Option<Frame<GoAway>>, ConnectionError> {
-        trace!("{:?}: on_data: {:?}", self.mode, self);
         let stream_id = frame.header().id();
 
         if frame.header().flags().contains(RST) { // stream reset
@@ -326,7 +324,6 @@ where
     }
 
     fn on_window_update(&mut self, frame: &Frame<WindowUpdate>) -> Result<Option<Frame<GoAway>>, ConnectionError> {
-        trace!("{:?}: on_window_update: {:?}", self.mode, self);
         let stream_id = frame.header().id();
 
         if frame.header().flags().contains(RST) { // stream reset
@@ -383,15 +380,14 @@ where
     }
 
     fn on_reset(&mut self, id: stream::Id) {
-        trace!("{:?}: on_reset: {:?}", self.mode, self);
         if let Some(mut stream) = self.streams.remove(&id) {
             stream.update_state(State::Closed(View::Remote))
         }
     }
 
     fn reset(&mut self, id: stream::Id) {
-        trace!("{:?}: reset: stream {}, {:?}", self.mode, id, self);
         if let Some(stream) = self.streams.remove(&id) {
+            trace!("resetting stream {}: {:?}", id, self);
             let state = stream.state();
             if let State::Closed(View::Remote) = state {
                 return () // remote has already reset the stream
