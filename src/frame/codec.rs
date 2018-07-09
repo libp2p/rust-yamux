@@ -17,9 +17,9 @@
 // WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-use bytes::{BigEndian, BufMut, ByteOrder, BytesMut};
+use bytes::{BigEndian, BufMut, ByteOrder, Bytes, BytesMut};
 use error::DecodeError;
-use frame::{header::{Flags, Len, RawHeader, Type, Version}, Body, RawFrame};
+use frame::{header::{Flags, Len, RawHeader, Type, Version}, RawFrame};
 use std::io;
 use stream;
 use tokio_codec::{BytesCodec, Decoder, Encoder};
@@ -48,7 +48,7 @@ impl Encoder for FrameCodec {
 
     fn encode(&mut self, frame: Self::Item, bytes: &mut BytesMut) -> Result<(), Self::Error> {
         self.header_codec.encode(frame.header, bytes)?;
-        self.body_codec.encode(frame.body.0, bytes)
+        self.body_codec.encode(frame.body, bytes)
     }
 }
 
@@ -66,7 +66,7 @@ impl Decoder for FrameCodec {
                 return Ok(None)
             };
         if header.typ != Type::Data || header.length.0 == 0 {
-            return Ok(Some(RawFrame { header, body: Body::empty() }))
+            return Ok(Some(RawFrame { header, body: Bytes::new() }))
         }
         let len = header.length.0 as usize;
         if src.len() < len {
@@ -74,7 +74,7 @@ impl Decoder for FrameCodec {
             return Ok(None)
         }
         if let Some(b) = self.body_codec.decode(&mut src.split_to(len))? {
-            Ok(Some(RawFrame { header, body: Body(b.freeze()) }))
+            Ok(Some(RawFrame { header, body: b.freeze() }))
         } else {
             self.header = Some(header);
             Ok(None)
@@ -154,10 +154,9 @@ mod tests {
             };
             let body =
                 if ty == Type::Data {
-                    let bytes = Bytes::from(vec![0; len as usize]);
-                    Body::from_bytes(bytes).unwrap()
+                    Bytes::from(vec![0; len as usize])
                 } else {
-                    Body::empty()
+                    Bytes::new()
                 };
             RawFrame { header, body }
         }
@@ -166,7 +165,7 @@ mod tests {
     #[test]
     fn frame_identity() {
         fn property(f: RawFrame) -> bool {
-            let mut buf = BytesMut::with_capacity(12 + f.body.bytes().len());
+            let mut buf = BytesMut::with_capacity(12 + f.body.len());
             let mut codec = FrameCodec::new();
             if codec.encode(f.clone(), &mut buf).is_err() {
                 return false

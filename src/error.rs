@@ -37,25 +37,6 @@ quick_error! {
     }
 }
 
-
-quick_error! {
-    #[derive(Debug)]
-    pub enum StreamError {
-        StreamClosed(id: stream::Id) {
-            display("stream {} is closed", id)
-        }
-        ConnectionClosed {
-            display("connection of this stream is closed")
-        }
-        BodyTooLarge {
-            display("body size exceeds allowed maximum")
-        }
-        #[doc(hidden)]
-        __Nonexhaustive
-    }
-}
-
-
 quick_error! {
     #[derive(Debug)]
     pub enum ConnectionError {
@@ -69,30 +50,20 @@ quick_error! {
             cause(e)
             from()
         }
-        Protocol(error_code: u32) {
-            display("protocol error {}", error_code)
-        }
         NoMoreStreamIds {
             display("number of stream ids has been exhausted")
         }
         Closed {
             display("connection is closed")
         }
+        StreamNotFound(id: stream::Id) {
+            display("stream {} not found", id)
+        }
+        TooManyStreams {
+            display("maximum number of streams exhausted")
+        }
         #[doc(hidden)]
         __Nonexhaustive
     }
 }
 
-quick_error! {
-    #[derive(Debug)]
-    pub enum CtrlError {
-        InitialBodyTooLarge(limit: u32) {
-            display("body size too large for new stream; limit is {} bytes", limit)
-        }
-        ConnectionClosed {
-            display("connection is closed")
-        }
-        #[doc(hidden)]
-        __Nonexhaustive
-    }
-}
