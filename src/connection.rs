@@ -32,7 +32,7 @@ use frame::{
 use futures::{prelude::*, stream::{Fuse, Stream}, task::{self, Task}};
 use parking_lot::Mutex;
 use std::{cmp::min, collections::{BTreeMap, VecDeque}, fmt, io, sync::Arc, u32, usize};
-use stream::{self, State, StreamEntry, View};
+use stream::{self, State, StreamEntry};
 use tokio_codec::Framed;
 use tokio_io::{AsyncRead, AsyncWrite};
 use {Config, DEFAULT_CREDIT};
@@ -103,7 +103,6 @@ where
                 return Ok(Async::Ready(Some(s)))
             }
         }
-        connection.tasks.push(task::current());
         Ok(Async::NotReady)
     }
 }
@@ -163,11 +162,8 @@ where
     }
 
     fn next_stream_id(&mut self) -> Result<stream::Id, ConnectionError> {
-        if self.next_id > u32::MAX - 2 {
-            return Err(ConnectionError::NoMoreStreamIds)
-        }
         let proposed = stream::Id::new(self.next_id);
-        self.next_id += 2;
+        self.next_id.checked_add(2).ok_or(ConnectionError::NoMoreStreamIds)?;
         match self.mode {
             Mode::Client => assert!(proposed.is_client()),
             Mode::Server => assert!(proposed.is_server())
@@ -186,22 +182,16 @@ where
         }
     }
 
-    fn wake_tasks(&mut self) {
-        for task in self.tasks.drain(..) {
-            task.notify()
-        }
-    }
-
     fn flush_pending(&mut self) -> Poll<(), ConnectionError> {
+        try_ready!(self.resource.poll_complete());
         while let Some(frame) = self.pending.pop_front() {
             trace!("{:?}: send: {:?}", self.mode, frame.header);
             if let AsyncSink::NotReady(frame) = self.resource.start_send(frame)? {
                 self.pending.push_front(frame);
-                try_ready!(self.resource.poll_complete())
+                return Ok(Async::NotReady)
             }
         }
         try_ready!(self.resource.poll_complete());
-        self.wake_tasks();
         Ok(Async::Ready(()))
     }
 
@@ -211,10 +201,13 @@ where
         }
         loop {
             if !self.pending.is_empty() {
-                try_ready!(self.flush_pending())
+                if self.flush_pending()?.is_not_ready() {
+                    self.tasks.push(task::current());
+                    return Ok(Async::NotReady)
+                }
             }
-            match try_ready!(self.resource.poll()) {
-                Some(frame) => {
+            match self.resource.poll()? {
+                Async::Ready(Some(frame)) => {
                     trace!("{:?}: recv: {:?}", self.mode, frame.header);
                     let response = match frame.dyn_type() {
                         Type::Data =>
@@ -231,15 +224,20 @@ where
                     if let Some(frame) = response {
                         self.pending.push_back(frame)
                     }
+                    for task in self.tasks.drain(..) {
+                        task.notify()
+                    }
                 }
-                None => {
+                Async::Ready(None) => {
                     trace!("{:?}: eof: {:?}", self.mode, self);
                     self.is_dead = true;
-                    self.wake_tasks();
                     return Ok(Async::Ready(()))
                 }
+                Async::NotReady => {
+                    self.tasks.push(task::current());
+                    return Ok(Async::NotReady)
+                }
             }
-            self.wake_tasks()
         }
     }
 
@@ -247,7 +245,7 @@ where
         let stream_id = frame.header().id();
 
         if frame.header().flags().contains(RST) { // stream reset
-            self.on_reset(stream_id);
+            self.streams.remove(&stream_id);
             return Ok(None)
         }
 
@@ -292,7 +290,6 @@ where
                 }
                 if stream.buffer.lock().len() >= self.config.max_buffer_size {
                     error!("buffer of stream {} grows beyond limit", stream_id);
-                    stream.update_state(State::Closed(View::Local));
                     true
                 } else {
                     stream.window = stream.window.saturating_sub(frame.body().len() as u32);
@@ -327,7 +324,7 @@ where
         let stream_id = frame.header().id();
 
         if frame.header().flags().contains(RST) { // stream reset
-            self.on_reset(stream_id);
+            self.streams.remove(&stream_id);
             return Ok(None)
         }
 
@@ -379,25 +376,15 @@ where
         }
     }
 
-    fn on_reset(&mut self, id: stream::Id) {
-        if let Some(mut stream) = self.streams.remove(&id) {
-            stream.update_state(State::Closed(View::Remote))
-        }
-    }
-
     fn reset(&mut self, id: stream::Id) {
-        if let Some(stream) = self.streams.remove(&id) {
-            trace!("resetting stream {}: {:?}", id, self);
-            let state = stream.state();
-            if let State::Closed(View::Remote) = state {
-                return () // remote has already reset the stream
-            }
-            let mut header = Header::data(id, 0);
-            header.rst();
-            let frame = Frame::new(header).into_raw();
-            self.pending.push_back(frame)
+        if self.streams.remove(&id).is_none() {
+            return ()
         }
-        self.wake_tasks()
+        trace!("resetting stream {}: {:?}", id, self);
+        let mut header = Header::data(id, 0);
+        header.rst();
+        let frame = Frame::new(header).into_raw();
+        self.pending.push_back(frame)
     }
 }
 
@@ -455,7 +442,6 @@ where
                     if !inner.streams.contains_key(&self.id) {
                         return Ok(0)
                     }
-                    inner.tasks.push(task::current());
                     return Err(io::ErrorKind::WouldBlock.into())
                 }
                 Ok(Async::Ready(())) => { // connection is dead
@@ -478,7 +464,7 @@ where
         let mut inner = self.connection.inner.lock();
         match inner.process_incoming() {
             Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e)),
-            Ok(Async::NotReady)  => {}
+            Ok(Async::NotReady) => {}
             Ok(Async::Ready(())) => return Ok(0) // connection is dead
         }
         let frame = match inner.streams.get(&self.id).map(|s| s.credit) {
@@ -515,7 +501,9 @@ where
     T: AsyncRead + AsyncWrite
 {
     fn shutdown(&mut self) -> Poll<(), io::Error> {
-        Ok(Async::Ready(()))
+        let mut connection = self.connection.inner.lock();
+        connection.reset(self.id);
+        connection.flush_pending().map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     }
 }
 

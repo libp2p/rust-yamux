@@ -60,14 +60,7 @@ pub enum State {
     #[allow(dead_code)]
     SendClosed,
     RecvClosed,
-    Closed(View),
-}
-
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum View {
-    Local,
-    Remote
+    Closed
 }
 
 
@@ -89,28 +82,21 @@ impl StreamEntry {
         }
     }
 
-    pub(crate) fn state(&self) -> State {
-        self.state
-    }
-
     pub(crate) fn update_state(&mut self, next: State) {
         use self::State::*;
-        use self::View::*;
 
         let current = self.state;
 
         match (current, next) {
-            (Closed(Local), Closed(Remote)) => self.state = next,
-            (Closed(Local),       _) => {}
-            (Closed(Remote),      _) => {}
+            (Closed,              _) => {}
             (Open,                _) => self.state = next,
-            (RecvClosed,  Closed(_)) => self.state = next,
+            (RecvClosed,     Closed) => self.state = Closed,
             (RecvClosed,       Open) => {}
             (RecvClosed, RecvClosed) => {}
-            (RecvClosed, SendClosed) => self.state = Closed(Local),
-            (SendClosed,  Closed(_)) => self.state = next,
+            (RecvClosed, SendClosed) => self.state = Closed,
+            (SendClosed,     Closed) => self.state = Closed,
             (SendClosed,       Open) => {}
-            (SendClosed, RecvClosed) => self.state = Closed(Local),
+            (SendClosed, RecvClosed) => self.state = Closed,
             (SendClosed, SendClosed) => {}
         }
     }

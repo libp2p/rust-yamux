@@ -61,13 +61,12 @@ impl Default for Config {
 }
 
 impl Config {
-    #[must_use]
-    pub fn set_receive_window(&mut self, n: u32) -> bool {
+    pub fn set_receive_window(&mut self, n: u32) -> Result<(), ()> {
         if n >= DEFAULT_CREDIT {
             self.receive_window = n;
-            return true
+            return Ok(())
         }
-        false
+        Err(())
     }
 
     pub fn set_max_buffer_size(&mut self, n: usize) {
