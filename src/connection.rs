@@ -163,7 +163,7 @@ where
 
     fn next_stream_id(&mut self) -> Result<stream::Id, ConnectionError> {
         let proposed = stream::Id::new(self.next_id);
-        self.next_id.checked_add(2).ok_or(ConnectionError::NoMoreStreamIds)?;
+        self.next_id = self.next_id.checked_add(2).ok_or(ConnectionError::NoMoreStreamIds)?;
         match self.mode {
             Mode::Client => assert!(proposed.is_client()),
             Mode::Server => assert!(proposed.is_server())
