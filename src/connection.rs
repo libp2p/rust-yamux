@@ -145,12 +145,13 @@ where
     T: AsyncRead + AsyncWrite
 {
     fn new(resource: T, config: Config, mode: Mode) -> Self {
+        let framed = Framed::new(resource, FrameCodec::new(&config)).fuse();
         Inner {
             mode,
             is_dead: false,
             config,
             streams: BTreeMap::new(),
-            resource: Framed::new(resource, FrameCodec::new()).fuse(),
+            resource: framed,
             incoming: VecDeque::new(),
             pending: VecDeque::new(),
             tasks: Vec::new(),
