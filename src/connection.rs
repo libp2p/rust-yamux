@@ -201,11 +201,9 @@ where
             return Ok(Async::Ready(()))
         }
         loop {
-            if !self.pending.is_empty() {
-                if self.flush_pending()?.is_not_ready() {
-                    self.tasks.push(task::current());
-                    return Ok(Async::NotReady)
-                }
+            if !self.pending.is_empty() && self.flush_pending()?.is_not_ready() {
+                self.tasks.push(task::current());
+                return Ok(Async::NotReady)
             }
             match self.resource.poll()? {
                 Async::Ready(Some(frame)) => {
