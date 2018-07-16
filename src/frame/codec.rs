@@ -23,22 +23,29 @@ use frame::{header::{Flags, Len, RawHeader, Type, Version}, RawFrame};
 use std::io;
 use stream;
 use tokio_codec::{BytesCodec, Decoder, Encoder};
+use Config;
 
 
 #[derive(Debug)]
 pub struct FrameCodec {
     header_codec: HeaderCodec,
     body_codec: BytesCodec,
-    header: Option<RawHeader>
+    header: Option<RawHeader>,
+    max_buf_size: usize
 }
 
 impl FrameCodec {
-    pub fn new() -> FrameCodec {
+    pub fn new(cfg: &Config) -> FrameCodec {
         FrameCodec {
             header_codec: HeaderCodec::new(),
             body_codec: BytesCodec::new(),
-            header: None
+            header: None,
+            max_buf_size: cfg.max_buffer_size
         }
+    }
+
+    pub fn default() -> FrameCodec {
+        FrameCodec::new(&Config::default())
     }
 }
 
@@ -69,7 +76,12 @@ impl Decoder for FrameCodec {
             return Ok(Some(RawFrame { header, body: Bytes::new() }))
         }
         let len = header.length.0 as usize;
+        if len > self.max_buf_size {
+            return Err(DecodeError::FrameTooLarge(len))
+        }
         if src.len() < len {
+            let add = len - src.len();
+            src.reserve(add);
             self.header = Some(header);
             return Ok(None)
         }
@@ -166,7 +178,7 @@ mod tests {
     fn frame_identity() {
         fn property(f: RawFrame) -> bool {
             let mut buf = BytesMut::with_capacity(12 + f.body.len());
-            let mut codec = FrameCodec::new();
+            let mut codec = FrameCodec::default();
             if codec.encode(f.clone(), &mut buf).is_err() {
                 return false
             }

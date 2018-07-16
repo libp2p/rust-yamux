@@ -145,12 +145,13 @@ where
     T: AsyncRead + AsyncWrite
 {
     fn new(resource: T, config: Config, mode: Mode) -> Self {
+        let framed = Framed::new(resource, FrameCodec::new(&config)).fuse();
         Inner {
             mode,
             is_dead: false,
             config,
             streams: BTreeMap::new(),
-            resource: Framed::new(resource, FrameCodec::new()).fuse(),
+            resource: framed,
             incoming: VecDeque::new(),
             pending: VecDeque::new(),
             tasks: Vec::new(),
@@ -200,11 +201,9 @@ where
             return Ok(Async::Ready(()))
         }
         loop {
-            if !self.pending.is_empty() {
-                if self.flush_pending()?.is_not_ready() {
-                    self.tasks.push(task::current());
-                    return Ok(Async::NotReady)
-                }
+            if !self.pending.is_empty() && self.flush_pending()?.is_not_ready() {
+                self.tasks.push(task::current());
+                return Ok(Async::NotReady)
             }
             match self.resource.poll()? {
                 Async::Ready(Some(frame)) => {

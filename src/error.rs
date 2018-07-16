@@ -32,6 +32,9 @@ quick_error! {
         Type(t: u8) {
             display("unkown type: {}", t)
         }
+        FrameTooLarge(n: usize) {
+            display("frame body is too large ({})", n)
+        }
         #[doc(hidden)]
         __Nonexhaustive
     }
