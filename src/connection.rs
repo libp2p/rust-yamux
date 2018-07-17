@@ -431,15 +431,15 @@ where
                     (&mut buf[0..n]).copy_from_slice(&b);
                     return Ok(n)
                 }
+                if !inner.streams.contains_key(&self.id) {
+                    return Ok(0) // stream has been reset
+                }
             }
             match inner.process_incoming() {
                 Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e)),
                 Ok(Async::NotReady) => {
                     if !self.buffer.lock().is_empty() {
                         continue
-                    }
-                    if !inner.streams.contains_key(&self.id) {
-                        return Ok(0)
                     }
                     return Err(io::ErrorKind::WouldBlock.into())
                 }
