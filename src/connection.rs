@@ -217,6 +217,9 @@ where
                             self.on_ping(&Frame::assert(frame)).map(Frame::into_raw),
                         Type::GoAway => {
                             self.is_dead = true;
+                            for task in self.tasks.drain(..) {
+                                task.notify()
+                            }
                             return Ok(Async::Ready(()))
                         }
                     };
@@ -230,6 +233,9 @@ where
                 Async::Ready(None) => {
                     trace!("{:?}: eof: {:?}", self.mode, self);
                     self.is_dead = true;
+                    for task in self.tasks.drain(..) {
+                        task.notify()
+                    }
                     return Ok(Async::Ready(()))
                 }
                 Async::NotReady => {
