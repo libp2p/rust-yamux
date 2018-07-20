@@ -96,7 +96,7 @@ where
         if connection.is_dead {
             return Ok(Async::Ready(None))
         }
-        if let Some(id) = connection.incoming.pop_front() {
+        while let Some(id) = connection.incoming.pop_front() {
             if let Some(stream) = connection.streams.get(&id) {
                 debug!("incoming stream {}: {:?}", id, *connection);
                 let s = StreamHandle::new(id, stream.buffer.clone(), self.clone());
