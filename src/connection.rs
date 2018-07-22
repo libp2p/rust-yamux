@@ -30,8 +30,17 @@ use frame::{
     WindowUpdate
 };
 use futures::{prelude::*, stream::{Fuse, Stream}, task::{self, Task}};
-use parking_lot::Mutex;
-use std::{cmp::min, collections::{BTreeMap, VecDeque}, fmt, io, sync::Arc, u32, usize};
+use parking_lot::{Mutex, MutexGuard};
+use std::{
+    cmp::min,
+    collections::{BTreeMap, VecDeque},
+    fmt,
+    io,
+    ops::{Deref, DerefMut},
+    sync::Arc,
+    u32,
+    usize
+};
 use stream::{self, State, StreamEntry};
 use tokio_codec::Framed;
 use tokio_io::{AsyncRead, AsyncWrite};
@@ -63,7 +72,7 @@ where
     }
 
     pub fn open_stream(&self) -> Result<Option<StreamHandle<T>>, ConnectionError> {
-        let mut connection = self.inner.lock();
+        let mut connection = Use::with(self.inner.lock(), Action::None);
         if connection.is_dead {
             return Ok(None)
         }
@@ -91,19 +100,68 @@ where
     type Error = ConnectionError;
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        let mut connection = self.inner.lock();
+        let mut connection = Use::with(self.inner.lock(), Action::Destroy);
         connection.process_incoming()?;
         if connection.is_dead {
             return Ok(Async::Ready(None))
         }
         while let Some(id) = connection.incoming.pop_front() {
-            if let Some(stream) = connection.streams.get(&id) {
-                debug!("incoming stream {}: {:?}", id, *connection);
-                let s = StreamHandle::new(id, stream.buffer.clone(), self.clone());
-                return Ok(Async::Ready(Some(s)))
+            let stream =
+                if let Some(stream) = connection.streams.get(&id) {
+                    debug!("incoming stream {}: {:?}", id, *connection);
+                    StreamHandle::new(id, stream.buffer.clone(), self.clone())
+                } else {
+                    continue
+                };
+                connection.on_drop(Action::None);
+                return Ok(Async::Ready(Some(stream)))
+        }
+        connection.on_drop(Action::None);
+        Ok(Async::NotReady)
+    }
+}
+
+enum Action { Destroy, None }
+
+struct Use<'a, T: 'a> {
+    inner: MutexGuard<'a, Inner<T>>,
+    on_drop: Action
+}
+
+impl<'a, T> Use<'a, T> {
+    fn with(inner: MutexGuard<'a, Inner<T>>, on_drop: Action) -> Self {
+        Use { inner, on_drop }
+    }
+
+    fn on_drop(&mut self, val: Action) {
+        self.on_drop = val
+    }
+}
+
+impl<'a, T> Deref for Use<'a, T> {
+    type Target = Inner<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.inner
+    }
+}
+
+impl<'a, T> DerefMut for Use<'a, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut *self.inner
+    }
+}
+
+impl<'a, T> Drop for Use<'a, T> {
+    fn drop(&mut self) {
+        if let Action::Destroy = self.on_drop {
+            debug!("{:?}: removing streams", self.inner.mode);
+            self.inner.is_dead = true;
+            self.inner.streams.clear();
+            for task in self.inner.tasks.drain(..) {
+                task.notify()
             }
         }
-        Ok(Async::NotReady)
     }
 }
 
@@ -385,6 +443,9 @@ where
         if self.streams.remove(&id).is_none() {
             return ()
         }
+        if self.is_dead {
+            return ()
+        }
         trace!("resetting stream {}: {:?}", id, self);
         let mut header = Header::data(id, 0);
         header.rst();
@@ -427,7 +488,7 @@ where
     T: AsyncRead + AsyncWrite
 {
     fn read(&mut self, buf: &mut[u8]) -> io::Result<usize> {
-        let mut inner = self.connection.inner.lock();
+        let mut inner = Use::with(self.connection.inner.lock(), Action::Destroy);
         loop {
             {
                 let mut bytes = self.buffer.lock();
@@ -435,9 +496,11 @@ where
                     let n = min(bytes.len(), buf.len());
                     let b = bytes.split_to(n);
                     (&mut buf[0..n]).copy_from_slice(&b);
+                    inner.on_drop(Action::None);
                     return Ok(n)
                 }
                 if !inner.streams.contains_key(&self.id) {
+                    inner.on_drop(Action::None);
                     return Ok(0) // stream has been reset
                 }
             }
@@ -447,6 +510,7 @@ where
                     if !self.buffer.lock().is_empty() {
                         continue
                     }
+                    inner.on_drop(Action::None);
                     return Err(io::ErrorKind::WouldBlock.into())
                 }
                 Ok(Async::Ready(())) => { // connection is dead
@@ -466,7 +530,7 @@ where
     T: AsyncRead + AsyncWrite
 {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut inner = self.connection.inner.lock();
+        let mut inner = Use::with(self.connection.inner.lock(), Action::Destroy);
         match inner.process_incoming() {
             Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e)),
             Ok(Async::NotReady) => {}
@@ -477,6 +541,7 @@ where
         let frame = match inner.streams.get(&self.id).map(|s| s.credit) {
             Some(0) => {
                 inner.tasks.push(task::current());
+                inner.on_drop(Action::None);
                 return Err(io::ErrorKind::WouldBlock.into())
             }
             Some(n) => {
@@ -487,20 +552,28 @@ where
                 Frame::data(self.id, b).into_raw()
             }
             None => {
+                inner.on_drop(Action::None);
                 return Err(io::Error::new(io::ErrorKind::Other, "stream closed"))
             }
         };
         let n = frame.body.len();
         inner.pending.push_back(frame);
+        inner.on_drop(Action::None);
         Ok(n)
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let mut inner = self.connection.inner.lock();
+        let mut inner = Use::with(self.connection.inner.lock(), Action::Destroy);
         match inner.flush_pending() {
             Err(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
-            Ok(Async::NotReady) => Err(io::ErrorKind::WouldBlock.into()),
-            Ok(Async::Ready(())) => Ok(())
+            Ok(Async::NotReady) => {
+                inner.on_drop(Action::None);
+                Err(io::ErrorKind::WouldBlock.into())
+            }
+            Ok(Async::Ready(())) => {
+                inner.on_drop(Action::None);
+                Ok(())
+            }
         }
     }
 }
@@ -510,9 +583,19 @@ where
     T: AsyncRead + AsyncWrite
 {
     fn shutdown(&mut self) -> Poll<(), io::Error> {
-        let mut connection = self.connection.inner.lock();
+        let mut connection = Use::with(self.connection.inner.lock(), Action::Destroy);
         connection.reset(self.id);
-        connection.flush_pending().map_err(|e| io::Error::new(io::ErrorKind::Other, e))
+        match connection.flush_pending() {
+            Err(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
+            Ok(Async::NotReady) => {
+                connection.on_drop(Action::None);
+                Ok(Async::NotReady)
+            }
+            Ok(Async::Ready(())) => {
+                connection.on_drop(Action::None);
+                Ok(Async::Ready(()))
+            }
+        }
     }
 }
 
