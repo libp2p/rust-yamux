@@ -470,7 +470,9 @@ where
         match inner.process_incoming() {
             Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e)),
             Ok(Async::NotReady) => {}
-            Ok(Async::Ready(())) => return Ok(0) // connection is dead
+            Ok(Async::Ready(())) => {
+                return Err(io::Error::new(io::ErrorKind::Other, "connection closed"))
+            }
         }
         let frame = match inner.streams.get(&self.id).map(|s| s.credit) {
             Some(0) => {
@@ -484,7 +486,9 @@ where
                 s.credit = s.credit.saturating_sub(k as u32);
                 Frame::data(self.id, b).into_raw()
             }
-            None => return Ok(0)
+            None => {
+                return Err(io::Error::new(io::ErrorKind::Other, "stream closed"))
+            }
         };
         let n = frame.body.len();
         inner.pending.push_back(frame);
