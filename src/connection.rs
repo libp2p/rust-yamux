@@ -87,7 +87,7 @@ where
         let stream = StreamEntry::new(connection.config.receive_window, DEFAULT_CREDIT);
         let buffer = stream.buffer.clone();
         connection.streams.insert(id, stream);
-        trace!("outgoing stream {}: {:?}", id, *connection);
+        debug!("outgoing stream {}: {:?}", id, *connection);
         Ok(Some(StreamHandle::new(id, buffer, self.clone())))
     }
 }
@@ -155,7 +155,7 @@ impl<'a, T> DerefMut for Use<'a, T> {
 impl<'a, T> Drop for Use<'a, T> {
     fn drop(&mut self) {
         if let Action::Destroy = self.on_drop {
-            debug!("{:?}: removing streams", self.inner.mode);
+            debug!("{:?}: destroying connection", self.inner.mode);
             self.inner.is_dead = true;
             self.inner.streams.clear();
             for task in self.inner.tasks.drain(..) {
@@ -308,6 +308,7 @@ where
         let stream_id = frame.header().id();
 
         if frame.header().flags().contains(RST) { // stream reset
+            debug!("received reset for stream {}", stream_id);
             self.streams.remove(&stream_id);
             return Ok(None)
         }
@@ -387,6 +388,7 @@ where
         let stream_id = frame.header().id();
 
         if frame.header().flags().contains(RST) { // stream reset
+            debug!("received reset for stream {}", stream_id);
             self.streams.remove(&stream_id);
             return Ok(None)
         }
@@ -446,7 +448,7 @@ where
         if self.is_dead {
             return ()
         }
-        trace!("resetting stream {}: {:?}", id, self);
+        debug!("resetting stream {}: {:?}", id, self);
         let mut header = Header::data(id, 0);
         header.rst();
         let frame = Frame::new(header).into_raw();
@@ -478,6 +480,7 @@ where
     T: AsyncRead + AsyncWrite
 {
     fn drop(&mut self) {
+        debug!("dropping stream {}", self.id);
         self.connection.inner.lock().reset(self.id)
     }
 }
@@ -500,6 +503,7 @@ where
                     return Ok(n)
                 }
                 if !inner.streams.contains_key(&self.id) {
+                    debug!("stream {} is gone, cannot read", self.id);
                     inner.on_drop(Action::None);
                     return Ok(0) // stream has been reset
                 }
@@ -535,7 +539,7 @@ where
             Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e)),
             Ok(Async::NotReady) => {}
             Ok(Async::Ready(())) => {
-                return Err(io::Error::new(io::ErrorKind::Other, "connection closed"))
+                return Err(io::Error::new(io::ErrorKind::WriteZero, "connection is closed"))
             }
         }
         let frame = match inner.streams.get(&self.id).map(|s| s.credit) {
@@ -552,8 +556,9 @@ where
                 Frame::data(self.id, b).into_raw()
             }
             None => {
+                debug!("stream {} is gone, cannot write", self.id);
                 inner.on_drop(Action::None);
-                return Err(io::Error::new(io::ErrorKind::Other, "stream closed"))
+                return Err(io::Error::new(io::ErrorKind::WriteZero, "stream is closed"))
             }
         };
         let n = frame.body.len();
