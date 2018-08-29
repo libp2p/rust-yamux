@@ -41,7 +41,7 @@ use std::{
     u32,
     usize
 };
-use stream::{self, State, StreamEntry};
+use stream::{self, State, StreamEntry, CONNECTION_ID};
 use tokio_codec::Framed;
 use tokio_io::{AsyncRead, AsyncWrite};
 use {Config, DEFAULT_CREDIT};
@@ -429,16 +429,19 @@ where
 
     fn on_ping(&mut self, frame: &Frame<Ping>) -> Option<Frame<Ping>> {
         let stream_id = frame.header().id();
+
         if frame.header().flags().contains(ACK) { // pong
-            None
-        } else if self.streams.contains_key(&stream_id) {
+            return None
+        }
+
+        if stream_id == CONNECTION_ID || self.streams.contains_key(&stream_id) {
             let mut hdr = Header::ping(frame.header().nonce());
             hdr.ack();
-            Some(Frame::new(hdr))
-        } else {
-            debug!("received ping for unknown stream {}", stream_id);
-            None
+            return Some(Frame::new(hdr))
         }
+
+        debug!("received ping for unknown stream {}", stream_id);
+        None
     }
 
     fn reset(&mut self, id: stream::Id) {
