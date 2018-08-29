@@ -22,6 +22,9 @@ use parking_lot::Mutex;
 use std::{fmt, sync::Arc, u32};
 
 
+pub(crate) const CONNECTION_ID: Id = Id(0);
+
+
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Id(u32);
 
