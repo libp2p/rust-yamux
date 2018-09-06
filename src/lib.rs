@@ -34,6 +34,7 @@ mod connection;
 mod error;
 #[allow(dead_code)]
 mod frame;
+mod notify;
 mod stream;
 
 pub use connection::{Connection, Mode, StreamHandle};
