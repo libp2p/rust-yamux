@@ -17,11 +17,10 @@
 // WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-mod hash;
 
 use futures::{executor, task};
 use parking_lot::Mutex;
-use self::hash::HashMap;
+use nohash_hasher::IntMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 
@@ -32,19 +31,27 @@ task_local!{
 }
 
 
+/// A notifier maintains a collection of tasks which should be
+/// notified at some point. Useful in conjuction with `futures::executor::Spawn`.
 pub struct Notifier {
-    tasks: Mutex<HashMap<usize, task::Task>>
+    tasks: Mutex<IntMap<usize, task::Task>>
 }
 
 impl Notifier {
     pub fn new() -> Self {
-        Notifier { tasks: Mutex::new(HashMap::default()) }
+        Notifier { tasks: Mutex::new(IntMap::default()) }
     }
 
+    /// Insert the current task to the set of tasks to be notified.
+    ///
+    /// # Panics
+    ///
+    /// If called outside of a tokio task.
     pub fn insert_current(&self) {
         self.tasks.lock().insert(TASK_ID.with(|&t| t), task::current());
     }
 
+    /// Notify all registered tasks.
     pub fn notify_all(&self) {
         let mut tasks = self.tasks.lock();
         for (_, t) in tasks.drain() {
@@ -52,6 +59,7 @@ impl Notifier {
         }
     }
 
+    /// Return the number of currently registered tasks.
     pub fn len(&self) -> usize {
         self.tasks.lock().len()
     }

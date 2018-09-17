@@ -20,6 +20,7 @@
 extern crate bytes;
 #[macro_use]
 extern crate futures;
+extern crate nohash_hasher;
 #[macro_use]
 extern crate log;
 extern crate parking_lot;
