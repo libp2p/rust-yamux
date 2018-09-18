@@ -29,7 +29,8 @@ use frame::{
     RawFrame,
     WindowUpdate
 };
-use futures::{prelude::*, stream::{Fuse, Stream}, task::{self, Task}};
+use futures::{executor, prelude::*, stream::{Fuse, Stream}};
+use notify::Notifier;
 use parking_lot::{Mutex, MutexGuard};
 use std::{
     cmp::min,
@@ -158,9 +159,7 @@ impl<'a, T> Drop for Use<'a, T> {
             debug!("{:?}: destroying connection", self.inner.mode);
             self.inner.is_dead = true;
             self.inner.streams.clear();
-            for task in self.inner.tasks.drain(..) {
-                task.notify()
-            }
+            self.inner.tasks.notify_all()
         }
     }
 }
@@ -171,10 +170,10 @@ struct Inner<T> {
     is_dead: bool,
     config: Config,
     streams: BTreeMap<stream::Id, StreamEntry>,
-    resource: Fuse<Framed<T, FrameCodec>>,
+    resource: executor::Spawn<Fuse<Framed<T, FrameCodec>>>,
     incoming: VecDeque<stream::Id>,
     pending: VecDeque<RawFrame>,
-    tasks: Vec<Task>,
+    tasks: Arc<Notifier>,
     next_id: u32
 }
 
@@ -209,10 +208,10 @@ where
             is_dead: false,
             config,
             streams: BTreeMap::new(),
-            resource: framed,
+            resource: executor::spawn(framed),
             incoming: VecDeque::new(),
             pending: VecDeque::new(),
-            tasks: Vec::new(),
+            tasks: Arc::new(Notifier::new()),
             next_id: match mode {
                 Mode::Client => 1,
                 Mode::Server => 2
@@ -242,15 +241,15 @@ where
     }
 
     fn flush_pending(&mut self) -> Poll<(), ConnectionError> {
-        try_ready!(self.resource.poll_complete());
+        try_ready!(self.resource.poll_flush_notify(&self.tasks, 0));
         while let Some(frame) = self.pending.pop_front() {
             trace!("{:?}: send: {:?}", self.mode, frame.header);
-            if let AsyncSink::NotReady(frame) = self.resource.start_send(frame)? {
+            if let AsyncSink::NotReady(frame) = self.resource.start_send_notify(frame, &self.tasks, 0)? {
                 self.pending.push_front(frame);
                 return Ok(Async::NotReady)
             }
         }
-        try_ready!(self.resource.poll_complete());
+        try_ready!(self.resource.poll_flush_notify(&self.tasks, 0));
         Ok(Async::Ready(()))
     }
 
@@ -260,10 +259,10 @@ where
         }
         loop {
             if !self.pending.is_empty() && self.flush_pending()?.is_not_ready() {
-                self.tasks.push(task::current());
+                self.tasks.insert_current();
                 return Ok(Async::NotReady)
             }
-            match self.resource.poll()? {
+            match self.resource.poll_stream_notify(&self.tasks, 0)? {
                 Async::Ready(Some(frame)) => {
                     trace!("{:?}: recv: {:?}", self.mode, frame.header);
                     let response = match frame.dyn_type() {
@@ -275,29 +274,20 @@ where
                             self.on_ping(&Frame::assert(frame)).map(Frame::into_raw),
                         Type::GoAway => {
                             self.is_dead = true;
-                            for task in self.tasks.drain(..) {
-                                task.notify()
-                            }
                             return Ok(Async::Ready(()))
                         }
                     };
                     if let Some(frame) = response {
                         self.pending.push_back(frame)
                     }
-                    for task in self.tasks.drain(..) {
-                        task.notify()
-                    }
                 }
                 Async::Ready(None) => {
                     trace!("{:?}: eof: {:?}", self.mode, self);
                     self.is_dead = true;
-                    for task in self.tasks.drain(..) {
-                        task.notify()
-                    }
                     return Ok(Async::Ready(()))
                 }
                 Async::NotReady => {
-                    self.tasks.push(task::current());
+                    self.tasks.insert_current();
                     return Ok(Async::NotReady)
                 }
             }
@@ -547,7 +537,7 @@ where
         }
         let frame = match inner.streams.get(&self.id).map(|s| s.credit) {
             Some(0) => {
-                inner.tasks.push(task::current());
+                inner.tasks.insert_current();
                 inner.on_drop(Action::None);
                 return Err(io::ErrorKind::WouldBlock.into())
             }

@@ -20,6 +20,7 @@
 extern crate bytes;
 #[macro_use]
 extern crate futures;
+extern crate nohash_hasher;
 #[macro_use]
 extern crate log;
 extern crate parking_lot;
@@ -34,6 +35,7 @@ mod connection;
 mod error;
 #[allow(dead_code)]
 mod frame;
+mod notify;
 mod stream;
 
 pub use connection::{Connection, Mode, StreamHandle};
