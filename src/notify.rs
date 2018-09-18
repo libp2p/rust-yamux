@@ -46,7 +46,7 @@ impl Notifier {
     ///
     /// # Panics
     ///
-    /// If called outside of a tokio task.
+    /// If called outside of a futures task.
     pub fn insert_current(&self) {
         self.tasks.lock().insert(TASK_ID.with(|&t| t), task::current());
     }
