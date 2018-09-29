@@ -274,16 +274,19 @@ where
                             self.on_ping(&Frame::assert(frame)).map(Frame::into_raw),
                         Type::GoAway => {
                             self.is_dead = true;
+                            self.tasks.notify_all();
                             return Ok(Async::Ready(()))
                         }
                     };
                     if let Some(frame) = response {
                         self.pending.push_back(frame)
                     }
+                    self.tasks.notify_all();
                 }
                 Async::Ready(None) => {
                     trace!("{:?}: eof: {:?}", self.mode, self);
                     self.is_dead = true;
+                    self.tasks.notify_all();
                     return Ok(Async::Ready(()))
                 }
                 Async::NotReady => {
