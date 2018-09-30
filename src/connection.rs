@@ -45,7 +45,7 @@ use std::{
 use stream::{self, State, StreamEntry, CONNECTION_ID};
 use tokio_codec::Framed;
 use tokio_io::{AsyncRead, AsyncWrite};
-use {Config, DEFAULT_CREDIT};
+use {Config, DEFAULT_CREDIT, WindowUpdateMode};
 
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
@@ -351,14 +351,7 @@ where
                 } else {
                     stream.window = stream.window.saturating_sub(frame.body().len() as u32);
                     stream.buffer.lock().extend(frame.body());
-                    if stream.window == 0 {
-                        // We need to send back a window update here instead of in `Inner::read` when
-                        // the stream buffer is actually consumed, as otherwise we risk a deadlock
-                        // between two endpoints that want to concurrently send more data than their
-                        // credits allow. These two parties will only start reading again after they
-                        // finished writing and without window update frames they can not make progress.
-                        // We therefore send implicit window update frames and cap the maximum stream
-                        // buffer size.
+                    if stream.window == 0 && self.config.window_update_mode == WindowUpdateMode::OnReceive {
                         trace!("{:?}: stream {}: sending window update", self.mode, stream_id);
                         let frame = Frame::window_update(stream_id, self.config.receive_window);
                         self.pending.push_back(frame.into_raw());
@@ -504,6 +497,19 @@ where
                     return Ok(0) // stream has been reset
                 }
             }
+
+            if inner.config.window_update_mode == WindowUpdateMode::OnRead {
+                let inner = &mut *inner;
+                if let Some(stream) = inner.streams.get_mut(&self.id) {
+                    if stream.window == 0 {
+                        trace!("{:?}: read: stream {}: sending window update", inner.mode, self.id);
+                        let frame = Frame::window_update(self.id, inner.config.receive_window);
+                        inner.pending.push_back(frame.into_raw());
+                        stream.window = inner.config.receive_window
+                    }
+                }
+            }
+
             match inner.process_incoming() {
                 Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e)),
                 Ok(Async::NotReady) => {
