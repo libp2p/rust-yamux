@@ -462,6 +462,11 @@ where
     fn new(id: stream::Id, buffer: Arc<Mutex<BytesMut>>, conn: Connection<T>) -> Self {
         StreamHandle { id, buffer, connection: conn }
     }
+
+    /// Report how much sending credit this stream has available.
+    pub fn credit(&self) -> Option<u32> {
+        self.connection.inner.lock().streams.get(&self.id).map(|s| s.credit)
+    }
 }
 
 impl<T> Drop for StreamHandle<T>

@@ -62,9 +62,12 @@ pub enum WindowUpdateMode {
     /// low. However, depending on the protocol, there is a risk of deadlock, namely
     /// if both endpoints want to send data larger than the receivers window and they
     /// do not read before finishing their writes. Use this mode only if you are sure
-    /// that this will never happen, i.e. by ensuring that no protocol unit is larger
-    /// than a single receive window and by using protocols which interleave each
-    /// send with a read.
+    /// that this will never happen, i.e. if
+    ///
+    /// - Endpoints *A* and *B* never write at the same time, or
+    /// - Endpoints *A* and *B* write at most *n* frames concurrently such that the sum
+    ///   of the frame lengths is less or equal to the available credit of *A* and *B*
+    ///   respectively.
     OnRead
 }
 
