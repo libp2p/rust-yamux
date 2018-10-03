@@ -91,6 +91,13 @@ where
         debug!("outgoing stream {}: {:?}", id, *connection);
         Ok(Some(StreamHandle::new(id, buffer, self.clone())))
     }
+
+    pub fn flush(&self) -> Poll<(), io::Error> {
+        let mut connection = Use::with(self.inner.lock(), Action::Destroy);
+        let result = connection.flush_pending()?;
+        connection.on_drop(Action::None);
+        Ok(result)
+    }
 }
 
 impl<T> Stream for Connection<T>
@@ -240,7 +247,7 @@ where
         }
     }
 
-    fn flush_pending(&mut self) -> Poll<(), ConnectionError> {
+    fn flush_pending(&mut self) -> Poll<(), io::Error> {
         try_ready!(self.resource.poll_flush_notify(&self.tasks, 0));
         while let Some(frame) = self.pending.pop_front() {
             trace!("{:?}: send: {:?}", self.mode, frame.header);
