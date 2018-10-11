@@ -92,6 +92,21 @@ where
         Ok(Some(StreamHandle::new(id, buffer, self.clone())))
     }
 
+    pub fn shutdown(&self) -> Poll<(), io::Error> {
+        let mut connection = Use::with(self.inner.lock(), Action::Destroy);
+        if connection.is_dead {
+            return Ok(Async::Ready(()))
+        }
+        let result = {
+            let c = &mut *connection;
+            c.resource.close_notify(&mut c.tasks, 0)?
+        };
+        if result.is_not_ready() {
+            connection.on_drop(Action::None)
+        }
+        Ok(result)
+    }
+
     pub fn flush(&self) -> Poll<(), io::Error> {
         let mut connection = Use::with(self.inner.lock(), Action::Destroy);
         let result = connection.flush_pending()?;
@@ -248,6 +263,9 @@ where
     }
 
     fn flush_pending(&mut self) -> Poll<(), io::Error> {
+        if self.is_dead {
+            return Ok(Async::Ready(()))
+        }
         try_ready!(self.resource.poll_flush_notify(&self.tasks, 0));
         while let Some(frame) = self.pending.pop_front() {
             trace!("{:?}: send: {:?}", self.mode, frame.header);
