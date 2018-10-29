@@ -2,7 +2,9 @@
 name = "yamux"
 version = "0.1.0"
 authors = ["Parity Technologies <admin@parity.io>"]
-license = "MIT"
+license = "Apache-2.0 OR MIT"
+description = "Multiplexer over reliable, ordered connections"
+repository = "https://github.com/paritytech/yamux"
 
 [dependencies]
 bytes = "0.4"

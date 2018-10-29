@@ -1,21 +1,12 @@
 // Copyright 2018 Parity Technologies (UK) Ltd.
 //
-// Permission is hereby granted, free of charge, to any person obtaining a copy of
-// this software and associated documentation files (the "Software"), to deal in
-// the Software without restriction, including without limitation the rights to
-// use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
-// the Software, and to permit persons to whom the Software is furnished to do so,
-// subject to the following conditions:
+// Licensed under the Apache License, Version 2.0 or MIT license, at your option.
 //
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
-// FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS
-// OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
-// WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
-// CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+// A copy of the Apache License, Version 2.0 is included in the software as
+// LICENSE-APACHE and a copy of the MIT license is included in the software
+// as LICENSE-MIT. You may also obtain a copy of the Apache License, Version 2.0
+// at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
+// at https://opensource.org/licenses/MIT.
 
 use bytes::BytesMut;
 use error::ConnectionError;
@@ -52,6 +43,7 @@ use {Config, DEFAULT_CREDIT, WindowUpdateMode};
 pub enum Mode { Client, Server }
 
 
+/// Holds the underlying connection.
 pub struct Connection<T> {
     inner: Arc<Mutex<Inner<T>>>
 }
@@ -72,6 +64,11 @@ where
         }
     }
 
+    /// Open a new outbound stream which is multiplexed over the existing connection.
+    ///
+    /// This may fail if the underlying connection is already dead (in which case `None` is
+    /// returned), or for other reasons, e.g. if the (configurable) maximum number of streams is
+    /// already open.
     pub fn open_stream(&self) -> Result<Option<StreamHandle<T>>, ConnectionError> {
         let mut connection = Use::with(self.inner.lock(), Action::None);
         if connection.is_dead {
@@ -493,6 +490,7 @@ where
 }
 
 
+/// A handle to a multiplexed stream.
 pub struct StreamHandle<T>
 where
     T: AsyncRead + AsyncWrite
