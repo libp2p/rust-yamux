@@ -52,7 +52,8 @@ impl Flags {
     }
 }
 
-
+/// Termination code for use with GoAway frames.
+pub const CODE_TERM: u32 = 0;
 /// Protocol error code for use with GoAway frames.
 pub const ECODE_PROTO: u32 = 1;
 /// Internal error code for use with GoAway frames.

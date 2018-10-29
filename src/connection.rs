@@ -21,7 +21,7 @@ use bytes::BytesMut;
 use error::ConnectionError;
 use frame::{
     codec::FrameCodec,
-    header::{ACK, ECODE_INTERNAL, ECODE_PROTO, FIN, Header, RST, SYN, Type},
+    header::{self, ACK, ECODE_INTERNAL, ECODE_PROTO, FIN, Header, RST, SYN, Type},
     Data,
     Frame,
     GoAway,
@@ -92,10 +92,29 @@ where
         Ok(Some(StreamHandle::new(id, buffer, self.clone())))
     }
 
+    /// Inform the remote that this connection is terminating.
+    ///
+    /// Use `flush` or `close` to force sending of the corresponding protocol frame.
     pub fn shutdown(&self) -> Poll<(), io::Error> {
+        let mut connection = Use::with(self.inner.lock(), Action::None);
+        if connection.is_dead {
+            return Ok(Async::Ready(()))
+        }
+        connection.pending.push_back(Frame::go_away(header::CODE_TERM).into_raw());
+        Ok(Async::Ready(()))
+    }
+
+    /// Closes the underlying connection.
+    ///
+    /// Implies flushing any buffered data.
+    pub fn close(&self) -> Poll<(), io::Error> {
         let mut connection = Use::with(self.inner.lock(), Action::Destroy);
         if connection.is_dead {
             return Ok(Async::Ready(()))
+        }
+        if connection.flush_pending()?.is_not_ready() {
+            connection.on_drop(Action::None);
+            return Ok(Async::NotReady)
         }
         let result = {
             let c = &mut *connection;
@@ -107,6 +126,7 @@ where
         Ok(result)
     }
 
+    /// Send any buffered data.
     pub fn flush(&self) -> Poll<(), io::Error> {
         let mut connection = Use::with(self.inner.lock(), Action::Destroy);
         let result = connection.flush_pending()?;
@@ -299,6 +319,7 @@ where
                             self.on_ping(&Frame::assert(frame)).map(Frame::into_raw),
                         Type::GoAway => {
                             self.is_dead = true;
+                            self.streams.clear();
                             self.tasks.notify_all();
                             return Ok(Async::Ready(()))
                         }
@@ -311,6 +332,7 @@ where
                 Async::Ready(None) => {
                     trace!("{:?}: eof: {:?}", self.mode, self);
                     self.is_dead = true;
+                    self.streams.clear();
                     self.tasks.notify_all();
                     return Ok(Async::Ready(()))
                 }
