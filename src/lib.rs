@@ -18,15 +18,12 @@
 //! attempts.
 
 extern crate bytes;
-#[macro_use]
 extern crate futures;
 extern crate nohash_hasher;
-#[macro_use]
 extern crate log;
 extern crate parking_lot;
 #[cfg(test)]
 extern crate quickcheck;
-#[macro_use]
 extern crate quick_error;
 extern crate tokio_io;
 extern crate tokio_codec;
@@ -38,9 +35,8 @@ mod frame;
 mod notify;
 mod stream;
 
-pub use connection::{Connection, Mode, StreamHandle};
-pub use error::{DecodeError, ConnectionError};
-
+pub use crate::connection::{Connection, Mode, StreamHandle};
+pub use crate::error::{DecodeError, ConnectionError};
 
 pub(crate) const DEFAULT_CREDIT: u32 = 256 * 1024; // as per yamux specification
 
@@ -70,7 +66,6 @@ pub enum WindowUpdateMode {
     ///   respectively.
     OnRead
 }
-
 
 /// Yamux configuration.
 ///

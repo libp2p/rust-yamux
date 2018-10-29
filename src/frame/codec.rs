@@ -9,13 +9,14 @@
 // at https://opensource.org/licenses/MIT.
 
 use bytes::{BigEndian, BufMut, ByteOrder, Bytes, BytesMut};
-use error::DecodeError;
-use frame::{header::{Flags, Len, RawHeader, Type, Version}, RawFrame};
+use crate::{
+    Config,
+    error::DecodeError,
+    frame::{header::{Flags, Len, RawHeader, Type, Version}, RawFrame},
+    stream
+};
 use std::io;
-use stream;
 use tokio_codec::{BytesCodec, Decoder, Encoder};
-use Config;
-
 
 #[derive(Debug)]
 pub struct FrameCodec {
@@ -84,7 +85,6 @@ impl Decoder for FrameCodec {
         }
     }
 }
-
 
 #[derive(Debug)]
 pub struct HeaderCodec(());

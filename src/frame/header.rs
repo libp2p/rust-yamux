@@ -8,10 +8,8 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
+use crate::{frame::{Data, WindowUpdate, Ping, GoAway}, stream};
 use std::marker::PhantomData;
-use stream;
-use super::{Data, WindowUpdate, Ping, GoAway};
-
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Type {
@@ -21,14 +19,11 @@ pub enum Type {
     GoAway
 }
 
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Version(pub u8);
 
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Len(pub u32);
-
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Flags(pub u16);
@@ -50,12 +45,10 @@ pub const ECODE_PROTO: u32 = 1;
 /// Internal error code for use with GoAway frames.
 pub const ECODE_INTERNAL: u32 = 2;
 
-
 pub const SYN: Flags = Flags(1);
 pub const ACK: Flags = Flags(2);
 pub const FIN: Flags = Flags(4);
 pub const RST: Flags = Flags(8);
-
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RawHeader {
@@ -65,7 +58,6 @@ pub struct RawHeader {
     pub stream_id: stream::Id,
     pub length: Len
 }
-
 
 #[derive(Clone, Debug)]
 pub struct Header<T> {

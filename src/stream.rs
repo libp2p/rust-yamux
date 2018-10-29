@@ -12,9 +12,7 @@ use bytes::BytesMut;
 use parking_lot::Mutex;
 use std::{fmt, sync::Arc, u32};
 
-
 pub(crate) const CONNECTION_ID: Id = Id(0);
-
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Id(u32);
@@ -47,7 +45,6 @@ impl fmt::Display for Id {
     }
 }
 
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum State {
     Open,
@@ -56,7 +53,6 @@ pub enum State {
     RecvClosed,
     Closed
 }
-
 
 #[derive(Debug)]
 pub(crate) struct StreamEntry {

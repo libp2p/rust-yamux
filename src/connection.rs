@@ -9,19 +9,26 @@
 // at https://opensource.org/licenses/MIT.
 
 use bytes::BytesMut;
-use error::ConnectionError;
-use frame::{
-    codec::FrameCodec,
-    header::{self, ACK, ECODE_INTERNAL, ECODE_PROTO, FIN, Header, RST, SYN, Type},
-    Data,
-    Frame,
-    GoAway,
-    Ping,
-    RawFrame,
-    WindowUpdate
+use crate::{
+    Config,
+    DEFAULT_CREDIT,
+    WindowUpdateMode,
+    error::ConnectionError,
+    frame::{
+        codec::FrameCodec,
+        header::{self, ACK, ECODE_INTERNAL, ECODE_PROTO, FIN, Header, RST, SYN, Type},
+        Data,
+        Frame,
+        GoAway,
+        Ping,
+        RawFrame,
+        WindowUpdate
+    },
+    notify::Notifier,
+    stream::{self, State, StreamEntry, CONNECTION_ID}
 };
-use futures::{executor, prelude::*, stream::{Fuse, Stream}};
-use notify::Notifier;
+use futures::{executor, try_ready, prelude::*, stream::{Fuse, Stream}};
+use log::{debug, error, trace};
 use parking_lot::{Mutex, MutexGuard};
 use std::{
     cmp::min,
@@ -33,15 +40,11 @@ use std::{
     u32,
     usize
 };
-use stream::{self, State, StreamEntry, CONNECTION_ID};
 use tokio_codec::Framed;
 use tokio_io::{AsyncRead, AsyncWrite};
-use {Config, DEFAULT_CREDIT, WindowUpdateMode};
-
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub enum Mode { Client, Server }
-
 
 /// Holds the underlying connection.
 pub struct Connection<T> {
@@ -202,7 +205,6 @@ impl<'a, T> Drop for Use<'a, T> {
         }
     }
 }
-
 
 struct Inner<T> {
     mode: Mode,
@@ -489,7 +491,6 @@ where
     }
 }
 
-
 /// A handle to a multiplexed stream.
 pub struct StreamHandle<T>
 where
@@ -523,7 +524,6 @@ where
         self.connection.inner.lock().reset(self.id)
     }
 }
-
 
 impl<T> io::Read for StreamHandle<T>
 where

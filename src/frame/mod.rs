@@ -8,14 +8,12 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-use std::u32;
 use bytes::Bytes;
-use self::header::{Header, RawHeader};
-use stream;
+use crate::{frame::header::{Header, RawHeader}, stream};
+use std::u32;
 
 pub mod codec;
 pub mod header;
-
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RawFrame {
@@ -29,7 +27,6 @@ impl RawFrame {
     }
 }
 
-
 #[derive(Debug)]
 pub enum Data {}
 #[derive(Debug)]
@@ -38,7 +35,6 @@ pub enum WindowUpdate {}
 pub enum Ping {}
 #[derive(Debug)]
 pub enum GoAway {}
-
 
 #[derive(Clone, Debug)]
 pub struct Frame<T> {
