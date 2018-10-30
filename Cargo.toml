@@ -5,6 +5,7 @@ authors = ["Parity Technologies <admin@parity.io>"]
 license = "Apache-2.0 OR MIT"
 description = "Multiplexer over reliable, ordered connections"
 repository = "https://github.com/paritytech/yamux"
+readme = "README.md"
 
 [dependencies]
 bytes = "0.4"
