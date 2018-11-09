@@ -1,32 +1,29 @@
 // Copyright 2018 Parity Technologies (UK) Ltd.
 //
-// Permission is hereby granted, free of charge, to any person obtaining a copy of
-// this software and associated documentation files (the "Software"), to deal in
-// the Software without restriction, including without limitation the rights to
-// use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
-// the Software, and to permit persons to whom the Software is furnished to do so,
-// subject to the following conditions:
+// Licensed under the Apache License, Version 2.0 or MIT license, at your option.
 //
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
-// FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS
-// OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
-// WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
-// CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+// A copy of the Apache License, Version 2.0 is included in the software as
+// LICENSE-APACHE and a copy of the MIT license is included in the software
+// as LICENSE-MIT. You may also obtain a copy of the Apache License, Version 2.0
+// at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
+// at https://opensource.org/licenses/MIT.
+
+//! Implementation of [yamux](https://github.com/hashicorp/yamux/blob/master/spec.md), a multiplexer
+//! over reliable, ordered connections, such as TCP/IP.
+//!
+//! The two primary objects, clients of this crate interact with, are `Connection` and
+//! `StreamHandle`. The former wraps the underlying connection and multiplexes `StreamHandle`s
+//! which implement `tokio_io::AsyncRead` and `tokio_io::AsyncWrite` over it.
+//! `Connection` implements `futures::Stream` yielding `StreamHandle`s for inbound connection
+//! attempts.
 
 extern crate bytes;
-#[macro_use]
 extern crate futures;
 extern crate nohash_hasher;
-#[macro_use]
 extern crate log;
 extern crate parking_lot;
 #[cfg(test)]
 extern crate quickcheck;
-#[macro_use]
 extern crate quick_error;
 extern crate tokio_io;
 extern crate tokio_codec;
@@ -38,9 +35,8 @@ mod frame;
 mod notify;
 mod stream;
 
-pub use connection::{Connection, Mode, StreamHandle};
-pub use error::{DecodeError, ConnectionError};
-
+pub use crate::connection::{Connection, Mode, StreamHandle};
+pub use crate::error::{DecodeError, ConnectionError};
 
 pub(crate) const DEFAULT_CREDIT: u32 = 256 * 1024; // as per yamux specification
 
@@ -70,7 +66,6 @@ pub enum WindowUpdateMode {
     ///   respectively.
     OnRead
 }
-
 
 /// Yamux configuration.
 ///

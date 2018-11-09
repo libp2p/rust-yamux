@@ -1,4 +1,13 @@
-#[macro_use]
+// Copyright 2018 Parity Technologies (UK) Ltd.
+//
+// Licensed under the Apache License, Version 2.0 or MIT license, at your option.
+//
+// A copy of the Apache License, Version 2.0 is included in the software as
+// LICENSE-APACHE and a copy of the MIT license is included in the software
+// as LICENSE-MIT. You may also obtain a copy of the Apache License, Version 2.0
+// at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
+// at https://opensource.org/licenses/MIT.
+
 extern crate log;
 extern crate env_logger;
 extern crate futures;
@@ -7,11 +16,11 @@ extern crate tokio_codec;
 extern crate yamux;
 
 use futures::{future::{self, Either, Loop}, prelude::*, stream};
+use log::{debug, error, warn};
 use std::io;
 use tokio::{net::{TcpListener, TcpStream}, runtime::Runtime};
 use tokio_codec::{BytesCodec, Framed};
 use yamux::{ConnectionError, Config, Connection, Mode};
-
 
 fn server_conn(addr: &str, cfg: Config) -> impl Future<Item=Connection<TcpStream>, Error=()> {
     TcpListener::bind(&addr.parse().unwrap())
