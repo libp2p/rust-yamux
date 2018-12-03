@@ -154,7 +154,7 @@ where
             return Ok(Async::Ready(Some(stream)))
         }
         connection.on_drop(Action::None);
-        return Ok(Async::NotReady)
+        Ok(Async::NotReady)
     }
 }
 
