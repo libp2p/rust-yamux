@@ -51,6 +51,12 @@ pub struct Connection<T> {
     inner: Arc<Mutex<Inner<T>>>
 }
 
+impl<T> fmt::Debug for Connection<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", &self.inner)
+    }
+}
+
 impl<T> Clone for Connection<T> {
     fn clone(&self) -> Self {
         Connection { inner: self.inner.clone() }
@@ -220,21 +226,14 @@ struct Inner<T> {
 
 impl<T> fmt::Debug for Inner<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "Connection {{ \
-                mode: {:?}, \
-                streams: {}, \
-                incoming: {}, \
-                pending: {}, \
-                next_id: {}, \
-                tasks: {} \
-            }}",
-            self.mode,
-            self.streams.len(),
-            self.incoming.len(),
-            self.pending.len(),
-            self.next_id,
-            self.tasks.len()
-        )
+        f.debug_struct("Connection")
+            .field("mode", &self.mode)
+            .field("streams", &self.streams.len())
+            .field("incoming", &self.incoming.len())
+            .field("pending", &self.pending.len())
+            .field("next_id", &self.next_id)
+            .field("tasks", &self.tasks.len())
+            .finish()
     }
 }
 
@@ -655,4 +654,3 @@ where
         }
     }
 }
-
