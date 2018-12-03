@@ -133,6 +133,29 @@ where
         connection.on_drop(Action::None);
         Ok(result)
     }
+
+    /// Poll connection for incoming data
+    pub fn poll(&self) -> Poll<Option<StreamHandle<T>>, ConnectionError> {
+        let mut connection = Use::with(self.inner.lock(), Action::Destroy);
+        connection.process_incoming()?;
+        if connection.is_dead {
+            return Ok(Async::Ready(None))
+        }
+
+        while let Some(id) = connection.incoming.pop_front() {
+            let stream =
+                if let Some(stream) = connection.streams.get(&id) {
+                    debug!("incoming stream {}: {:?}", id, *connection);
+                    StreamHandle::new(id, stream.buffer.clone(), self.clone())
+                } else {
+                    continue
+                };
+            connection.on_drop(Action::None);
+            return Ok(Async::Ready(Some(stream)))
+        }
+        connection.on_drop(Action::None);
+        return Ok(Async::NotReady)
+    }
 }
 
 impl<T> Stream for Connection<T>
@@ -143,24 +166,7 @@ where
     type Error = ConnectionError;
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        let mut connection = Use::with(self.inner.lock(), Action::Destroy);
-        connection.process_incoming()?;
-        if connection.is_dead {
-            return Ok(Async::Ready(None))
-        }
-        while let Some(id) = connection.incoming.pop_front() {
-            let stream =
-                if let Some(stream) = connection.streams.get(&id) {
-                    debug!("incoming stream {}: {:?}", id, *connection);
-                    StreamHandle::new(id, stream.buffer.clone(), self.clone())
-                } else {
-                    continue
-                };
-                connection.on_drop(Action::None);
-                return Ok(Async::Ready(Some(stream)))
-        }
-        connection.on_drop(Action::None);
-        Ok(Async::NotReady)
+        Connection::poll(self)
     }
 }
 
@@ -655,4 +661,3 @@ where
         }
     }
 }
-
