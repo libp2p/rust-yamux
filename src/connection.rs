@@ -144,9 +144,6 @@ where
     pub fn poll(&self) -> Poll<Option<StreamHandle<T>>, ConnectionError> {
         let mut connection = Use::with(self.inner.lock(), Action::Destroy);
         connection.process_incoming()?;
-        if connection.is_dead {
-            return Ok(Async::Ready(None))
-        }
 
         while let Some(id) = connection.incoming.pop_front() {
             let stream =
@@ -159,6 +156,12 @@ where
             connection.on_drop(Action::None);
             return Ok(Async::Ready(Some(stream)))
         }
+
+        if connection.is_dead {
+            connection.streams.clear();
+            return Ok(Async::Ready(None))
+        }
+
         connection.on_drop(Action::None);
         Ok(Async::NotReady)
     }
@@ -336,7 +339,6 @@ where
                 Async::Ready(None) => {
                     trace!("{:?}: eof: {:?}", self.mode, self);
                     self.is_dead = true;
-                    self.streams.clear();
                     self.tasks.notify_all();
                     return Ok(Async::Ready(()))
                 }
@@ -497,6 +499,7 @@ where
 }
 
 /// A handle to a multiplexed stream.
+#[derive(Debug)]
 pub struct StreamHandle<T>
 where
     T: AsyncRead + AsyncWrite
