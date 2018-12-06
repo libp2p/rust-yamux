@@ -17,6 +17,8 @@
 //! `Connection` implements `futures::Stream` yielding `StreamHandle`s for inbound connection
 //! attempts.
 
+#![feature(nll)]
+
 extern crate bytes;
 extern crate futures;
 extern crate nohash_hasher;
