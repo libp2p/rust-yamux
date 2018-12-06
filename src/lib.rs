@@ -17,19 +17,6 @@
 //! `Connection` implements `futures::Stream` yielding `StreamHandle`s for inbound connection
 //! attempts.
 
-#![feature(nll)]
-
-extern crate bytes;
-extern crate futures;
-extern crate nohash_hasher;
-extern crate log;
-extern crate parking_lot;
-#[cfg(test)]
-extern crate quickcheck;
-extern crate quick_error;
-extern crate tokio_io;
-extern crate tokio_codec;
-
 mod connection;
 mod error;
 #[allow(dead_code)]

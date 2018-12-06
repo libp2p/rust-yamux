@@ -145,7 +145,7 @@ mod tests {
 
     impl Arbitrary for RawFrame {
         fn arbitrary<G: Gen>(g: &mut G) -> Self {
-            use frame::header::Type::*;
+            use crate::frame::header::Type::*;
             let ty = g.choose(&[Data, WindowUpdate, Ping, GoAway]).unwrap().clone();
             let len = g.gen::<u16>() as u32;
             let header = RawHeader {

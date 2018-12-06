@@ -8,13 +8,6 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-extern crate log;
-extern crate env_logger;
-extern crate futures;
-extern crate tokio;
-extern crate tokio_codec;
-extern crate yamux;
-
 use futures::{future::{self, Either, Loop}, prelude::*, stream};
 use log::{debug, error, warn};
 use std::io;
