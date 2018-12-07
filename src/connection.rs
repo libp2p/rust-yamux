@@ -496,6 +496,7 @@ where
 }
 
 /// A handle to a multiplexed stream.
+#[derive(Debug)]
 pub struct StreamHandle<T>
 where
     T: AsyncRead + AsyncWrite
