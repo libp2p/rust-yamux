@@ -48,10 +48,25 @@ impl fmt::Display for Id {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum State {
     Open,
-    #[allow(dead_code)]
     SendClosed,
     RecvClosed,
     Closed
+}
+
+impl State {
+    pub fn can_read(self) -> bool {
+        match self {
+            State::RecvClosed | State::Closed => false,
+            _ => true
+        }
+    }
+
+    pub fn can_write(self) -> bool {
+        match self {
+            State::SendClosed | State::Closed => false,
+            _ => true
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -70,6 +85,10 @@ impl StreamEntry {
             window,
             credit
         }
+    }
+
+    pub(crate) fn state(&self) -> State {
+        self.state
     }
 
     pub(crate) fn update_state(&mut self, next: State) {
