@@ -1,3 +1,7 @@
+# 0.1.2
+
+- Bugfix release. See pull request #26 for details.
+
 # 0.1.1
 
 - Forward `Stream::poll` to the newly added `Connection::poll` method which accepts `self` as a
