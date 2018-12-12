@@ -611,14 +611,14 @@ where
         }
         inner.on_drop(Action::None);
         let frame = match inner.streams.get_mut(&self.id) {
-            Some(ref stream) if stream.credit == 0 => {
-                inner.tasks.insert_current();
-                return Err(io::ErrorKind::WouldBlock.into())
-            }
             Some(stream) => {
                 if !stream.state().can_write() {
                     debug!("stream {} can no longer write", self.id);
                     return Err(io::Error::new(io::ErrorKind::WriteZero, "stream is closed"))
+                }
+                if stream.credit == 0 {
+                    inner.tasks.insert_current();
+                    return Err(io::ErrorKind::WouldBlock.into())
                 }
                 let k = min(stream.credit as usize, buf.len());
                 let b = (&buf[0..k]).into();
