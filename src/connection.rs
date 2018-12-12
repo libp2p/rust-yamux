@@ -402,7 +402,6 @@ where
             if stream.buffer.lock().len() >= self.config.max_buffer_size {
                 error!("buffer of stream {} grows beyond limit", stream_id);
                 self.reset(stream_id);
-                self.streams.remove(&stream_id);
             } else {
                 stream.window = stream.window.saturating_sub(frame.body().len() as u32);
                 stream.buffer.lock().extend(frame.body());
