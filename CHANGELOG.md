@@ -1,3 +1,7 @@
+# 0.1.3
+
+- Bug fix release (pull requests #27 and #28).
+
 # 0.1.2
 
 - Bugfix release. See pull request #26 for details.
