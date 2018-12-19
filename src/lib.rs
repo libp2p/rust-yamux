@@ -62,13 +62,13 @@ pub enum WindowUpdateMode {
 ///
 /// - receive window = 256 KiB
 /// - max. buffer size (per stream) = 1 MiB
-/// - max. number of streams = 8192
+/// - max. substreams = 8192
 /// - window update mode = on receive
 #[derive(Debug, Clone)]
 pub struct Config {
     pub(crate) receive_window: u32,
     pub(crate) max_buffer_size: usize,
-    pub(crate) max_num_streams: usize,
+    pub(crate) max_substreams: usize,
     pub(crate) window_update_mode: WindowUpdateMode
 }
 
@@ -77,13 +77,18 @@ impl Default for Config {
         Config {
             receive_window: DEFAULT_CREDIT,
             max_buffer_size: 1024 * 1024,
-            max_num_streams: 8192,
+            max_substreams: 8192,
             window_update_mode: WindowUpdateMode::OnReceive
         }
     }
 }
 
 impl Config {
+    /// Builds the default configuration.
+    pub fn new() -> Config {
+        Default::default()
+    }
+
     /// Set the receive window (must be >= 256 KiB).
     pub fn set_receive_window(&mut self, n: u32) -> Result<(), ()> {
         if n >= DEFAULT_CREDIT {
@@ -99,8 +104,8 @@ impl Config {
     }
 
     /// Set the max. number of streams.
-    pub fn set_max_num_streams(&mut self, n: usize) {
-        self.max_num_streams = n
+    pub fn set_max_substreams(&mut self, n: usize) {
+        self.max_substreams = n
     }
 
     /// Set the window update mode to use.

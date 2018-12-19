@@ -83,7 +83,7 @@ where
         if connection.is_dead {
             return Ok(None)
         }
-        if connection.streams.len() >= connection.config.max_num_streams {
+        if connection.streams.len() >= connection.config.max_substreams {
             error!("maximum number of streams reached");
             return Err(ConnectionError::TooManyStreams)
         }
@@ -376,7 +376,7 @@ where
                 error!("stream {} already exists", stream_id);
                 return Ok(Some(Frame::go_away(ECODE_PROTO)))
             }
-            if self.streams.len() == self.config.max_num_streams {
+            if self.streams.len() == self.config.max_substreams {
                 error!("maximum number of streams reached");
                 return Ok(Some(Frame::go_away(ECODE_INTERNAL)))
             }
@@ -439,7 +439,7 @@ where
                 error!("stream {} already exists", stream_id);
                 return Ok(Some(Frame::go_away(ECODE_PROTO)))
             }
-            if self.streams.len() == self.config.max_num_streams {
+            if self.streams.len() == self.config.max_substreams {
                 error!("maximum number of streams reached");
                 return Ok(Some(Frame::go_away(ECODE_INTERNAL)))
             }
