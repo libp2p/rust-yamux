@@ -380,7 +380,7 @@ where
                 error!("maximum number of streams reached");
                 return Ok(Some(Frame::go_away(ECODE_INTERNAL)))
             }
-            let mut stream = StreamEntry::new(self.config.receive_window, DEFAULT_CREDIT);
+            let mut stream = StreamEntry::new(DEFAULT_CREDIT, DEFAULT_CREDIT);
             if is_finish {
                 stream.update_state(State::RecvClosed)
             }
@@ -443,7 +443,7 @@ where
                 error!("maximum number of streams reached");
                 return Ok(Some(Frame::go_away(ECODE_INTERNAL)))
             }
-            let mut stream = StreamEntry::new(self.config.receive_window, frame.header().credit());
+            let mut stream = StreamEntry::new(DEFAULT_CREDIT, frame.header().credit());
             if is_finish {
                 stream.update_state(State::RecvClosed)
             }
