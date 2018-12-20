@@ -294,7 +294,6 @@ where
         if self.is_dead {
             return Ok(Async::Ready(()))
         }
-        try_ready!(self.resource.poll_flush_notify(&self.tasks, 0));
         while let Some(frame) = self.pending.pop_front() {
             trace!("{:?}: send: {:?}", self.mode, frame.header);
             if let AsyncSink::NotReady(frame) = self.resource.start_send_notify(frame, &self.tasks, 0)? {
@@ -311,6 +310,7 @@ where
             return Ok(Async::Ready(()))
         }
         loop {
+            try_ready!(self.resource.poll_flush_notify(&self.tasks, 0));
             if !self.pending.is_empty() && self.flush_pending()?.is_not_ready() {
                 self.tasks.insert_current();
                 return Ok(Async::NotReady)
