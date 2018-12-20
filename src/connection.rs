@@ -311,7 +311,7 @@ where
         }
         loop {
             try_ready!(self.resource.poll_flush_notify(&self.tasks, 0));
-            if !self.pending.is_empty() & self.flush_pending()?.is_not_ready() {
+            if !self.pending.is_empty() && self.flush_pending()?.is_not_ready() {
                 self.tasks.insert_current();
                 return Ok(Async::NotReady)
             }
