@@ -385,7 +385,7 @@ where
                 stream.update_state(State::RecvClosed)
             }
             stream.window = stream.window.saturating_sub(frame.body().len() as u32);
-            stream.buffer.lock().extend(frame.body());
+            stream.buffer.lock().extend_from_slice(&frame.body()[..]);
             self.streams.insert(stream_id, stream);
             self.incoming.push_back(stream_id);
             return Ok(None)
@@ -404,7 +404,7 @@ where
                 self.reset(stream_id);
             } else {
                 stream.window = stream.window.saturating_sub(frame.body().len() as u32);
-                stream.buffer.lock().extend(frame.body());
+                stream.buffer.lock().extend_from_slice(&frame.body()[..]);
                 if stream.window == 0 && self.config.window_update_mode == WindowUpdateMode::OnReceive {
                     trace!("{:?}: stream {}: sending window update", self.mode, stream_id);
                     let frame = Frame::window_update(stream_id, self.config.receive_window);
