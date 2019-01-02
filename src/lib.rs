@@ -17,6 +17,7 @@
 //! `Connection` implements `futures::Stream` yielding `StreamHandle`s for inbound connection
 //! attempts.
 
+mod chunks;
 mod connection;
 mod error;
 #[allow(dead_code)]

@@ -8,11 +8,11 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-use bytes::BytesMut;
 use crate::{
     Config,
     DEFAULT_CREDIT,
     WindowUpdateMode,
+    chunks::Chunks,
     error::ConnectionError,
     frame::{
         codec::FrameCodec,
@@ -320,7 +320,7 @@ where
                     trace!("{:?}: recv: {:?}", self.mode, frame.header);
                     let response = match frame.dyn_type() {
                         Type::Data =>
-                            self.on_data(&Frame::assert(frame))?.map(Frame::into_raw),
+                            self.on_data(Frame::assert(frame))?.map(Frame::into_raw),
                         Type::WindowUpdate =>
                             self.on_window_update(&Frame::assert(frame))?.map(Frame::into_raw),
                         Type::Ping =>
@@ -350,7 +350,7 @@ where
         }
     }
 
-    fn on_data(&mut self, frame: &Frame<Data>) -> Result<Option<Frame<GoAway>>, ConnectionError> {
+    fn on_data(&mut self, frame: Frame<Data>) -> Result<Option<Frame<GoAway>>, ConnectionError> {
         let stream_id = frame.header().id();
 
         if frame.header().flags().contains(RST) { // stream reset
@@ -385,7 +385,7 @@ where
                 stream.update_state(State::RecvClosed)
             }
             stream.window = stream.window.saturating_sub(frame.body().len() as u32);
-            stream.buffer.lock().extend_from_slice(&frame.body()[..]);
+            stream.buffer.lock().push(frame.into_body());
             self.streams.insert(stream_id, stream);
             self.incoming.push_back(stream_id);
             return Ok(None)
@@ -404,7 +404,7 @@ where
                 self.reset(stream_id);
             } else {
                 stream.window = stream.window.saturating_sub(frame.body().len() as u32);
-                stream.buffer.lock().extend_from_slice(&frame.body()[..]);
+                stream.buffer.lock().push(frame.into_body());
                 if stream.window == 0 && self.config.window_update_mode == WindowUpdateMode::OnReceive {
                     trace!("{:?}: stream {}: sending window update", self.mode, stream_id);
                     let frame = Frame::window_update(stream_id, self.config.receive_window);
@@ -501,7 +501,7 @@ where
     T: AsyncRead + AsyncWrite
 {
     id: stream::Id,
-    buffer: Arc<Mutex<BytesMut>>,
+    buffer: Arc<Mutex<Chunks>>,
     connection: Connection<T>
 }
 
@@ -509,7 +509,7 @@ impl<T> StreamHandle<T>
 where
     T: AsyncRead + AsyncWrite
 {
-    fn new(id: stream::Id, buffer: Arc<Mutex<BytesMut>>, conn: Connection<T>) -> Self {
+    fn new(id: stream::Id, buffer: Arc<Mutex<Chunks>>, conn: Connection<T>) -> Self {
         StreamHandle { id, buffer, connection: conn }
     }
 
@@ -544,12 +544,23 @@ where
         let mut inner = Use::with(self.connection.inner.lock(), Action::Destroy);
         loop {
             {
-                let mut bytes = self.buffer.lock();
-                if !bytes.is_empty() {
-                    let n = min(bytes.len(), buf.len());
-                    let b = bytes.split_to(n);
-                    (&mut buf[0..n]).copy_from_slice(&b);
+                let mut n = 0;
+                let mut buffer = self.buffer.lock();
+                while let Some(chunk) = buffer.front_mut() {
+                    if chunk.is_empty() {
+                        buffer.pop();
+                        continue
+                    }
+                    let k = min(chunk.len(), buf.len() - n);
+                    (&mut buf[n .. n + k]).copy_from_slice(&chunk[.. k]);
+                    n += k;
+                    chunk.advance(k);
                     inner.on_drop(Action::None);
+                    if n == buf.len() {
+                        break
+                    }
+                }
+                if n > 0 {
                     return Ok(n)
                 }
                 let can_read = inner.streams.get(&self.id).map(|s| s.state().can_read());

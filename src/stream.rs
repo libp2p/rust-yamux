@@ -8,7 +8,7 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-use bytes::BytesMut;
+use crate::chunks::Chunks;
 use parking_lot::Mutex;
 use std::{fmt, sync::Arc, u32};
 
@@ -74,14 +74,14 @@ pub(crate) struct StreamEntry {
     state: State,
     pub(crate) window: u32,
     pub(crate) credit: u32,
-    pub(crate) buffer: Arc<Mutex<BytesMut>>
+    pub(crate) buffer: Arc<Mutex<Chunks>>
 }
 
 impl StreamEntry {
     pub(crate) fn new(window: u32, credit: u32) -> Self {
         StreamEntry {
             state: State::Open,
-            buffer: Arc::new(Mutex::new(BytesMut::new())),
+            buffer: Arc::new(Mutex::new(Chunks::new())),
             window,
             credit
         }
