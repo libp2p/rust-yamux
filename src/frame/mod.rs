@@ -8,7 +8,7 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-use bytes::Bytes;
+use bytes::BytesMut;
 use crate::{frame::header::{Header, RawHeader}, stream};
 use std::u32;
 
@@ -18,7 +18,7 @@ pub mod header;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RawFrame {
     pub header: RawHeader,
-    pub body: Bytes
+    pub body: BytesMut
 }
 
 impl RawFrame {
@@ -39,7 +39,7 @@ pub enum GoAway {}
 #[derive(Clone, Debug)]
 pub struct Frame<T> {
     header: Header<T>,
-    body: Bytes
+    body: BytesMut
 }
 
 impl<T> Frame<T> {
@@ -51,7 +51,7 @@ impl<T> Frame<T> {
     }
 
     pub fn new(header: Header<T>) -> Frame<T> {
-        Frame { header, body: Bytes::new() }
+        Frame { header, body: BytesMut::new() }
     }
 
     pub fn header(&self) -> &Header<T> {
@@ -71,15 +71,19 @@ impl<T> Frame<T> {
 }
 
 impl Frame<Data> {
-    pub fn data(id: stream::Id, b: Bytes) -> Self {
+    pub fn data(id: stream::Id, b: BytesMut) -> Self {
         Frame {
             header: Header::data(id, b.len() as u32),
             body: b
         }
     }
 
-    pub fn body(&self) -> &Bytes {
+    pub fn body(&self) -> &BytesMut {
         &self.body
+    }
+
+    pub fn into_body(self) -> BytesMut {
+        self.body
     }
 }
 
@@ -87,7 +91,7 @@ impl Frame<WindowUpdate> {
     pub fn window_update(id: stream::Id, n: u32) -> Self {
         Frame {
             header: Header::window_update(id, n),
-            body: Bytes::new()
+            body: BytesMut::new()
         }
     }
 }
@@ -96,7 +100,7 @@ impl Frame<GoAway> {
     pub fn go_away(error: u32) -> Self {
         Frame {
             header: Header::go_away(error),
-            body: Bytes::new()
+            body: BytesMut::new()
         }
     }
 }

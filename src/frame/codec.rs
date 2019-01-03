@@ -8,7 +8,7 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-use bytes::{BigEndian, BufMut, ByteOrder, Bytes, BytesMut};
+use bytes::{BigEndian, BufMut, ByteOrder, BytesMut};
 use crate::{
     Config,
     error::DecodeError,
@@ -47,7 +47,7 @@ impl Encoder for FrameCodec {
 
     fn encode(&mut self, frame: Self::Item, bytes: &mut BytesMut) -> Result<(), Self::Error> {
         self.header_codec.encode(frame.header, bytes)?;
-        self.body_codec.encode(frame.body, bytes)
+        self.body_codec.encode(frame.body.freeze(), bytes)
     }
 }
 
@@ -65,7 +65,7 @@ impl Decoder for FrameCodec {
                 return Ok(None)
             };
         if header.typ != Type::Data || header.length.0 == 0 {
-            return Ok(Some(RawFrame { header, body: Bytes::new() }))
+            return Ok(Some(RawFrame { header, body: BytesMut::new() }))
         }
         let len = header.length.0 as usize;
         if len > self.max_buf_size {
@@ -78,7 +78,7 @@ impl Decoder for FrameCodec {
             return Ok(None)
         }
         if let Some(b) = self.body_codec.decode(&mut src.split_to(len))? {
-            Ok(Some(RawFrame { header, body: b.freeze() }))
+            Ok(Some(RawFrame { header, body: b }))
         } else {
             self.header = Some(header);
             Ok(None)
@@ -139,7 +139,7 @@ impl Decoder for HeaderCodec {
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
+    use bytes::BytesMut;
     use quickcheck::{Arbitrary, Gen, quickcheck};
     use super::*;
 
@@ -157,9 +157,9 @@ mod tests {
             };
             let body =
                 if ty == Type::Data {
-                    Bytes::from(vec![0; len as usize])
+                    BytesMut::from(vec![0; len as usize])
                 } else {
-                    Bytes::new()
+                    BytesMut::new()
                 };
             RawFrame { header, body }
         }
