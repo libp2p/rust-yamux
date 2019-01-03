@@ -399,7 +399,8 @@ where
             if is_finish {
                 stream.update_state(State::RecvClosed)
             }
-            if stream.buffer.lock().len() >= self.config.max_buffer_size {
+            let max_buffer_size = self.config.max_buffer_size;
+            if stream.buffer.lock().len().map(move |n| n >= max_buffer_size).unwrap_or(true) {
                 error!("buffer of stream {} grows beyond limit", stream_id);
                 self.reset(stream_id);
             } else {
