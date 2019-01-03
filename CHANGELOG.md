@@ -1,10 +1,14 @@
+# 0.1.5
+
+- Bugfix release (pull request #33).
+
 # 0.1.4
 
-- Bug fix release (pull requests #30 and #31).
+- Bugfix release (pull requests #30 and #31).
 
 # 0.1.3
 
-- Bug fix release (pull requests #27 and #28).
+- Bugfix release (pull requests #27 and #28).
 
 # 0.1.2
 
