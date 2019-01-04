@@ -27,7 +27,7 @@ use crate::{
     notify::Notifier,
     stream::{self, State, StreamEntry, CONNECTION_ID}
 };
-use futures::{executor, try_ready, prelude::*, stream::{Fuse, Stream}};
+use futures::{executor, prelude::*, stream::{Fuse, Stream}};
 use log::{debug, error, trace};
 use parking_lot::{Mutex, MutexGuard};
 use std::{
@@ -127,6 +127,7 @@ where
             c.resource.close_notify(&c.tasks, 0)?
         };
         if result.is_not_ready() {
+            connection.tasks.insert_current();
             connection.on_drop(Action::None)
         }
         Ok(result)
@@ -318,10 +319,14 @@ where
             trace!("{}: {}: send: {:?}", self.id, frame.header.stream_id, frame.header);
             if let AsyncSink::NotReady(frame) = self.resource.start_send_notify(frame, &self.tasks, 0)? {
                 self.pending.push_front(frame);
+                self.tasks.insert_current();
                 return Ok(Async::NotReady)
             }
         }
-        try_ready!(self.resource.poll_flush_notify(&self.tasks, 0));
+        if self.resource.poll_flush_notify(&self.tasks, 0)?.is_not_ready() {
+            self.tasks.insert_current();
+            return Ok(Async::NotReady)
+        }
         Ok(Async::Ready(()))
     }
 
@@ -330,9 +335,7 @@ where
             return Ok(Async::Ready(()))
         }
         loop {
-            try_ready!(self.resource.poll_flush_notify(&self.tasks, 0));
-            if !self.pending.is_empty() && self.flush_pending()?.is_not_ready() {
-                self.tasks.insert_current();
+            if self.flush_pending()?.is_not_ready() {
                 return Ok(Async::NotReady)
             }
             match self.resource.poll_stream_notify(&self.tasks, 0)? {
