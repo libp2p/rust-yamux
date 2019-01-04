@@ -94,7 +94,7 @@ where
         let stream = StreamEntry::new(connection.config.receive_window, DEFAULT_CREDIT);
         let buffer = stream.buffer.clone();
         connection.streams.insert(id, stream);
-        debug!("{}: outgoing stream {}: {:?}", connection.id, id, *connection);
+        debug!("{}: {}: outgoing stream of {:?}", connection.id, id, *connection);
         Ok(Some(StreamHandle::new(id, buffer, self.clone())))
     }
 
@@ -148,7 +148,7 @@ where
         while let Some(id) = connection.incoming.pop_front() {
             let stream =
                 if let Some(stream) = connection.streams.get(&id) {
-                    debug!("{}: incoming stream {}: {:?}", connection.id, id, *connection);
+                    debug!("{}: {}: incoming stream of {:?}", connection.id, id, *connection);
                     StreamHandle::new(id, stream.buffer.clone(), self.clone())
                 } else {
                     continue
@@ -315,7 +315,7 @@ where
             return Ok(Async::Ready(()))
         }
         while let Some(frame) = self.pending.pop_front() {
-            trace!("{}: send: {:?}", self.id, frame.header);
+            trace!("{}: {}: send: {:?}", self.id, frame.header.stream_id, frame.header);
             if let AsyncSink::NotReady(frame) = self.resource.start_send_notify(frame, &self.tasks, 0)? {
                 self.pending.push_front(frame);
                 return Ok(Async::NotReady)
@@ -337,7 +337,7 @@ where
             }
             match self.resource.poll_stream_notify(&self.tasks, 0)? {
                 Async::Ready(Some(frame)) => {
-                    trace!("{}: recv: {:?}", self.id, frame.header);
+                    trace!("{}: {}: recv: {:?}", self.id, frame.header.stream_id, frame.header);
                     let response = match frame.dyn_type() {
                         Type::Data =>
                             self.on_data(Frame::assert(frame))?.map(Frame::into_raw),
@@ -374,7 +374,7 @@ where
         let stream_id = frame.header().id();
 
         if frame.header().flags().contains(RST) { // stream reset
-            debug!("{}: received reset for stream {}", self.id, stream_id);
+            debug!("{}: {}: received reset for stream", self.id, stream_id);
             if let Some(s) = self.streams.get_mut(&stream_id) {
                 s.update_state(State::Closed)
             }
@@ -385,15 +385,15 @@ where
 
         if frame.header().flags().contains(SYN) { // new stream
             if !self.is_valid_remote_id(stream_id, Type::Data) {
-                error!("{}: invalid stream id {}", self.id, stream_id);
+                error!("{}: {}: invalid stream id", self.id, stream_id);
                 return Ok(Some(Frame::go_away(ECODE_PROTO)))
             }
             if frame.body().len() > DEFAULT_CREDIT as usize {
-                error!("{}: initial data for stream {} exceeds default credit", self.id, stream_id);
+                error!("{}: {}: initial data for stream exceeds default credit", self.id, stream_id);
                 return Ok(Some(Frame::go_away(ECODE_PROTO)))
             }
             if self.streams.contains_key(&stream_id) {
-                error!("{}: stream {} already exists", self.id, stream_id);
+                error!("{}: {}: stream already exists", self.id, stream_id);
                 return Ok(Some(Frame::go_away(ECODE_PROTO)))
             }
             if self.streams.len() == self.config.max_num_streams {
@@ -413,7 +413,7 @@ where
 
         if let Some(stream) = self.streams.get_mut(&stream_id) {
             if frame.body().len() > stream.window as usize {
-                error!("{}: frame body larger than window of stream {}", self.id, stream_id);
+                error!("{}: {}: frame body larger than window of stream", self.id, stream_id);
                 return Ok(Some(Frame::go_away(ECODE_PROTO)))
             }
             if is_finish {
@@ -421,13 +421,13 @@ where
             }
             let max_buffer_size = self.config.max_buffer_size;
             if stream.buffer.lock().len().map(move |n| n >= max_buffer_size).unwrap_or(true) {
-                error!("{}: buffer of stream {} grows beyond limit", self.id, stream_id);
+                error!("{}: {}: buffer of stream grows beyond limit", self.id, stream_id);
                 self.reset(stream_id);
             } else {
                 stream.window = stream.window.saturating_sub(frame.body().len() as u32);
                 stream.buffer.lock().push(frame.into_body());
                 if stream.window == 0 && self.config.window_update_mode == WindowUpdateMode::OnReceive {
-                    trace!("{}: stream {}: sending window update", self.id, stream_id);
+                    trace!("{}: {}: sending window update", self.id, stream_id);
                     let frame = Frame::window_update(stream_id, self.config.receive_window);
                     self.pending.push_back(frame.into_raw());
                     stream.window = self.config.receive_window
@@ -442,7 +442,7 @@ where
         let stream_id = frame.header().id();
 
         if frame.header().flags().contains(RST) { // stream reset
-            debug!("{}: received reset for stream {}", self.id, stream_id);
+            debug!("{}: {}: received reset for stream", self.id, stream_id);
             if let Some(s) = self.streams.get_mut(&stream_id) {
                 s.update_state(State::Closed)
             }
@@ -453,11 +453,11 @@ where
 
         if frame.header().flags().contains(SYN) { // new stream
             if !self.is_valid_remote_id(stream_id, Type::WindowUpdate) {
-                error!("{}: invalid stream id {}", self.id, stream_id);
+                error!("{}: {}: invalid stream id", self.id, stream_id);
                 return Ok(Some(Frame::go_away(ECODE_PROTO)))
             }
             if self.streams.contains_key(&stream_id) {
-                error!("{}: stream {} already exists", self.id, stream_id);
+                error!("{}: {}: stream already exists", self.id, stream_id);
                 return Ok(Some(Frame::go_away(ECODE_PROTO)))
             }
             if self.streams.len() == self.config.max_num_streams {
@@ -496,7 +496,7 @@ where
             return Some(Frame::new(hdr))
         }
 
-        debug!("{}: received ping for unknown stream {}", self.id, stream_id);
+        debug!("{}: {}: received ping for unknown stream", self.id, stream_id);
         None
     }
 
@@ -507,7 +507,7 @@ where
         if self.is_dead {
             return
         }
-        debug!("{}: resetting stream {}: {:?}", self.id, id, self);
+        debug!("{}: {}: resetting stream of {:?}", self.id, id, self);
         let mut header = Header::data(id, 0);
         header.rst();
         let frame = Frame::new(header).into_raw();
