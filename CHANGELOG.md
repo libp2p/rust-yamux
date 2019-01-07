@@ -1,3 +1,7 @@
+# 0.1.6
+
+- Bugfix release (pull requests #34 and #35).
+
 # 0.1.5
 
 - Bugfix release (pull request #33).
