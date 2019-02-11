@@ -614,7 +614,13 @@ where
                         continue
                     }
                     inner.on_drop(Action::None);
-                    return Err(io::ErrorKind::WouldBlock.into())
+                    let can_read = inner.streams.get(&self.id).map(|s| s.state().can_read());
+                    if can_read.unwrap_or(false) {
+                        return Err(io::ErrorKind::WouldBlock.into())
+                    } else {
+                        debug!("{}: {}: can no longer read", inner.id, self.id);
+                        return Ok(0) // stream has been reset
+                    }
                 }
                 Ok(Async::Ready(())) => { // connection is dead
                     if self.buffer.lock().is_empty() {
