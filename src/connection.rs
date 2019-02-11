@@ -520,6 +520,19 @@ where
         let frame = Frame::new(header).into_raw();
         self.pending.push_back(frame)
     }
+
+    fn finish(&mut self, id: stream::Id) {
+        if let Some(stream) = self.streams.get_mut(&id) {
+            if stream.state().can_write() {
+                debug!("{}: {}: finish stream", self.id, id);
+                let mut header = Header::data(id, 0);
+                header.fin();
+                let frame = Frame::new(header).into_raw();
+                self.pending.push_back(frame);
+                stream.update_state(State::SendClosed)
+            }
+        }
+    }
 }
 
 /// A handle to a multiplexed stream.
@@ -700,7 +713,7 @@ where
 {
     fn shutdown(&mut self) -> Poll<(), io::Error> {
         let mut connection = Use::with(self.connection.inner.lock(), Action::Destroy);
-        connection.reset(self.id);
+        connection.finish(self.id);
         match connection.flush_pending() {
             Err(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
             Ok(Async::NotReady) => {
