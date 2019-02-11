@@ -504,7 +504,11 @@ where
     }
 
     fn reset(&mut self, id: stream::Id) {
-        if self.streams.remove(&id).is_none() {
+        if let Some(stream) = self.streams.remove(&id) {
+            if stream.state() == State::Closed {
+                return
+            }
+        } else {
             return
         }
         if self.is_dead {
@@ -555,8 +559,7 @@ where
     fn drop(&mut self) {
         let mut inner = self.connection.inner.lock();
         debug!("{}: {}: dropping stream", inner.id, self.id);
-        inner.reset(self.id);
-        inner.streams.remove(&self.id);
+        inner.reset(self.id)
     }
 }
 
