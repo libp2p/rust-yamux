@@ -141,12 +141,14 @@ impl Decoder for HeaderCodec {
 mod tests {
     use bytes::BytesMut;
     use quickcheck::{Arbitrary, Gen, quickcheck};
+    use rand::Rng;
+    use rand::seq::SliceRandom;
     use super::*;
 
     impl Arbitrary for RawFrame {
         fn arbitrary<G: Gen>(g: &mut G) -> Self {
             use crate::frame::header::Type::*;
-            let ty = g.choose(&[Data, WindowUpdate, Ping, GoAway]).unwrap().clone();
+            let ty = [Data, WindowUpdate, Ping, GoAway].choose(g).unwrap().clone();
             let len = g.gen::<u16>() as u32;
             let header = RawHeader {
                 version: Version(g.gen()),
