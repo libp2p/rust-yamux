@@ -18,7 +18,7 @@ use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use tokio::{net::{TcpListener, TcpStream}, runtime::Runtime};
 use tokio_codec::{BytesCodec, Framed, Encoder, Decoder};
-use yamux::{ConnectionError, Config, Connection, Mode};
+use yamux::{Config, Connection, Mode};
 
 #[test]
 fn prop_send_receive() {
@@ -60,14 +60,17 @@ fn prop_max_streams() {
         let codec = BytesCodec::new();
         let server = server(cfg.clone(), l).and_then(move |c| repeat_echo(c, codec, 1));
         let client = client(cfg, a).and_then(move |conn| {
-            Ok((0 .. max_streams + 1).fold(vec![], |mut v, _|
+            let mut v = Vec::new();
+            for _ in 0 .. max_streams {
                 match conn.open_stream() {
-                    Ok(Some(stream)) => { v.push(stream); v },
-                    _ => v
-                }))
-            });
-        let num_streams = run(server, client).len();
-        num_streams == max_streams
+                    Ok(Some(s)) => v.push(s),
+                    Ok(None) => panic!("unexpected EOF when opening stream"),
+                    Err(e) => panic!("unexpected error when opening stream: {}", e)
+                }
+            }
+            Ok(conn.open_stream().is_err())
+        });
+        run(server, client)
     }
 
     quickcheck(prop as fn(_) -> _);
@@ -88,8 +91,8 @@ impl From<Msg> for Bytes {
 impl Arbitrary for Msg {
     fn arbitrary<G: Gen>(g: &mut G) -> Msg {
         let n: usize = g.gen_range(1, 100);
-        let mut v = Vec::with_capacity(n);
-        for _ in 0..n { v.push(g.gen()) }
+        let mut v = vec![0; n];
+        g.fill(&mut v[..]);
         Msg(v)
     }
 }
@@ -129,7 +132,7 @@ where
             .take(n)
             .map(|frame_in| frame_in.into())
             .forward(stream_out)
-            .map_err(|e| ConnectionError::Io(e))
+            .from_err()
             .map(|_| ())
     }).map_err(|e| error!("S: connection error: {}", e))
 }
@@ -140,7 +143,7 @@ fn loop_send_recv<D,I>(c: Connection<TcpStream>, d: D, i: I)
     -> impl Future<Item = Vec<<D as Decoder>::Item>, Error = ()>
 where
     I: Iterator<Item = <D as Encoder>::Item>,
-    D: Encoder + Decoder + Copy,
+    D: Encoder + Decoder + Clone,
     <D as Encoder>::Item: Debug,
     <D as Encoder>::Error: Debug + Display,
     <D as Decoder>::Item: Debug,
@@ -160,7 +163,7 @@ where
         match c.open_stream() {
             Ok(Some(stream)) => {
                 debug!("C: new stream: {:?}", stream);
-                let codec = Framed::new(stream, d);
+                let codec = Framed::new(stream, d.clone());
                 let future = codec.send(msg)
                     .map_err(|e| error!("C: send error: {}", e))
                     .and_then(move |codec| {
