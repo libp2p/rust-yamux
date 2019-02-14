@@ -21,6 +21,6 @@ tokio-io = "0.1"
 
 [dev-dependencies]
 env_logger = "0.5"
-quickcheck = "0.6"
+quickcheck = "0.8"
 tokio = "0.1"
 tokio-codec = "0.1"
