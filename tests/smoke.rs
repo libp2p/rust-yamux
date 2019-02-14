@@ -11,19 +11,18 @@
 use bytes::Bytes;
 use futures::{future::{self, Either, Loop}, prelude::*};
 use log::{debug, error};
-use quickcheck::*;
+use quickcheck::{quickcheck, Arbitrary, Gen, QuickCheck, TestResult};
 use rand::Rng;
-use std::fmt::{Debug, Display};
-use std::io;
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use tokio::{net::{TcpListener, TcpStream}, runtime::Runtime};
-use tokio_codec::{BytesCodec, Framed, Encoder, Decoder};
+use std::{fmt::{Debug, Display}, io, net::{Ipv4Addr, SocketAddr, SocketAddrV4}};
+use tokio::{
+    codec::{BytesCodec, Framed, Encoder, Decoder},
+    net::{TcpListener, TcpStream},
+    runtime::Runtime
+};
 use yamux::{Config, Connection, Mode};
 
 #[test]
 fn prop_send_receive() {
-    let _ = env_logger::try_init();
-
     fn prop(msgs: Vec<Msg>) -> TestResult {
         if msgs.is_empty() {
             return TestResult::discard()
@@ -50,8 +49,6 @@ fn prop_send_receive() {
 
 #[test]
 fn prop_max_streams() {
-    let _ = env_logger::try_init();
-
     fn prop(n: usize) -> bool {
         let (l, a) = bind();
         let mut cfg = Config::default();
