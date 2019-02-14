@@ -27,7 +27,7 @@ use crate::{
     notify::Notifier,
     stream::{self, State, StreamEntry, CONNECTION_ID}
 };
-use futures::{executor, prelude::*, stream::{Fuse, Stream}};
+use futures::{executor, prelude::*, stream::{Fuse, Stream}, try_ready};
 use log::{debug, error, trace};
 use parking_lot::{Mutex, MutexGuard};
 use std::{
@@ -136,6 +136,9 @@ where
     /// Send any buffered data.
     pub fn flush(&self) -> Poll<(), io::Error> {
         let mut connection = Use::with(self.inner.lock(), Action::Destroy);
+        if connection.is_dead {
+            return Ok(Async::Ready(()))
+        }
         let result = connection.flush_pending()?;
         connection.on_drop(Action::None);
         Ok(result)
@@ -144,7 +147,12 @@ where
     /// Poll connection for incoming data
     pub fn poll(&self) -> Poll<Option<StreamHandle<T>>, ConnectionError> {
         let mut connection = Use::with(self.inner.lock(), Action::Destroy);
-        connection.process_incoming()?;
+
+        if connection.is_dead {
+            return Ok(Async::Ready(None))
+        }
+
+        let result = connection.process_incoming()?;
 
         while let Some(id) = connection.incoming.pop_front() {
             let stream =
@@ -162,6 +170,7 @@ where
             return Ok(Async::Ready(None))
         }
 
+        assert!(result.is_not_ready());
         connection.on_drop(Action::None);
         Ok(Async::NotReady)
     }
@@ -213,12 +222,7 @@ impl<'a, T> DerefMut for Use<'a, T> {
 impl<'a, T> Drop for Use<'a, T> {
     fn drop(&mut self) {
         if let Action::Destroy = self.on_drop {
-            debug!("{}: destroying connection", self.inner.id);
-            self.inner.is_dead = true;
-            for s in self.inner.streams.values_mut() {
-                s.update_state(State::Closed)
-            }
-            self.inner.tasks.notify_all()
+            self.inner.kill()
         }
     }
 }
@@ -262,6 +266,17 @@ impl<T> fmt::Debug for Inner<T> {
             .field("next_id", &self.next_id)
             .field("tasks", &self.tasks.len())
             .finish()
+    }
+}
+
+impl<T> Inner<T> {
+    fn kill(&mut self) {
+        debug!("{}: destroying connection", self.id);
+        self.is_dead = true;
+        for s in self.streams.values_mut() {
+            s.update_state(State::Closed)
+        }
+        self.tasks.notify_all()
     }
 }
 
@@ -312,9 +327,6 @@ where
     }
 
     fn flush_pending(&mut self) -> Poll<(), io::Error> {
-        if self.is_dead {
-            return Ok(Async::Ready(()))
-        }
         while let Some(frame) = self.pending.pop_front() {
             trace!("{}: {}: send: {:?}", self.id, frame.header.stream_id, frame.header);
             if let AsyncSink::NotReady(frame) = self.resource.start_send_notify(frame, &self.tasks, 0)? {
@@ -331,13 +343,8 @@ where
     }
 
     fn process_incoming(&mut self) -> Poll<(), ConnectionError> {
-        if self.is_dead {
-            return Ok(Async::Ready(()))
-        }
         loop {
-            if self.flush_pending()?.is_not_ready() {
-                return Ok(Async::NotReady)
-            }
+            try_ready!(self.flush_pending());
             match self.resource.poll_stream_notify(&self.tasks, 0)? {
                 Async::Ready(Some(frame)) => {
                     trace!("{}: {}: recv: {:?}", self.id, frame.header.stream_id, frame.header);
@@ -349,8 +356,7 @@ where
                         Type::Ping =>
                             self.on_ping(&Frame::assert(frame)).map(Frame::into_raw),
                         Type::GoAway => {
-                            self.is_dead = true;
-                            self.tasks.notify_all();
+                            self.kill();
                             return Ok(Async::Ready(()))
                         }
                     };
@@ -361,8 +367,7 @@ where
                 }
                 Async::Ready(None) => {
                     trace!("{}: eof: {:?}", self.id, self);
-                    self.is_dead = true;
-                    self.tasks.notify_all();
+                    self.kill();
                     return Ok(Async::Ready(()))
                 }
                 Async::NotReady => {
@@ -611,6 +616,10 @@ where
                 }
             }
 
+            if inner.is_dead {
+                return Ok(0)
+            }
+
             if inner.config.window_update_mode == WindowUpdateMode::OnRead {
                 let inner = &mut *inner;
                 if let Some(stream) = inner.streams.get_mut(&self.id) {
@@ -638,7 +647,8 @@ where
                         return Ok(0) // stream has been reset
                     }
                 }
-                Ok(Async::Ready(())) => { // connection is dead
+                Ok(Async::Ready(())) => {
+                    assert!(inner.is_dead);
                     if self.buffer.lock().is_empty() {
                         inner.on_drop(Action::None);
                         return Ok(0)
@@ -657,11 +667,14 @@ where
 {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let mut inner = Use::with(self.connection.inner.lock(), Action::Destroy);
+        if inner.is_dead {
+            return Err(io::Error::new(io::ErrorKind::WriteZero, "connection is closed"))
+        }
         match inner.process_incoming() {
             Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e)),
             Ok(Async::NotReady) => {}
             Ok(Async::Ready(())) => {
-                inner.on_drop(Action::None);
+                assert!(inner.is_dead);
                 return Err(io::Error::new(io::ErrorKind::WriteZero, "connection is closed"))
             }
         }
@@ -693,6 +706,9 @@ where
 
     fn flush(&mut self) -> io::Result<()> {
         let mut inner = Use::with(self.connection.inner.lock(), Action::Destroy);
+        if inner.is_dead {
+            return Ok(())
+        }
         match inner.flush_pending() {
             Err(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
             Ok(Async::NotReady) => {
@@ -713,6 +729,9 @@ where
 {
     fn shutdown(&mut self) -> Poll<(), io::Error> {
         let mut connection = Use::with(self.connection.inner.lock(), Action::Destroy);
+        if connection.is_dead {
+            return Ok(Async::Ready(()))
+        }
         connection.finish(self.id);
         match connection.flush_pending() {
             Err(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
