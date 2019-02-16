@@ -9,20 +9,22 @@
 // at https://opensource.org/licenses/MIT.
 
 use bytes::Bytes;
-use futures::{future::{self, Either, Loop}, prelude::*};
+use futures::{future::{self, Either, Loop}, prelude::*, try_ready};
 use log::{debug, error};
 use quickcheck::{quickcheck, Arbitrary, Gen, QuickCheck, TestResult};
 use rand::Rng;
 use std::{fmt::{Debug, Display}, io, net::{Ipv4Addr, SocketAddr, SocketAddrV4}};
+use std::io::Write;
 use tokio::{
     codec::{BytesCodec, Framed, Encoder, Decoder},
     net::{TcpListener, TcpStream},
     runtime::Runtime
 };
-use yamux::{Config, Connection, Mode};
+use tokio_io::{AsyncWrite, AsyncRead};
+use yamux::{Config, Connection, ConnectionError, Mode, StreamHandle, State};
 
 #[test]
-fn prop_send_receive() {
+fn prop_send_recv() {
     fn prop(msgs: Vec<Msg>) -> TestResult {
         if msgs.is_empty() {
             return TestResult::discard()
@@ -59,11 +61,7 @@ fn prop_max_streams() {
         let client = client(cfg, a).and_then(move |conn| {
             let mut v = Vec::new();
             for _ in 0 .. max_streams {
-                match conn.open_stream() {
-                    Ok(Some(s)) => v.push(s),
-                    Ok(None) => panic!("unexpected EOF when opening stream"),
-                    Err(e) => panic!("unexpected error when opening stream: {}", e)
-                }
+                v.push(new_stream(&conn))
             }
             Ok(conn.open_stream().is_err())
         });
@@ -71,6 +69,49 @@ fn prop_max_streams() {
     }
 
     quickcheck(prop as fn(_) -> _);
+}
+
+#[test]
+fn prop_send_recv_half_closed() {
+    fn prop(msg: u8) -> bool {
+        let (l, a) = bind();
+        let cfg = Config::default();
+
+        // Server should be able to write on a stream shutdown by the client.
+        let server = server(cfg.clone(), l).and_then(|c| c
+            .into_future()
+            .map_err(|(e,_)| e)
+            .and_then(|(stream, _)| {
+                let mut s = stream.expect("S: No incoming stream");
+                future::poll_fn(move || {
+                    let mut buf = vec![0;1];
+                    try_ready!(s.poll_read(&mut buf));
+                    assert!(s.state() == Some(State::RecvClosed));
+                    let w = s.write(&buf);
+                    s.flush()?;
+                    Ok(Async::Ready(w.is_ok()))
+                })
+            }).map_err(|e| error!("S: connection error: {}", e)));
+
+        // Client should be able to read after shutting down the stream.
+        let client = client(cfg, a).and_then(move |c| {
+            let mut s = new_stream(&c);
+            s.write(&vec![msg]).expect("C: Write failed");
+            future::poll_fn(move || {
+                try_ready!(s.shutdown());
+                assert!(s.state() == Some(State::SendClosed));
+                let mut buf = vec![0;1];
+                try_ready!(s.poll_read(&mut buf));
+                assert!(s.state() == Some(State::Closed));
+                Ok(Async::Ready(buf == vec![msg]))
+            })
+            .map_err(|e: ConnectionError| error!("C: connection error: {}", e))
+        });
+
+        client.join(server).wait() == Ok((true, true))
+    }
+
+    QuickCheck::new().tests(3).quickcheck(prop as fn(_) -> _);
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -183,6 +224,14 @@ where
             }
         }
     }).map(|(v, _)| v)
+}
+
+fn new_stream(c: &Connection<TcpStream>) -> StreamHandle<TcpStream> {
+    match c.open_stream() {
+        Ok(Some(s)) => s,
+        Ok(None) => panic!("unexpected EOF when opening stream"),
+        Err(e) => panic!("unexpected error when opening stream: {}", e)
+    }
 }
 
 fn run<R,S,C>(server: S, client: C) -> R
