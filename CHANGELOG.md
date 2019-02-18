@@ -1,3 +1,10 @@
+# 0.1.7
+
+- Bugfix release (#36).
+- Support for half-closed streams (#38).
+- Avoids redundant RESET frames (#37).
+- Better test coverage (#40, #42).
+
 # 0.1.6
 
 - Bugfix release (pull requests #34 and #35).
