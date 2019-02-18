@@ -19,10 +19,10 @@ use tokio::{
     net::{TcpListener, TcpStream},
     runtime::Runtime
 };
-use yamux::{Config, Connection, Mode};
+use yamux::{Config, Connection, Mode, StreamHandle, State};
 
 #[test]
-fn prop_send_receive() {
+fn prop_send_recv() {
     fn prop(msgs: Vec<Msg>) -> TestResult {
         if msgs.is_empty() {
             return TestResult::discard()
@@ -59,11 +59,7 @@ fn prop_max_streams() {
         let client = client(cfg, a).and_then(move |conn| {
             let mut v = Vec::new();
             for _ in 0 .. max_streams {
-                match conn.open_stream() {
-                    Ok(Some(s)) => v.push(s),
-                    Ok(None) => panic!("unexpected EOF when opening stream"),
-                    Err(e) => panic!("unexpected error when opening stream: {}", e)
-                }
+                v.push(new_stream(&conn))
             }
             Ok(conn.open_stream().is_err())
         });
@@ -71,6 +67,56 @@ fn prop_max_streams() {
     }
 
     quickcheck(prop as fn(_) -> _);
+}
+
+#[test]
+fn prop_send_recv_half_closed() {
+    fn prop(msg: Msg) -> bool {
+        let (l, a) = bind();
+        let cfg = Config::default();
+        let msg_len = msg.0.len();
+
+        // Server should be able to write on a stream shutdown by the client.
+        let server = server(cfg.clone(), l).and_then(|c| {
+            c.into_future().map_err(|(e,_)| e)
+                .and_then(|(stream, _)| {
+                    let s = stream.expect("S: No incoming stream");
+                    let buf = vec![0; msg_len];
+                    tokio::io::read_exact(s, buf)
+                        .and_then(|(s, buf)| {
+                            assert!(s.state() == Some(State::RecvClosed));
+                            tokio::io::write_all(s, buf)
+                        })
+                        .and_then(|(s, _buf)| {
+                            tokio::io::flush(s).map(|_| true)
+                        }).from_err()
+                })
+                .map_err(|e| error!("S: connection error: {}", e))
+        });
+
+        // Client should be able to read after shutting down the stream.
+        let client = client(cfg, a).and_then(move |c| {
+            let s = new_stream(&c);
+            tokio::io::write_all(s, msg.clone())
+                .and_then(|(s, _buf)| {
+                    tokio::io::shutdown(s)
+                })
+                .and_then(move |s| {
+                    assert!(s.state() == Some(State::SendClosed));
+                    let buf = vec![0; msg_len];
+                    tokio::io::read_exact(s, buf)
+                })
+                .and_then(move |(s, buf)| {
+                    assert!(s.state() == Some(State::Closed));
+                    future::ok(buf == msg.0)
+                })
+                .map_err(|e| error!("C: connection error: {}", e))
+        });
+
+        client.join(server).wait() == Ok((true, true))
+    }
+
+    QuickCheck::new().tests(3).quickcheck(prop as fn(_) -> _);
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -85,9 +131,15 @@ impl From<Msg> for Bytes {
     }
 }
 
+impl AsRef<[u8]> for Msg {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 impl Arbitrary for Msg {
     fn arbitrary<G: Gen>(g: &mut G) -> Msg {
-        let n: usize = g.gen_range(1, 100);
+        let n: usize = g.gen_range(1, g.size() + 1);
         let mut v = vec![0; n];
         g.fill(&mut v[..]);
         Msg(v)
@@ -183,6 +235,14 @@ where
             }
         }
     }).map(|(v, _)| v)
+}
+
+fn new_stream(c: &Connection<TcpStream>) -> StreamHandle<TcpStream> {
+    match c.open_stream() {
+        Ok(Some(s)) => s,
+        Ok(None) => panic!("unexpected EOF when opening stream"),
+        Err(e) => panic!("unexpected error when opening stream: {}", e)
+    }
 }
 
 fn run<R,S,C>(server: S, client: C) -> R
