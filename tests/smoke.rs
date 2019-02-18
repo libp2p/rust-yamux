@@ -9,19 +9,17 @@
 // at https://opensource.org/licenses/MIT.
 
 use bytes::Bytes;
-use futures::{future::{self, Either, Loop}, prelude::*, try_ready};
+use futures::{future::{self, Either, Loop}, prelude::*};
 use log::{debug, error};
 use quickcheck::{quickcheck, Arbitrary, Gen, QuickCheck, TestResult};
 use rand::Rng;
 use std::{fmt::{Debug, Display}, io, net::{Ipv4Addr, SocketAddr, SocketAddrV4}};
-use std::io::Write;
 use tokio::{
     codec::{BytesCodec, Framed, Encoder, Decoder},
     net::{TcpListener, TcpStream},
     runtime::Runtime
 };
-use tokio_io::{AsyncWrite, AsyncRead};
-use yamux::{Config, Connection, ConnectionError, Mode, StreamHandle, State};
+use yamux::{Config, Connection, Mode, StreamHandle, State};
 
 #[test]
 fn prop_send_recv() {
@@ -73,39 +71,46 @@ fn prop_max_streams() {
 
 #[test]
 fn prop_send_recv_half_closed() {
-    fn prop(msg: u8) -> bool {
+    fn prop(msg: Msg) -> bool {
         let (l, a) = bind();
         let cfg = Config::default();
+        let msg_len = msg.0.len();
 
         // Server should be able to write on a stream shutdown by the client.
-        let server = server(cfg.clone(), l).and_then(|c| c
-            .into_future()
-            .map_err(|(e,_)| e)
-            .and_then(|(stream, _)| {
-                let mut s = stream.expect("S: No incoming stream");
-                future::poll_fn(move || {
-                    let mut buf = vec![0;1];
-                    try_ready!(s.poll_read(&mut buf));
-                    assert!(s.state() == Some(State::RecvClosed));
-                    let w = s.write(&buf);
-                    s.flush()?;
-                    Ok(Async::Ready(w.is_ok()))
+        let server = server(cfg.clone(), l).and_then(|c| {
+            c.into_future().map_err(|(e,_)| e)
+                .and_then(|(stream, _)| {
+                    let s = stream.expect("S: No incoming stream");
+                    let buf = vec![0; msg_len];
+                    tokio::io::read_exact(s, buf)
+                        .and_then(|(s, buf)| {
+                            assert!(s.state() == Some(State::RecvClosed));
+                            tokio::io::write_all(s, buf)
+                        })
+                        .and_then(|(s, _buf)| {
+                            tokio::io::flush(s).map(|_| true)
+                        }).from_err()
                 })
-            }).map_err(|e| error!("S: connection error: {}", e)));
+                .map_err(|e| error!("S: connection error: {}", e))
+        });
 
         // Client should be able to read after shutting down the stream.
         let client = client(cfg, a).and_then(move |c| {
-            let mut s = new_stream(&c);
-            s.write(&vec![msg]).expect("C: Write failed");
-            future::poll_fn(move || {
-                try_ready!(s.shutdown());
-                assert!(s.state() == Some(State::SendClosed));
-                let mut buf = vec![0;1];
-                try_ready!(s.poll_read(&mut buf));
-                assert!(s.state() == Some(State::Closed));
-                Ok(Async::Ready(buf == vec![msg]))
-            })
-            .map_err(|e: ConnectionError| error!("C: connection error: {}", e))
+            let s = new_stream(&c);
+            tokio::io::write_all(s, msg.clone())
+                .and_then(|(s, _buf)| {
+                    tokio::io::shutdown(s)
+                })
+                .and_then(move |s| {
+                    assert!(s.state() == Some(State::SendClosed));
+                    let buf = vec![0; msg_len];
+                    tokio::io::read_exact(s, buf)
+                })
+                .and_then(move |(s, buf)| {
+                    assert!(s.state() == Some(State::Closed));
+                    future::ok(buf == msg.0)
+                })
+                .map_err(|e| error!("C: connection error: {}", e))
         });
 
         client.join(server).wait() == Ok((true, true))
@@ -126,9 +131,15 @@ impl From<Msg> for Bytes {
     }
 }
 
+impl AsRef<[u8]> for Msg {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 impl Arbitrary for Msg {
     fn arbitrary<G: Gen>(g: &mut G) -> Msg {
-        let n: usize = g.gen_range(1, 100);
+        let n: usize = g.gen_range(1, g.size() + 1);
         let mut v = vec![0; n];
         g.fill(&mut v[..]);
         Msg(v)
