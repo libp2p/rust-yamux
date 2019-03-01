@@ -1,3 +1,7 @@
+# 0.1.8
+
+- Mark `Connection::shutdown` as deprecated (#44).
+
 # 0.1.7
 
 - Bugfix release (#36).
