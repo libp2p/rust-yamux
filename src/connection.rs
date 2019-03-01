@@ -98,6 +98,11 @@ where
         Ok(Some(StreamHandle::new(id, buffer, self.clone())))
     }
 
+    #[deprecated(since = "0.1.8", note = "Use `Connection::close`.")]
+    pub fn shutdown(&self) -> Poll<(), io::Error> {
+        self.close()
+    }
+
     /// Closes the underlying connection.
     ///
     /// Implies flushing any buffered data.
