@@ -80,7 +80,7 @@ where
     /// already open.
     pub fn open_stream(&self) -> Result<Option<StreamHandle<T>>, ConnectionError> {
         let mut connection = Use::with(self.inner.lock(), Action::None);
-        if connection.is_dead {
+        if connection.status != ConnStatus::Open {
             return Ok(None)
         }
         if connection.streams.len() >= connection.config.max_num_streams {
@@ -98,16 +98,9 @@ where
         Ok(Some(StreamHandle::new(id, buffer, self.clone())))
     }
 
-    /// Inform the remote that this connection is terminating.
-    ///
-    /// Use `flush` or `close` to force sending of the corresponding protocol frame.
+    #[deprecated(since = "0.1.8", note = "Use `Connection::close`.")]
     pub fn shutdown(&self) -> Poll<(), io::Error> {
-        let mut connection = Use::with(self.inner.lock(), Action::None);
-        if connection.is_dead {
-            return Ok(Async::Ready(()))
-        }
-        connection.pending.push_back(Frame::go_away(header::CODE_TERM).into_raw());
-        Ok(Async::Ready(()))
+        self.close()
     }
 
     /// Closes the underlying connection.
@@ -115,8 +108,13 @@ where
     /// Implies flushing any buffered data.
     pub fn close(&self) -> Poll<(), io::Error> {
         let mut connection = Use::with(self.inner.lock(), Action::Destroy);
-        if connection.is_dead {
-            return Ok(Async::Ready(()))
+        match connection.status {
+            ConnStatus::Closed => return Ok(Async::Ready(())),
+            ConnStatus::Open => {
+                connection.pending.push_back(Frame::go_away(header::CODE_TERM).into_raw());
+                connection.status = ConnStatus::Shutdown
+            }
+            ConnStatus::Shutdown => {}
         }
         if connection.flush_pending()?.is_not_ready() {
             connection.on_drop(Action::None);
@@ -136,7 +134,7 @@ where
     /// Send any buffered data.
     pub fn flush(&self) -> Poll<(), io::Error> {
         let mut connection = Use::with(self.inner.lock(), Action::Destroy);
-        if connection.is_dead {
+        if connection.status == ConnStatus::Closed {
             return Ok(Async::Ready(()))
         }
         let result = connection.flush_pending()?;
@@ -148,7 +146,7 @@ where
     pub fn poll(&self) -> Poll<Option<StreamHandle<T>>, ConnectionError> {
         let mut connection = Use::with(self.inner.lock(), Action::Destroy);
 
-        if connection.is_dead {
+        if connection.status != ConnStatus::Open {
             return Ok(Async::Ready(None))
         }
 
@@ -166,7 +164,7 @@ where
             return Ok(Async::Ready(Some(stream)))
         }
 
-        if connection.is_dead {
+        if connection.status != ConnStatus::Open {
             return Ok(Async::Ready(None))
         }
 
@@ -242,10 +240,25 @@ impl fmt::Display for ConnId {
     }
 }
 
+/// Tracks the connection status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConnStatus {
+    /// Under normal operation the connection is open.
+    Open,
+    /// A `Connection::close` has been started.
+    ///
+    /// In this state only the finishing of the close and flushing the connection
+    /// is possible. Other operations consider this as if the connection is
+    /// already closed.
+    Shutdown,
+    /// The connection is closed and can be dropped.
+    Closed
+}
+
 struct Inner<T> {
     id: ConnId,
     mode: Mode,
-    is_dead: bool,
+    status: ConnStatus,
     config: Config,
     streams: BTreeMap<stream::Id, StreamEntry>,
     resource: executor::Spawn<Fuse<Framed<T, FrameCodec>>>,
@@ -272,7 +285,7 @@ impl<T> fmt::Debug for Inner<T> {
 impl<T> Inner<T> {
     fn kill(&mut self) {
         debug!("{}: destroying connection", self.id);
-        self.is_dead = true;
+        self.status = ConnStatus::Closed;
         for s in self.streams.values_mut() {
             s.update_state(State::Closed)
         }
@@ -291,7 +304,7 @@ where
         Inner {
             id,
             mode,
-            is_dead: false,
+            status: ConnStatus::Open,
             config,
             streams: BTreeMap::new(),
             resource: executor::spawn(framed),
@@ -516,7 +529,7 @@ where
         } else {
             return
         }
-        if self.is_dead {
+        if self.status != ConnStatus::Open {
             return
         }
         debug!("{}: {}: resetting stream of {:?}", self.id, id, self);
@@ -616,7 +629,7 @@ where
                 }
             }
 
-            if inner.is_dead {
+            if inner.status != ConnStatus::Open {
                 return Ok(0)
             }
 
@@ -648,7 +661,7 @@ where
                     }
                 }
                 Ok(Async::Ready(())) => {
-                    assert!(inner.is_dead);
+                    assert!(inner.status != ConnStatus::Open);
                     if self.buffer.lock().is_empty() {
                         inner.on_drop(Action::None);
                         return Ok(0)
@@ -667,14 +680,14 @@ where
 {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let mut inner = Use::with(self.connection.inner.lock(), Action::Destroy);
-        if inner.is_dead {
+        if inner.status != ConnStatus::Open {
             return Err(io::Error::new(io::ErrorKind::WriteZero, "connection is closed"))
         }
         match inner.process_incoming() {
             Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e)),
             Ok(Async::NotReady) => {}
             Ok(Async::Ready(())) => {
-                assert!(inner.is_dead);
+                assert!(inner.status != ConnStatus::Open);
                 return Err(io::Error::new(io::ErrorKind::WriteZero, "connection is closed"))
             }
         }
@@ -706,7 +719,7 @@ where
 
     fn flush(&mut self) -> io::Result<()> {
         let mut inner = Use::with(self.connection.inner.lock(), Action::Destroy);
-        if inner.is_dead {
+        if inner.status != ConnStatus::Open {
             return Ok(())
         }
         match inner.flush_pending() {
@@ -729,7 +742,7 @@ where
 {
     fn shutdown(&mut self) -> Poll<(), io::Error> {
         let mut connection = Use::with(self.connection.inner.lock(), Action::Destroy);
-        if connection.is_dead {
+        if connection.status != ConnStatus::Open {
             return Ok(Async::Ready(()))
         }
         connection.finish(self.id);
