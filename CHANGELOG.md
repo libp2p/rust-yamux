@@ -1,3 +1,11 @@
+# 0.1.9
+
+- Add `read_after_close` setting to `Config` which defaults
+  to `true` to match the behaviour of previous versions.
+  Setting `read_after_close` to `false` will cause stream reads
+  to return with `Ok(0)` as soon as the connection is closed,
+  preventing them from reading data from their buffer.
+
 # 0.1.8
 
 - Mark `Connection::shutdown` as deprecated (#44).
