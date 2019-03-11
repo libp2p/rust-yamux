@@ -632,7 +632,7 @@ where
                 }
             }
 
-            if inner.config.read_after_close && inner.status != ConnStatus::Open {
+            if inner.status != ConnStatus::Open {
                 return Ok(0)
             }
 
