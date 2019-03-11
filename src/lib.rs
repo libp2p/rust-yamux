@@ -66,12 +66,14 @@ pub enum WindowUpdateMode {
 /// - max. buffer size (per stream) = 1 MiB
 /// - max. number of streams = 8192
 /// - window update mode = on receive
+/// - read after close = true
 #[derive(Debug, Clone)]
 pub struct Config {
     pub(crate) receive_window: u32,
     pub(crate) max_buffer_size: usize,
     pub(crate) max_num_streams: usize,
-    pub(crate) window_update_mode: WindowUpdateMode
+    pub(crate) window_update_mode: WindowUpdateMode,
+    pub(crate) read_after_close: bool
 }
 
 impl Default for Config {
@@ -80,7 +82,8 @@ impl Default for Config {
             receive_window: DEFAULT_CREDIT,
             max_buffer_size: 1024 * 1024,
             max_num_streams: 8192,
-            window_update_mode: WindowUpdateMode::OnReceive
+            window_update_mode: WindowUpdateMode::OnReceive,
+            read_after_close: true
         }
     }
 }
@@ -108,6 +111,12 @@ impl Config {
     /// Set the window update mode to use.
     pub fn set_window_update_mode(&mut self, m: WindowUpdateMode) {
         self.window_update_mode = m
+    }
+
+    /// Allow or disallow streams to read from buffered data after
+    /// the connection has been closed.
+    pub fn set_read_after_close(&mut self, b: bool) {
+        self.read_after_close = b;
     }
 }
 

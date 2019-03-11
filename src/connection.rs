@@ -600,6 +600,9 @@ where
 {
     fn read(&mut self, buf: &mut[u8]) -> io::Result<usize> {
         let mut inner = Use::with(self.connection.inner.lock(), Action::Destroy);
+        if !inner.config.read_after_close && inner.status != ConnStatus::Open {
+            return Ok(0)
+        }
         loop {
             {
                 let mut n = 0;
@@ -629,7 +632,7 @@ where
                 }
             }
 
-            if inner.status != ConnStatus::Open {
+            if inner.config.read_after_close && inner.status != ConnStatus::Open {
                 return Ok(0)
             }
 
@@ -662,7 +665,7 @@ where
                 }
                 Ok(Async::Ready(())) => {
                     assert!(inner.status != ConnStatus::Open);
-                    if self.buffer.lock().is_empty() {
+                    if !inner.config.read_after_close || self.buffer.lock().is_empty() {
                         inner.on_drop(Action::None);
                         return Ok(0)
                     }
