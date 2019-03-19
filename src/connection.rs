@@ -12,216 +12,125 @@ use crate::{
     Config,
     DEFAULT_CREDIT,
     WindowUpdateMode,
-    chunks::Chunks,
-    error::ConnectionError,
+    error::{CodecError, Error},
     frame::{
         codec::FrameCodec,
-        header::{self, ACK, ECODE_INTERNAL, ECODE_PROTO, FIN, Header, RST, SYN, Type},
+        header::{ACK, CODE_TERM, ECODE_INTERNAL, ECODE_PROTO, FIN, Header, RST, SYN, Type},
         Data,
         Frame,
-        GoAway,
         Ping,
         RawFrame,
         WindowUpdate
     },
-    notify::Notifier,
-    stream::{self, State, StreamEntry, CONNECTION_ID}
+    stream::{self, Stream, CONNECTION_ID}
 };
-use futures::{executor, prelude::*, stream::{Fuse, Stream}, try_ready};
-use log::{debug, error, trace};
-use parking_lot::{Mutex, MutexGuard};
-use std::{
-    cmp::min,
-    collections::{BTreeMap, VecDeque},
-    fmt,
-    io,
-    ops::{Deref, DerefMut},
-    sync::Arc,
-    u32,
-    usize
+use futures::{
+    future::{self, Either, Executor},
+    prelude::*,
+    stream::Stream as _,
+    sync::{mpsc, oneshot}
 };
+use log::{debug, error, trace, warn};
+use holly::{prelude::*, stream::KillCord};
+use std::{collections::{hash_map::Entry, HashMap}, fmt, sync::Arc};
 use tokio_codec::Framed;
 use tokio_io::{AsyncRead, AsyncWrite};
+use tokio_timer::Timeout;
 
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub enum Mode { Client, Server }
 
-/// Holds the underlying connection.
+/// A yamux connection.
+#[derive(Debug)]
 pub struct Connection<T> {
-    inner: Arc<Mutex<Inner<T>>>
-}
-
-impl<T> fmt::Debug for Connection<T> {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", &self.inner)
-    }
-}
-
-impl<T> Clone for Connection<T> {
-    fn clone(&self) -> Self {
-        Connection { inner: self.inner.clone() }
-    }
+    admin: ConnAdmin,
+    state: ConnState<T>
 }
 
 impl<T> Connection<T>
 where
-    T: AsyncRead + AsyncWrite
+    T: AsyncRead + AsyncWrite + Send + 'static
 {
-    pub fn new(res: T, cfg: Config, mode: Mode) -> Self {
-        Connection {
-            inner: Arc::new(Mutex::new(Inner::new(res, cfg, mode)))
-        }
-    }
-
-    /// Open a new outbound stream which is multiplexed over the existing connection.
-    ///
-    /// This may fail if the underlying connection is already dead (in which case `None` is
-    /// returned), or for other reasons, e.g. if the (configurable) maximum number of streams is
-    /// already open.
-    pub fn open_stream(&self) -> Result<Option<StreamHandle<T>>, ConnectionError> {
-        let mut connection = Use::with(self.inner.lock(), Action::None);
-        if connection.status != ConnStatus::Open {
-            return Ok(None)
-        }
-        if connection.streams.len() >= connection.config.max_num_streams {
-            error!("{}: maximum number of streams reached", connection.id);
-            return Err(ConnectionError::TooManyStreams)
-        }
-        let id = connection.next_stream_id()?;
-        let mut frame = Frame::window_update(id, connection.config.receive_window);
-        frame.header_mut().syn();
-        connection.pending.push_back(frame.into_raw());
-        let stream = StreamEntry::new(connection.config.receive_window, DEFAULT_CREDIT);
-        let buffer = stream.buffer.clone();
-        connection.streams.insert(id, stream);
-        debug!("{}: {}: outgoing stream of {:?}", connection.id, id, *connection);
-        Ok(Some(StreamHandle::new(id, buffer, self.clone())))
-    }
-
-    #[deprecated(since = "0.1.8", note = "Use `Connection::close`.")]
-    pub fn shutdown(&self) -> Poll<(), io::Error> {
-        self.close()
-    }
-
-    /// Closes the underlying connection.
-    ///
-    /// Implies flushing any buffered data.
-    pub fn close(&self) -> Poll<(), io::Error> {
-        let mut connection = Use::with(self.inner.lock(), Action::Destroy);
-        match connection.status {
-            ConnStatus::Closed => return Ok(Async::Ready(())),
-            ConnStatus::Open => {
-                connection.pending.push_back(Frame::go_away(header::CODE_TERM).into_raw());
-                connection.status = ConnStatus::Shutdown
-            }
-            ConnStatus::Shutdown => {}
-        }
-        if connection.flush_pending()?.is_not_ready() {
-            connection.on_drop(Action::None);
-            return Ok(Async::NotReady)
-        }
-        let result = {
-            let c = &mut *connection;
-            c.resource.close_notify(&c.tasks, 0)?
+    pub fn new<E>(e: E, res: T, cfg: Config, mode: Mode) -> Result<Handle, Error>
+    where
+        E: Executor<Box<dyn Future<Item = (), Error = ()> + Send>> + Send + Sync + 'static
+    {
+        let id = ConnId(rand::random());
+        debug!("{}: new connection: {:?}", id, mode);
+        let (tx, rx) = mpsc::unbounded(); // TODO
+        let c = Connection {
+            admin: ConnAdmin {
+                id,
+                mode,
+                config: Arc::new(cfg),
+                streams: HashMap::new(),
+                incoming: tx,
+                next_id: match mode {
+                    Mode::Client => 1,
+                    Mode::Server => 2
+                }
+            },
+            state: ConnState::Init(res)
         };
-        if result.is_not_ready() {
-            connection.tasks.insert_current();
-            connection.on_drop(Action::None)
-        }
-        Ok(result)
+        let s = Scheduler::new(e);
+        let mut a = s.spawn(c)?;
+        a.send_now(Message::Setup)?;
+        Ok(Handle { addr: a, incoming: rx })
     }
 
-    /// Send any buffered data.
-    pub fn flush(&self) -> Poll<(), io::Error> {
-        let mut connection = Use::with(self.inner.lock(), Action::Destroy);
-        if connection.status == ConnStatus::Closed {
-            return Ok(Async::Ready(()))
-        }
-        let result = connection.flush_pending()?;
-        connection.on_drop(Action::None);
-        Ok(result)
+    fn open(admin: ConnAdmin, input: KillCord, output: Output) -> Self {
+        Connection { admin, state: ConnState::Open { input, output }}
     }
 
-    /// Poll connection for incoming data
-    pub fn poll(&self) -> Poll<Option<StreamHandle<T>>, ConnectionError> {
-        let mut connection = Use::with(self.inner.lock(), Action::Destroy);
-
-        if connection.status != ConnStatus::Open {
-            return Ok(Async::Ready(None))
-        }
-
-        let result = connection.process_incoming()?;
-
-        while let Some(id) = connection.incoming.pop_front() {
-            let stream =
-                if let Some(stream) = connection.streams.get(&id) {
-                    debug!("{}: {}: incoming stream of {:?}", connection.id, id, *connection);
-                    StreamHandle::new(id, stream.buffer.clone(), self.clone())
-                } else {
-                    continue
-                };
-            connection.on_drop(Action::None);
-            return Ok(Async::Ready(Some(stream)))
-        }
-
-        if connection.status != ConnStatus::Open {
-            return Ok(Async::Ready(None))
-        }
-
-        assert!(result.is_not_ready());
-        connection.on_drop(Action::None);
-        Ok(Async::NotReady)
+    fn closing(rem: usize, admin: ConnAdmin, input: KillCord, output: Output) -> Self {
+        Connection { admin, state: ConnState::Closing { remaining: rem, input, output }}
     }
 }
 
-impl<T> Stream for Connection<T>
-where
-    T: AsyncRead + AsyncWrite
-{
-    type Item = StreamHandle<T>;
-    type Error = ConnectionError;
+/// A handle to a yamux connection.
+pub struct Handle {
+    // Address of the connection actor.
+    addr: Addr<Message>,
+    // Incoming streams initiated from remote.
+    incoming: mpsc::UnboundedReceiver<Stream>
+}
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        // Despite the `wait` we do not have to wait long because
+        // there is only ever one `ConnHandler` per connection and
+        // the connection and stream messages go into secondary
+        // steams, hence the primary actor mailbox is uncontested.
+        let _ = self.close().wait();
+    }
+}
+
+impl Handle {
+    /// Open a new stream to remote.
+    pub fn open_stream(&self) -> impl Future<Item = Option<Stream>, Error = Error> {
+        let (tx, rx) = oneshot::channel();
+        self.addr.clone().send(Message::OpenStream(tx)).from_err()
+            .and_then(move |_| {
+                rx.then(move |x| match x {
+                    Ok(Ok(s)) => Ok(Some(s)),
+                    Ok(Err(e)) => Err(e),
+                    Err(oneshot::Canceled) => Ok(None)
+                })
+            })
+    }
+
+    /// Close the connection.
+    pub fn close(&self) -> impl Future<Item = (), Error = Error> {
+        self.addr.clone().send(Message::Close).from_err().map(|_| ())
+    }
+}
+
+impl futures::Stream for Handle {
+    type Item = Stream;
+    type Error = ();
 
     fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
-        Connection::poll(self)
-    }
-}
-
-enum Action { Destroy, None }
-
-struct Use<'a, T: 'a> {
-    inner: MutexGuard<'a, Inner<T>>,
-    on_drop: Action
-}
-
-impl<'a, T> Use<'a, T> {
-    fn with(inner: MutexGuard<'a, Inner<T>>, on_drop: Action) -> Self {
-        Use { inner, on_drop }
-    }
-
-    fn on_drop(&mut self, val: Action) {
-        self.on_drop = val
-    }
-}
-
-impl<'a, T> Deref for Use<'a, T> {
-    type Target = Inner<T>;
-
-    fn deref(&self) -> &Self::Target {
-        &*self.inner
-    }
-}
-
-impl<'a, T> DerefMut for Use<'a, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut *self.inner
-    }
-}
-
-impl<'a, T> Drop for Use<'a, T> {
-    fn drop(&mut self) {
-        if let Action::Destroy = self.on_drop {
-            self.inner.kill()
-        }
+        self.incoming.poll()
     }
 }
 
@@ -240,87 +149,94 @@ impl fmt::Display for ConnId {
     }
 }
 
-/// Tracks the connection status.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ConnStatus {
-    /// Under normal operation the connection is open.
-    Open,
-    /// A `Connection::close` has been started.
-    ///
-    /// In this state only the finishing of the close and flushing the connection
-    /// is possible. Other operations consider this as if the connection is
-    /// already closed.
-    Shutdown,
-    /// The connection is closed and can be dropped.
-    Closed
+// Possible messages the connection actor understands.
+#[derive(Debug)]
+enum Message {
+    // Begin I/O setup for this connection
+    Setup,
+    // Close connection gracefully.
+    Close,
+    // Close connection immediately.
+    Abort,
+    // Request to open a new stream which should be reported back to the oneshot channel.
+    OpenStream(oneshot::Sender<Result<Stream, Error>>),
+    // Item from our in-memory streams.
+    FromStream(holly::stream::Event<stream::Id, stream::Item, ()>),
+    // Incoming frame from the remote.
+    FromRemote(holly::stream::Event<(), RawFrame, CodecError>)
 }
 
-struct Inner<T> {
+// Incoming frame from remote.
+impl From<holly::stream::Event<(), RawFrame, CodecError>> for Message {
+    fn from(x: holly::stream::Event<(), RawFrame, CodecError>) -> Self {
+        Message::FromRemote(x)
+    }
+}
+
+// Item from our own streams.
+impl From<holly::stream::Event<stream::Id, stream::Item, ()>> for Message {
+    fn from(x: holly::stream::Event<stream::Id, stream::Item, ()>) -> Self {
+        Message::FromStream(x)
+    }
+}
+
+// Static connection state.
+#[derive(Debug)]
+struct ConnAdmin {
     id: ConnId,
     mode: Mode,
-    status: ConnStatus,
-    config: Config,
-    streams: BTreeMap<stream::Id, StreamEntry>,
-    resource: executor::Spawn<Fuse<Framed<T, FrameCodec>>>,
-    incoming: VecDeque<stream::Id>,
-    pending: VecDeque<RawFrame>,
-    tasks: Arc<Notifier>,
+    config: Arc<Config>,
+    streams: HashMap<stream::Id, (KillCord, Stream)>,
+    incoming: mpsc::UnboundedSender<Stream>, // new streams opened by remote
     next_id: u32
 }
 
-impl<T> fmt::Debug for Inner<T> {
+type Output = Box<dyn Sink<SinkItem = RawFrame, SinkError = CodecError> + Send>;
+type ActorFuture<A> = Box<dyn Future<Item = State<A, Message>, Error = Error> + Send>;
+
+// Variable connection state.
+enum ConnState<T> {
+    // Initial setup state.
+    Init(T),
+    // Normal operating state.
+    Open {
+        // Handle to the stream of frames from remote.
+        input: KillCord,
+        // Handle to the sink of frames to the remote.
+        output: Output
+    },
+    Closing {
+        remaining: usize,
+        // Handle to the stream of frames from remote.
+        input: KillCord,
+        // Handle to the sink of frames to the remote.
+        output: Output
+    }
+}
+
+impl<T> fmt::Debug for ConnState<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("Connection")
-            .field("id", &self.id)
-            .field("mode", &self.mode)
-            .field("streams", &self.streams.len())
-            .field("incoming", &self.incoming.len())
-            .field("pending", &self.pending.len())
-            .field("next_id", &self.next_id)
-            .field("tasks", &self.tasks.len())
-            .finish()
+        match self {
+            ConnState::Init(_) => f.write_str("Init"),
+            ConnState::Open {..} => f.write_str("Open"),
+            ConnState::Closing {..} => f.write_str("Closing")
+        }
     }
 }
 
-impl<T> Inner<T> {
-    fn kill(&mut self) {
-        debug!("{}: destroying connection", self.id);
-        self.status = ConnStatus::Closed;
-        for s in self.streams.values_mut() {
-            s.update_state(State::Closed)
+impl Drop for ConnAdmin {
+    fn drop(&mut self) {
+        for (_, (_, s)) in self.streams.drain() {
+            s.update_state(stream::State::Closed);
+            s.notify_tasks()
         }
-        self.tasks.notify_all()
     }
 }
 
-impl<T> Inner<T>
-where
-    T: AsyncRead + AsyncWrite
-{
-    fn new(resource: T, config: Config, mode: Mode) -> Self {
-        let id = ConnId(rand::random());
-        debug!("new connection: id = {}, mode = {:?}", id, mode);
-        let framed = Framed::new(resource, FrameCodec::new(&config)).fuse();
-        Inner {
-            id,
-            mode,
-            status: ConnStatus::Open,
-            config,
-            streams: BTreeMap::new(),
-            resource: executor::spawn(framed),
-            incoming: VecDeque::new(),
-            pending: VecDeque::new(),
-            tasks: Arc::new(Notifier::new()),
-            next_id: match mode {
-                Mode::Client => 1,
-                Mode::Server => 2
-            }
-        }
-    }
-
-    fn next_stream_id(&mut self) -> Result<stream::Id, ConnectionError> {
+impl ConnAdmin {
+    fn next_stream_id(&mut self) -> Result<stream::Id, Error> {
         let proposed = stream::Id::new(self.next_id);
-        self.next_id = self.next_id.checked_add(2).ok_or(ConnectionError::NoMoreStreamIds)?;
+        self.next_id = self.next_id.checked_add(2).ok_or(Error::NoMoreStreamIds)?;
         match self.mode {
             Mode::Client => assert!(proposed.is_client()),
             Mode::Server => assert!(proposed.is_server())
@@ -338,427 +254,543 @@ where
             Mode::Server => id.is_client()
         }
     }
+}
 
-    fn flush_pending(&mut self) -> Poll<(), io::Error> {
-        while let Some(frame) = self.pending.pop_front() {
-            trace!("{}: {}: send: {:?}", self.id, frame.header.stream_id, frame.header);
-            if let AsyncSink::NotReady(frame) = self.resource.start_send_notify(frame, &self.tasks, 0)? {
-                self.pending.push_front(frame);
-                self.tasks.insert_current();
-                return Ok(Async::NotReady)
+impl<T> Actor<Message, Error> for Connection<T>
+where
+    T: AsyncRead + AsyncWrite + Send + 'static
+{
+    type Result = Box<dyn Future<Item = State<Self, Message>, Error = Error> + Send>;
+
+    fn process(self, _ctx: &mut Context<Message>, msg: Option<Message>) -> Self::Result {
+        let Connection { mut admin, state } = self;
+        match state {
+            ConnState::Init(c) => match msg {
+                Some(Message::Setup) => {
+                    let (sink, stream) = Framed::new(c, FrameCodec::new(&admin.config)).split();
+                    let (k, i) = holly::stream::stoppable((), stream);
+                    let s = Self::open(admin, k, Box::new(sink));
+                    Box::new(future::ok(State::Stream(s, Box::new(i.map(Into::into)))))
+                }
+                msg => {
+                    error!("{}: Invalid message: {:?}", admin.id, msg);
+                    Box::new(future::ok(State::Done))
+                }
             }
-        }
-        if self.resource.poll_flush_notify(&self.tasks, 0)?.is_not_ready() {
-            self.tasks.insert_current();
-            return Ok(Async::NotReady)
-        }
-        Ok(Async::Ready(()))
-    }
-
-    fn process_incoming(&mut self) -> Poll<(), ConnectionError> {
-        loop {
-            try_ready!(self.flush_pending());
-            match self.resource.poll_stream_notify(&self.tasks, 0)? {
-                Async::Ready(Some(frame)) => {
-                    trace!("{}: {}: recv: {:?}", self.id, frame.header.stream_id, frame.header);
-                    let response = match frame.dyn_type() {
-                        Type::Data =>
-                            self.on_data(Frame::assert(frame))?.map(Frame::into_raw),
-                        Type::WindowUpdate =>
-                            self.on_window_update(&Frame::assert(frame))?.map(Frame::into_raw),
-                        Type::Ping =>
-                            self.on_ping(&Frame::assert(frame)).map(Frame::into_raw),
-                        Type::GoAway => {
-                            self.kill();
-                            return Ok(Async::Ready(()))
+            ConnState::Open { input, output } => match msg {
+                Some(Message::OpenStream(requestor)) => match admin.next_stream_id() {
+                    Ok(id) => {
+                        // create stream
+                        let (tx, rx) = mpsc::unbounded();
+                        let stream = Stream::new(id, admin.config.clone(), tx, DEFAULT_CREDIT);
+                        if requestor.send(Ok(stream.clone())).is_err() {
+                            return ready_open(admin, input, output)
                         }
-                    };
-                    if let Some(frame) = response {
-                        self.pending.push_back(frame)
+                        let (i, s) = holly::stream::closable(id, rx);
+                        // Send initial frame to remote informing it of the new stream.
+                        // We do not flush as the opener of the stream will presumably send
+                        // data and we can defer sending out the open frame until then.
+                        let mut frame = Frame::window_update(id, admin.config.receive_window);
+                        frame.header_mut().syn();
+                        let frame = frame.into_raw();
+                        trace!("{}: {}: open: {:?}", admin.id, id, frame.header);
+                        let future = send_frame(frame, &admin, output)
+                            .map(move |output| {
+                                admin.streams.insert(id, (i, stream));
+                                let state = Self::open(admin, input, output);
+                                State::Stream(state, Box::new(s.map(Into::into)))
+                            });
+                        Box::new(future)
                     }
-                    self.tasks.notify_all();
+                    Err(e) => { // no more stream IDs => transition to closing
+                        error!("{}: stream IDs exhausted", admin.id);
+                        let _ = requestor.send(Err(e));
+                        let r = admin.streams.len();
+                        for (_, (_, s)) in admin.streams.drain() {
+                            s.update_state(stream::State::Closed);
+                            s.notify_tasks()
+                        }
+                        ready_closing(r, admin, input, output)
+                    }
+                },
+                Some(Message::FromStream(item)) => match item {
+                    holly::stream::Event::Item(id, item) => {
+                        match item {
+                            stream::Item::Data(bytes) => {
+                                let frame = Frame::data(id, bytes).into_raw();
+                                let future = send_frame(frame, &admin, output)
+                                    .map(move |output| {
+                                        State::Ready(Self::open(admin, input, output))
+                                    });
+                                Box::new(future)
+                            }
+                            stream::Item::Flush => {
+                                let future = flush(&admin, output)
+                                    .map(move |output| {
+                                        State::Ready(Self::open(admin, input, output))
+                                    });
+                                Box::new(future)
+                            }
+                            stream::Item::Credit => {
+                                // Need to send AND flush window updates.
+                                let frame = Frame::window_update(id, admin.config.receive_window);
+                                let future = send_frame_flush(frame.into_raw(), &admin, output)
+                                    .map(move |output| {
+                                        State::Ready(Self::open(admin, input, output))
+                                    });
+                                Box::new(future)
+                            }
+                            stream::Item::HalfClose => {
+                                let mut h = Header::data(id, 0);
+                                h.fin();
+                                let frame = Frame::new(h).into_raw();
+                                let future = send_frame_flush(frame, &admin, output)
+                                    .map(move |output| {
+                                        State::Ready(Self::open(admin, input, output))
+                                    });
+                                Box::new(future)
+                            }
+                            stream::Item::Reset => {
+                                if admin.streams.contains_key(&id) {
+                                    let future = send_reset(id, &admin, output)
+                                        .map(move |output| {
+                                            State::Ready(Self::open(admin, input, output))
+                                        });
+                                    return Box::new(future)
+                                }
+                                ready_open(admin, input, output)
+                            }
+                        }
+                    }
+                    holly::stream::Event::Error(id, ()) | holly::stream::Event::End(id) => {
+                        if let Some((_, s)) = admin.streams.remove(&id) {
+                            if s.state() == stream::State::Closed {
+                                s.notify_tasks();
+                                return ready_open(admin, input, output)
+                            }
+                            s.update_state(stream::State::Closed);
+                            s.notify_tasks();
+                            let future = send_reset(id, &admin, output)
+                                .map(move |output| {
+                                    State::Ready(Self::open(admin, input, output))
+                                });
+                            return Box::new(future)
+                        }
+                        ready_open(admin, input, output)
+                    }
+                },
+                Some(Message::FromRemote(item)) => match item {
+                    holly::stream::Event::Item((), raw_frame) => {
+                        trace!("{}: {}: recv: {:?}", admin.id, raw_frame.header.stream_id, raw_frame.header);
+                        match raw_frame.dyn_type() {
+                            Type::Data => {
+                                let frame = Frame::<Data>::assert(raw_frame);
+                                let id = frame.header().id();
+                                if frame.header().flags().contains(RST) {
+                                    if let Some(stream) = admin.streams.remove(&id) {
+                                        stream.1.update_state(stream::State::Closed);
+                                        stream.1.notify_tasks()
+                                    }
+                                    return ready_open(admin, input, output)
+                                }
+
+                                let is_finish = frame.header().flags().contains(FIN); // half-close
+
+                                // Is this a new stream?
+                                if frame.header().flags().contains(SYN) {
+                                    if !admin.is_valid_remote_id(id, Type::Data) {
+                                        error!("{}: {}: invalid stream id", admin.id, id);
+                                        return immediate_close(admin, output, ECODE_PROTO)
+                                    }
+                                    if frame.body().len() > DEFAULT_CREDIT as usize {
+                                        error!("{}: {}: initial frame body too large", admin.id, id);
+                                        return immediate_close(admin, output, ECODE_PROTO)
+                                    }
+                                    if admin.streams.contains_key(&id) {
+                                        error!("{}: {}: stream already in use", admin.id, id);
+                                        return immediate_close(admin, output, ECODE_PROTO)
+                                    }
+                                    if admin.streams.len() == admin.config.max_num_streams {
+                                        error!("{}: {}: too many streams", admin.id, id);
+                                        return immediate_close(admin, output, ECODE_INTERNAL)
+                                    }
+
+                                    // Create the new stream.
+                                    let (tx, rx) = mpsc::unbounded();
+                                    let stream = Stream::new(id, admin.config.clone(), tx, DEFAULT_CREDIT);
+                                    if is_finish {
+                                        stream.update_state(stream::State::WriteOnly)
+                                    }
+                                    stream.decrement_window(frame.body().len() as u32);
+                                    stream.add_data(frame.into_body());
+
+                                    let (k, s) = holly::stream::closable(id, rx);
+                                    admin.streams.insert(id, (k, stream.clone()));
+
+                                    let _ = admin.incoming.unbounded_send(stream);
+
+                                    let state = Self::open(admin, input, output);
+                                    let state = State::Stream(state, Box::new(s.map(Into::into)));
+                                    return Box::new(future::ok(state))
+                                }
+
+                                // Data for an existing stream.
+                                match admin.streams.entry(id) {
+                                    Entry::Occupied(entry) => {
+                                        if frame.body().len() > entry.get().1.window() as usize {
+                                            error!("{}: {}: frame body too large", admin.id, id);
+                                            return immediate_close(admin, output, ECODE_PROTO)
+                                        }
+                                        if is_finish {
+                                            entry.get().1.update_state(stream::State::WriteOnly)
+                                        }
+                                        let max_buffer_size = admin.config.max_buffer_size;
+                                        // Stream buffer grows beyond limit => remove & reset stream
+                                        if entry.get().1.buflen().map(move |n| n >= max_buffer_size).unwrap_or(true) {
+                                            warn!("{}: {}: max. stream buffer size reached", admin.id, id);
+                                            let stream = entry.remove();
+                                            stream.1.update_state(stream::State::Closed);
+                                            stream.1.notify_tasks();
+                                            let future = send_reset(id, &admin, output)
+                                                .map(move |output| {
+                                                    State::Ready(Self::open(admin, input, output))
+                                                });
+                                            return Box::new(future)
+                                        }
+                                        let window = entry.get().1.decrement_window(frame.body().len() as u32);
+                                        entry.get().1.add_data(frame.into_body());
+                                        if window == 0 && admin.config.window_update_mode == WindowUpdateMode::OnReceive {
+                                            entry.get().1.set_window(admin.config.receive_window);
+                                            let frame = Frame::window_update(id, admin.config.receive_window);
+                                            let future = send_frame_flush(frame.into_raw(), &admin, output)
+                                                .map(move |output| {
+                                                    State::Ready(Self::open(admin, input, output))
+                                                });
+                                            return Box::new(future)
+                                        }
+                                        return ready_open(admin, input, output)
+                                    }
+                                    Entry::Vacant(_) => {
+                                        // Data for an unknown stream => ignore and tell remote to
+                                        // reset the stream
+                                        debug!("{}: {}: data for unknown stream", admin.id, id);
+                                        let future = send_reset(id, &admin, output)
+                                            .map(move |output| {
+                                                State::Ready(Self::open(admin, input, output))
+                                            });
+                                        return Box::new(future)
+                                    }
+                                }
+                            }
+                            Type::WindowUpdate => {
+                                let frame = Frame::<WindowUpdate>::assert(raw_frame);
+                                let id = frame.header().id();
+                                if frame.header().flags().contains(RST) {
+                                    if let Some(stream) = admin.streams.remove(&id) {
+                                        stream.1.update_state(stream::State::Closed);
+                                        stream.1.notify_tasks()
+                                    }
+                                    return ready_open(admin, input, output)
+                                }
+
+                                let is_finish = frame.header().flags().contains(FIN); // half-close
+
+                                // Is this a new stream?
+                                if frame.header().flags().contains(SYN) {
+                                    if !admin.is_valid_remote_id(id, Type::WindowUpdate) {
+                                        error!("{}: {}: invalid stream id", admin.id, id);
+                                        return immediate_close(admin, output, ECODE_PROTO)
+                                    }
+                                    if admin.streams.contains_key(&id) {
+                                        error!("{}: {}: stream already in use", admin.id, id);
+                                        return immediate_close(admin, output, ECODE_PROTO)
+                                    }
+                                    if admin.streams.len() == admin.config.max_num_streams {
+                                        error!("{}: {}: too many streams", admin.id, id);
+                                        return immediate_close(admin, output, ECODE_INTERNAL)
+                                    }
+
+                                    // Create the new stream.
+                                    let (tx, rx) = mpsc::unbounded();
+                                    let stream = Stream::new(id, admin.config.clone(), tx, DEFAULT_CREDIT);
+                                    if is_finish {
+                                        stream.update_state(stream::State::WriteOnly)
+                                    }
+
+                                    let (k, s) = holly::stream::closable(id, rx);
+                                    admin.streams.insert(id, (k, stream.clone()));
+
+                                    let _ = admin.incoming.unbounded_send(stream);
+
+                                    let state = Self::open(admin, input, output);
+                                    let state = State::Stream(state, Box::new(s.map(Into::into)));
+                                    return Box::new(future::ok(state))
+                                }
+
+                                if let Some(stream) = admin.streams.get_mut(&id) {
+                                    stream.1.add_credit(frame.header().credit());
+                                    if is_finish {
+                                        stream.1.update_state(stream::State::WriteOnly)
+                                    }
+                                    ready_open(admin, input, output)
+                                } else {
+                                    // Window update for an unknown stream => ignore and tell remote to
+                                    // reset the stream
+                                    debug!("{}: {}: window update for unknown stream", admin.id, id);
+                                    let future = send_reset(id, &admin, output)
+                                        .map(move |output| {
+                                            State::Ready(Self::open(admin, input, output))
+                                        });
+                                    Box::new(future)
+                                }
+                            }
+                            Type::Ping => {
+                                let frame = Frame::<Ping>::assert(raw_frame);
+                                let id = frame.header().id();
+
+                                if frame.header().flags().contains(ACK) { // pong
+                                    return ready_open(admin, input, output)
+                                }
+
+                                if id == CONNECTION_ID || admin.streams.contains_key(&id) {
+                                    let mut h = Header::ping(frame.header().nonce());
+                                    h.ack();
+                                    let frame = Frame::new(h).into_raw();
+                                    let future = send_frame_flush(frame, &admin, output)
+                                        .map(move |output| {
+                                            State::Ready(Self::open(admin, input, output))
+                                        });
+                                    return Box::new(future)
+                                }
+
+                                ready_open(admin, input, output)
+                            }
+                            Type::GoAway => {
+                                debug!("{}: received GoAway", admin.id);
+                                Box::new(future::ok(State::Done))
+                            }
+                        }
+                    }
+                    holly::stream::Event::End(()) => { // connection closed
+                        debug!("{}: connection closed", admin.id);
+                        Box::new(future::ok(State::Done))
+                    }
+                    holly::stream::Event::Error((), e) => { // connection error
+                        debug!("{}: connection error: {}", admin.id, e);
+                        Box::new(future::ok(State::Done))
+                    }
+                },
+                Some(Message::Setup) => {
+                    error!("{}: Received setup message while open => ignoring", admin.id);
+                    ready_open(admin, input, output)
                 }
-                Async::Ready(None) => {
-                    trace!("{}: eof: {:?}", self.id, self);
-                    self.kill();
-                    return Ok(Async::Ready(()))
+                Some(Message::Close) => {
+                    trace!("{}: closing", admin.id);
+                    let r = admin.streams.len();
+                    for (_, (_, s)) in admin.streams.drain() {
+                        s.update_state(stream::State::Closed);
+                        s.notify_tasks()
+                    }
+                    ready_closing(r, admin, input, output)
                 }
-                Async::NotReady => {
-                    self.tasks.insert_current();
-                    return Ok(Async::NotReady)
+                Some(Message::Abort) => {
+                    debug!("{}: abort", admin.id);
+                    Box::new(future::ok(State::Done))
                 }
-            }
-        }
-    }
-
-    fn on_data(&mut self, frame: Frame<Data>) -> Result<Option<Frame<GoAway>>, ConnectionError> {
-        let stream_id = frame.header().id();
-
-        if frame.header().flags().contains(RST) { // stream reset
-            debug!("{}: {}: received reset for stream", self.id, stream_id);
-            if let Some(s) = self.streams.get_mut(&stream_id) {
-                s.update_state(State::Closed)
-            }
-            return Ok(None)
-        }
-
-        let is_finish = frame.header().flags().contains(FIN); // half-close
-
-        if frame.header().flags().contains(SYN) { // new stream
-            if !self.is_valid_remote_id(stream_id, Type::Data) {
-                error!("{}: {}: invalid stream id", self.id, stream_id);
-                return Ok(Some(Frame::go_away(ECODE_PROTO)))
-            }
-            if frame.body().len() > DEFAULT_CREDIT as usize {
-                error!("{}: {}: initial data for stream exceeds default credit", self.id, stream_id);
-                return Ok(Some(Frame::go_away(ECODE_PROTO)))
-            }
-            if self.streams.contains_key(&stream_id) {
-                error!("{}: {}: stream already exists", self.id, stream_id);
-                return Ok(Some(Frame::go_away(ECODE_PROTO)))
-            }
-            if self.streams.len() == self.config.max_num_streams {
-                error!("{}: maximum number of streams reached", self.id);
-                return Ok(Some(Frame::go_away(ECODE_INTERNAL)))
-            }
-            let mut stream = StreamEntry::new(DEFAULT_CREDIT, DEFAULT_CREDIT);
-            if is_finish {
-                stream.update_state(State::RecvClosed)
-            }
-            stream.window = stream.window.saturating_sub(frame.body().len() as u32);
-            stream.buffer.lock().push(frame.into_body());
-            self.streams.insert(stream_id, stream);
-            self.incoming.push_back(stream_id);
-            return Ok(None)
-        }
-
-        if let Some(stream) = self.streams.get_mut(&stream_id) {
-            if frame.body().len() > stream.window as usize {
-                error!("{}: {}: frame body larger than window of stream", self.id, stream_id);
-                return Ok(Some(Frame::go_away(ECODE_PROTO)))
-            }
-            if is_finish {
-                stream.update_state(State::RecvClosed)
-            }
-            let max_buffer_size = self.config.max_buffer_size;
-            if stream.buffer.lock().len().map(move |n| n >= max_buffer_size).unwrap_or(true) {
-                error!("{}: {}: buffer of stream grows beyond limit", self.id, stream_id);
-                self.reset(stream_id);
-            } else {
-                stream.window = stream.window.saturating_sub(frame.body().len() as u32);
-                stream.buffer.lock().push(frame.into_body());
-                if stream.window == 0 && self.config.window_update_mode == WindowUpdateMode::OnReceive {
-                    trace!("{}: {}: sending window update", self.id, stream_id);
-                    let frame = Frame::window_update(stream_id, self.config.receive_window);
-                    self.pending.push_back(frame.into_raw());
-                    stream.window = self.config.receive_window
+                None => {
+                    debug!("{}: eos", admin.id);
+                    Box::new(future::ok(State::Done))
                 }
             }
-        }
+            ConnState::Closing { remaining, input, output } => match msg {
+                Some(Message::FromStream(item)) => match item {
+                    holly::stream::Event::Item(id, item) => {
+                        match item {
+                            stream::Item::Data(bytes) => {
+                                let frame = Frame::data(id, bytes).into_raw();
+                                let future = send_frame(frame, &admin, output)
+                                    .map(move |output| {
+                                        State::Ready(Self::closing(remaining, admin, input, output))
+                                    });
+                                Box::new(future)
+                            }
+                            stream::Item::Flush => {
+                                let future = flush(&admin, output)
+                                    .map(move |output| {
+                                        State::Ready(Self::closing(remaining, admin, input, output))
+                                    });
+                                Box::new(future)
+                            }
+                            stream::Item::Credit | stream::Item::HalfClose => {
+                                ready_closing(remaining, admin, input, output)
+                            }
+                            stream::Item::Reset => {
+                                if admin.streams.contains_key(&id) {
+                                    let future = send_reset(id, &admin, output)
+                                        .map(move |output| {
+                                            State::Ready(Self::closing(remaining, admin, input, output))
+                                        });
+                                    return Box::new(future)
+                                }
+                                ready_closing(remaining, admin, input, output)
+                            }
+                        }
+                    }
+                    holly::stream::Event::Error(id, ()) | holly::stream::Event::End(id) => {
+                        if remaining == 1 {
+                            return immediate_close(admin, output, CODE_TERM)
+                        }
+                        if let Some((_, s)) = admin.streams.remove(&id) {
+                            if s.state() == stream::State::Closed {
+                                s.notify_tasks();
+                                return ready_closing(remaining - 1, admin, input, output)
+                            }
+                            s.update_state(stream::State::Closed);
+                            s.notify_tasks();
+                            let future = send_reset(id, &admin, output)
+                                .map(move |output| {
+                                    State::Ready(Self::closing(remaining - 1, admin, input, output))
+                                });
+                            return Box::new(future)
+                        }
+                        ready_closing(remaining - 1, admin, input, output)
+                    }
+                },
+                Some(Message::FromRemote(item)) => match item {
+                    holly::stream::Event::Item((), raw_frame) => {
+                        trace!("{}: {}: recv: {:?}", admin.id, raw_frame.header.stream_id, raw_frame.header);
+                        match raw_frame.dyn_type() {
+                            Type::Data | Type::WindowUpdate => {
+                                ready_closing(remaining, admin, input, output)
+                            }
+                            Type::Ping => {
+                                let frame = Frame::<Ping>::assert(raw_frame);
+                                let id = frame.header().id();
 
-        Ok(None)
-    }
+                                if frame.header().flags().contains(ACK) { // pong
+                                    return ready_closing(remaining, admin, input, output)
+                                }
 
-    fn on_window_update(&mut self, frame: &Frame<WindowUpdate>) -> Result<Option<Frame<GoAway>>, ConnectionError> {
-        let stream_id = frame.header().id();
+                                if id == CONNECTION_ID || admin.streams.contains_key(&id) {
+                                    let mut h = Header::ping(frame.header().nonce());
+                                    h.ack();
+                                    let frame = Frame::new(h).into_raw();
+                                    let future = send_frame_flush(frame, &admin, output)
+                                        .map(move |output| {
+                                            State::Ready(Connection::closing(remaining, admin, input, output))
+                                        });
+                                    return Box::new(future)
+                                }
 
-        if frame.header().flags().contains(RST) { // stream reset
-            debug!("{}: {}: received reset for stream", self.id, stream_id);
-            if let Some(s) = self.streams.get_mut(&stream_id) {
-                s.update_state(State::Closed)
-            }
-            return Ok(None)
-        }
-
-        let is_finish = frame.header().flags().contains(FIN); // half-close
-
-        if frame.header().flags().contains(SYN) { // new stream
-            if !self.is_valid_remote_id(stream_id, Type::WindowUpdate) {
-                error!("{}: {}: invalid stream id", self.id, stream_id);
-                return Ok(Some(Frame::go_away(ECODE_PROTO)))
-            }
-            if self.streams.contains_key(&stream_id) {
-                error!("{}: {}: stream already exists", self.id, stream_id);
-                return Ok(Some(Frame::go_away(ECODE_PROTO)))
-            }
-            if self.streams.len() == self.config.max_num_streams {
-                error!("{}: maximum number of streams reached", self.id);
-                return Ok(Some(Frame::go_away(ECODE_INTERNAL)))
-            }
-            let mut stream = StreamEntry::new(DEFAULT_CREDIT, frame.header().credit());
-            if is_finish {
-                stream.update_state(State::RecvClosed)
-            }
-            self.streams.insert(stream_id, stream);
-            self.incoming.push_back(stream_id);
-            return Ok(None)
-        }
-
-        if let Some(stream) = self.streams.get_mut(&stream_id) {
-            stream.credit += frame.header().credit();
-            if is_finish {
-                stream.update_state(State::RecvClosed)
-            }
-        }
-
-        Ok(None)
-    }
-
-    fn on_ping(&mut self, frame: &Frame<Ping>) -> Option<Frame<Ping>> {
-        let stream_id = frame.header().id();
-
-        if frame.header().flags().contains(ACK) { // pong
-            return None
-        }
-
-        if stream_id == CONNECTION_ID || self.streams.contains_key(&stream_id) {
-            let mut hdr = Header::ping(frame.header().nonce());
-            hdr.ack();
-            return Some(Frame::new(hdr))
-        }
-
-        debug!("{}: {}: received ping for unknown stream", self.id, stream_id);
-        None
-    }
-
-    fn reset(&mut self, id: stream::Id) {
-        if let Some(stream) = self.streams.remove(&id) {
-            if stream.state() == State::Closed {
-                return
-            }
-        } else {
-            return
-        }
-        if self.status != ConnStatus::Open {
-            return
-        }
-        debug!("{}: {}: resetting stream of {:?}", self.id, id, self);
-        let mut header = Header::data(id, 0);
-        header.rst();
-        let frame = Frame::new(header).into_raw();
-        self.pending.push_back(frame)
-    }
-
-    fn finish(&mut self, id: stream::Id) {
-        if let Some(stream) = self.streams.get_mut(&id) {
-            if stream.state().can_write() {
-                debug!("{}: {}: finish stream", self.id, id);
-                let mut header = Header::data(id, 0);
-                header.fin();
-                let frame = Frame::new(header).into_raw();
-                self.pending.push_back(frame);
-                stream.update_state(State::SendClosed)
+                                ready_closing(remaining, admin, input, output)
+                            }
+                            Type::GoAway => {
+                                debug!("{}: received GoAway", admin.id);
+                                Box::new(future::ok(State::Done))
+                            }
+                        }
+                    }
+                    holly::stream::Event::End(()) => { // connection closed
+                        debug!("{}: connection closed", admin.id);
+                        Box::new(future::ok(State::Done))
+                    }
+                    holly::stream::Event::Error((), e) => { // connection error
+                        debug!("{}: connection error: {}", admin.id, e);
+                        Box::new(future::ok(State::Done))
+                    }
+                },
+                | m @ Some(Message::Setup)
+                | m @ Some(Message::Close)
+                | m @ Some(Message::OpenStream(_)) => {
+                    debug!("{}: ignoring message: {:?}", admin.id, m);
+                    ready_closing(remaining, admin, input, output)
+                }
+                Some(Message::Abort) => {
+                    debug!("{}: abort", admin.id);
+                    Box::new(future::ok(State::Done))
+                }
+                None => {
+                    debug!("{}: eos", admin.id);
+                    Box::new(future::ok(State::Done))
+                }
             }
         }
     }
 }
 
-/// A handle to a multiplexed stream.
-#[derive(Debug)]
-pub struct StreamHandle<T>
-where
-    T: AsyncRead + AsyncWrite
-{
-    id: stream::Id,
-    buffer: Arc<Mutex<Chunks>>,
-    connection: Connection<T>
-}
-
-impl<T> StreamHandle<T>
-where
-    T: AsyncRead + AsyncWrite
-{
-    fn new(id: stream::Id, buffer: Arc<Mutex<Chunks>>, conn: Connection<T>) -> Self {
-        StreamHandle { id, buffer, connection: conn }
-    }
-
-    /// Get stream state.
-    pub fn state(&self) -> Option<State> {
-        self.connection.inner.lock().streams.get(&self.id).map(|s| s.state())
-    }
-
-    /// Report how much sending credit this stream has available.
-    pub fn credit(&self) -> Option<u32> {
-        self.connection.inner.lock().streams.get(&self.id).map(|s| s.credit)
+/// Send frame to remote and honour potential write timeout.
+fn send_frame(f: RawFrame, admin: &ConnAdmin, output: Output) -> impl Future<Item = Output, Error = Error> {
+    trace!("{}: {}: send: {:?}", admin.id, f.header.stream_id, f.header);
+    let d = admin.config.write_timeout;
+    let f = holly::sink::send(output, f);
+    if let Some(d) = d {
+        Either::A(Timeout::new(f, d).from_err())
+    } else {
+        Either::B(f.from_err())
     }
 }
 
-impl<T> Drop for StreamHandle<T>
-where
-    T: AsyncRead + AsyncWrite
-{
-    fn drop(&mut self) {
-        let mut inner = self.connection.inner.lock();
-        debug!("{}: {}: dropping stream", inner.id, self.id);
-        inner.reset(self.id)
+/// Send frame to remote, flush the connection and honour potential write timeout.
+fn send_frame_flush(f: RawFrame, admin: &ConnAdmin, output: Output) -> impl Future<Item = Output, Error = Error> {
+    trace!("{}: {}: send: {:?}", admin.id, f.header.stream_id, f.header);
+    let d = admin.config.write_timeout;
+    let f = holly::sink::send(output, f).and_then(holly::sink::flush);
+    if let Some(d) = d {
+        Either::A(Timeout::new(f, d).from_err())
+    } else {
+        Either::B(f.from_err())
     }
 }
 
-impl<T> io::Read for StreamHandle<T>
-where
-    T: AsyncRead + AsyncWrite
-{
-    fn read(&mut self, buf: &mut[u8]) -> io::Result<usize> {
-        let mut inner = Use::with(self.connection.inner.lock(), Action::Destroy);
-        if !inner.config.read_after_close && inner.status != ConnStatus::Open {
-            return Ok(0)
-        }
-        loop {
-            {
-                let mut n = 0;
-                let mut buffer = self.buffer.lock();
-                while let Some(chunk) = buffer.front_mut() {
-                    if chunk.is_empty() {
-                        buffer.pop();
-                        continue
-                    }
-                    let k = min(chunk.len(), buf.len() - n);
-                    (&mut buf[n .. n + k]).copy_from_slice(&chunk[.. k]);
-                    n += k;
-                    chunk.advance(k);
-                    inner.on_drop(Action::None);
-                    if n == buf.len() {
-                        break
-                    }
-                }
-                if n > 0 {
-                    return Ok(n)
-                }
-                let can_read = inner.streams.get(&self.id).map(|s| s.state().can_read());
-                if !can_read.unwrap_or(false) {
-                    debug!("{}: {}: can no longer read", inner.id, self.id);
-                    inner.on_drop(Action::None);
-                    return Ok(0) // stream has been reset
-                }
-            }
-
-            if inner.status != ConnStatus::Open {
-                return Ok(0)
-            }
-
-            if inner.config.window_update_mode == WindowUpdateMode::OnRead {
-                let inner = &mut *inner;
-                if let Some(stream) = inner.streams.get_mut(&self.id) {
-                    if stream.window == 0 {
-                        trace!("{}: {}: read: sending window update", inner.id, self.id);
-                        let frame = Frame::window_update(self.id, inner.config.receive_window);
-                        inner.pending.push_back(frame.into_raw());
-                        stream.window = inner.config.receive_window
-                    }
-                }
-            }
-
-            match inner.process_incoming() {
-                Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e)),
-                Ok(Async::NotReady) => {
-                    if !self.buffer.lock().is_empty() {
-                        continue
-                    }
-                    inner.on_drop(Action::None);
-                    let can_read = inner.streams.get(&self.id).map(|s| s.state().can_read());
-                    if can_read.unwrap_or(false) {
-                        return Err(io::ErrorKind::WouldBlock.into())
-                    } else {
-                        debug!("{}: {}: can no longer read", inner.id, self.id);
-                        return Ok(0) // stream has been reset
-                    }
-                }
-                Ok(Async::Ready(())) => {
-                    assert!(inner.status != ConnStatus::Open);
-                    if !inner.config.read_after_close || self.buffer.lock().is_empty() {
-                        inner.on_drop(Action::None);
-                        return Ok(0)
-                    }
-                }
-            }
-        }
+/// Flush the connection and honour potential write timeout.
+fn flush(admin: &ConnAdmin, output: Output) -> impl Future<Item = Output, Error = Error> {
+    trace!("{}: flush", admin.id);
+    let d = admin.config.write_timeout;
+    let f = holly::sink::flush(output);
+    if let Some(d) = d {
+        Either::A(Timeout::new(f, d).from_err())
+    } else {
+        Either::B(f.from_err())
     }
 }
 
-impl<T> AsyncRead for StreamHandle<T> where T: AsyncRead + AsyncWrite {}
+/// Send reset frame to remote and honour potential write timeout.
+fn send_reset(id: stream::Id, admin: &ConnAdmin, output: Output) -> impl Future<Item = Output, Error = Error> {
+    trace!("{}: {}: reset", admin.id, id);
+    let mut h = Header::data(id, 0);
+    h.rst();
+    send_frame_flush(Frame::new(h).into_raw(), admin, output)
+}
 
-impl<T> io::Write for StreamHandle<T>
+/// Send GoAway frame (honour potential write timeout) and transition to `State::Done`.
+fn immediate_close<T>(admin: ConnAdmin, output: Output, code: u32) -> ActorFuture<Connection<T>>
 where
-    T: AsyncRead + AsyncWrite
+    T: AsyncRead + AsyncWrite + Send + 'static
 {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut inner = Use::with(self.connection.inner.lock(), Action::Destroy);
-        if inner.status != ConnStatus::Open {
-            return Err(io::Error::new(io::ErrorKind::WriteZero, "connection is closed"))
-        }
-        match inner.process_incoming() {
-            Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e)),
-            Ok(Async::NotReady) => {}
-            Ok(Async::Ready(())) => {
-                assert!(inner.status != ConnStatus::Open);
-                return Err(io::Error::new(io::ErrorKind::WriteZero, "connection is closed"))
-            }
-        }
-        inner.on_drop(Action::None);
-        let frame = match inner.streams.get_mut(&self.id) {
-            Some(stream) => {
-                if !stream.state().can_write() {
-                    debug!("{}: {}: can no longer write", inner.id, self.id);
-                    return Err(io::Error::new(io::ErrorKind::WriteZero, "stream is closed"))
-                }
-                if stream.credit == 0 {
-                    inner.tasks.insert_current();
-                    return Err(io::ErrorKind::WouldBlock.into())
-                }
-                let k = min(stream.credit as usize, buf.len());
-                let b = (&buf[0..k]).into();
-                stream.credit = stream.credit.saturating_sub(k as u32);
-                Frame::data(self.id, b).into_raw()
-            }
-            None => {
-                debug!("{}: {}: stream is gone, cannot write", inner.id, self.id);
-                return Err(io::Error::new(io::ErrorKind::WriteZero, "stream is closed"))
-            }
-        };
-        let n = frame.body.len();
-        inner.pending.push_back(frame);
-        Ok(n)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        let mut inner = Use::with(self.connection.inner.lock(), Action::Destroy);
-        if inner.status != ConnStatus::Open {
-            return Ok(())
-        }
-        match inner.flush_pending() {
-            Err(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
-            Ok(Async::NotReady) => {
-                inner.on_drop(Action::None);
-                Err(io::ErrorKind::WouldBlock.into())
-            }
-            Ok(Async::Ready(())) => {
-                inner.on_drop(Action::None);
-                Ok(())
-            }
-        }
+    debug!("{}: send GoAway [code = {}]", admin.id, code);
+    let d = admin.config.write_timeout;
+    let f = holly::sink::send(output, Frame::go_away(code).into_raw())
+        .and_then(holly::sink::close)
+        .map(|()| State::Done);
+    if let Some(d) = d {
+        Box::new(Timeout::new(f, d).from_err())
+    } else {
+        Box::new(f.from_err())
     }
 }
 
-impl<T> AsyncWrite for StreamHandle<T>
+/// Syntactic sugar to transition to `State::Ready` in `ConnState::Open`.
+fn ready_open<T>(admin: ConnAdmin, input: KillCord, output: Output) -> ActorFuture<Connection<T>>
 where
-    T: AsyncRead + AsyncWrite
+    T: AsyncRead + AsyncWrite + Send + 'static
 {
-    fn shutdown(&mut self) -> Poll<(), io::Error> {
-        let mut connection = Use::with(self.connection.inner.lock(), Action::Destroy);
-        if connection.status != ConnStatus::Open {
-            return Ok(Async::Ready(()))
-        }
-        connection.finish(self.id);
-        match connection.flush_pending() {
-            Err(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
-            Ok(Async::NotReady) => {
-                connection.on_drop(Action::None);
-                Ok(Async::NotReady)
-            }
-            Ok(Async::Ready(())) => {
-                connection.on_drop(Action::None);
-                Ok(Async::Ready(()))
-            }
-        }
-    }
+    Box::new(future::ok(State::Ready(Connection::open(admin, input, output ))))
+}
+
+/// Syntactic sugar to transition to `State::Ready` in `ConnState::Closing`.
+fn ready_closing<T>(rem: usize, admin: ConnAdmin, input: KillCord, output: Output) -> ActorFuture<Connection<T>>
+where
+    T: AsyncRead + AsyncWrite + Send + 'static
+{
+    Box::new(future::ok(State::Ready(Connection::closing(rem, admin, input, output ))))
 }

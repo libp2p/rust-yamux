@@ -8,6 +8,8 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
+#![allow(unused)]
+
 use bytes::BytesMut;
 use crate::{frame::header::{Header, RawHeader}, stream};
 use std::u32;
@@ -29,10 +31,13 @@ impl RawFrame {
 
 #[derive(Debug)]
 pub enum Data {}
+
 #[derive(Debug)]
 pub enum WindowUpdate {}
+
 #[derive(Debug)]
 pub enum Ping {}
+
 #[derive(Debug)]
 pub enum GoAway {}
 

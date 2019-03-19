@@ -20,14 +20,14 @@
 mod chunks;
 mod connection;
 mod error;
-#[allow(dead_code)]
 mod frame;
-mod notify;
 mod stream;
 
-pub use crate::connection::{Connection, Mode, StreamHandle};
-pub use crate::error::{DecodeError, ConnectionError};
-pub use crate::stream::State;
+pub use crate::error::{CodecError, Error};
+pub use crate::connection::{Connection, Handle, Mode};
+pub use crate::stream::{Stream, State};
+
+use std::time::Duration;
 
 pub(crate) const DEFAULT_CREDIT: u32 = 256 * 1024; // as per yamux specification
 
@@ -67,13 +67,15 @@ pub enum WindowUpdateMode {
 /// - max. number of streams = 8192
 /// - window update mode = on receive
 /// - read after close = true
+/// - write timeout = none
 #[derive(Debug, Clone)]
 pub struct Config {
     pub(crate) receive_window: u32,
     pub(crate) max_buffer_size: usize,
     pub(crate) max_num_streams: usize,
     pub(crate) window_update_mode: WindowUpdateMode,
-    pub(crate) read_after_close: bool
+    pub(crate) read_after_close: bool,
+    pub(crate) write_timeout: Option<Duration>
 }
 
 impl Default for Config {
@@ -83,7 +85,8 @@ impl Default for Config {
             max_buffer_size: 1024 * 1024,
             max_num_streams: 8192,
             window_update_mode: WindowUpdateMode::OnReceive,
-            read_after_close: true
+            read_after_close: true,
+            write_timeout: None
         }
     }
 }
@@ -117,6 +120,11 @@ impl Config {
     /// the connection has been closed.
     pub fn set_read_after_close(&mut self, b: bool) {
         self.read_after_close = b;
+    }
+
+    /// Limit maximum duration of write operations.
+    pub fn set_write_timeout(&mut self, d: Duration) {
+        self.write_timeout = Some(d)
     }
 }
 

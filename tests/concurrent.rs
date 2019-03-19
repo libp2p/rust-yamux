@@ -7,15 +7,17 @@ use yamux::{Config, Connection, Mode};
 fn roundtrip(addr: SocketAddr, nstreams: u64, data: Bytes) {
     let rt = Runtime::new().expect("runtime");
     let e1 = rt.executor();
+    let e2 = rt.executor();
 
     let server = TcpListener::bind(&addr).expect("tcp bind").incoming()
         .into_future()
         .then(move |sock| {
             let sock = sock.expect("sock ok").0.expect("some sock");
-            Connection::new(sock, Config::default(), Mode::Server)
+            Connection::new(e1, sock, Config::default(), Mode::Server).expect("connection")
+                .map_err(|()| io::Error::new(io::ErrorKind::Other, "connection closed"))
                 .for_each(|stream| {
                     let (sink, stream) = Framed::new(stream, LengthDelimitedCodec::new()).split();
-                    stream.map(BytesMut::freeze).forward(sink).from_err().map(|_| ())
+                    stream.map(BytesMut::freeze).forward(sink).map(|_| ())
                 })
         })
         .map_err(|e| panic!("server error: {}", e));
@@ -24,13 +26,13 @@ fn roundtrip(addr: SocketAddr, nstreams: u64, data: Bytes) {
         .from_err()
         .and_then(move |sock| {
             let (tx, rx) = mpsc::unbounded();
-            let c = Connection::new(sock, Config::default(), Mode::Client);
+            let c = Connection::new(e2.clone(), sock, Config::default(), Mode::Client).expect("connection");
             for _ in 0 .. nstreams {
                 let t = tx.clone();
                 let d = data.clone();
-                let s = c.open_stream().expect("ok stream").expect("not eof");
-                let f = {
-                    let (sink, stream) = Framed::new(s, LengthDelimitedCodec::new()).split();
+                let f = c.open_stream().and_then(move |stream| {
+                    let stream = stream.expect("not eof");
+                    let (sink, stream) = Framed::new(stream, LengthDelimitedCodec::new()).split();
                     sink.send(d.clone())
                         .and_then(|mut sink| future::poll_fn(move || sink.close()))
                         .and_then(move |()| stream.concat2())
@@ -38,16 +40,17 @@ fn roundtrip(addr: SocketAddr, nstreams: u64, data: Bytes) {
                             assert_eq!(d.len(), frame.len());
                             t.unbounded_send(1).expect("send to channel")
                         })
-                };
-                e1.spawn(f.map_err(|e| panic!("client error: {}", e)));
+                        .from_err()
+                });
+                e2.spawn(f.map_err(|e| panic!("client error: {}", e)));
             }
             rx.take(nstreams)
                 .map_err(|()| panic!("channel interrupted"))
-                .fold(0, |acc, n| Ok::<_, io::Error>(acc + n))
+                .fold(0, |acc, n| Ok::<_, yamux::Error>(acc + n))
                 .and_then(move |n| {
                     assert_eq!(nstreams, n);
                     std::mem::drop(c);
-                    Ok::<_, io::Error>(())
+                    Ok::<_, yamux::Error>(())
                 })
         })
         .map_err(|e| panic!("client error: {}", e));
@@ -56,7 +59,6 @@ fn roundtrip(addr: SocketAddr, nstreams: u64, data: Bytes) {
 }
 
 #[test]
-#[ignore] // FIXME
 fn concurrent_streams() {
     let data = std::iter::repeat(0x42u8).take(100 * 1024).collect::<Vec<_>>().into();
     roundtrip("127.0.0.1:9000".parse().expect("valid address"), 1000, data)

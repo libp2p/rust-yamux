@@ -1,6 +1,6 @@
 [package]
 name = "yamux"
-version = "0.1.9"
+version = "0.2.0"
 authors = ["Parity Technologies <admin@parity.io>"]
 license = "Apache-2.0 OR MIT"
 description = "Multiplexer over reliable, ordered connections"
@@ -11,14 +11,15 @@ edition = "2018"
 [dependencies]
 bytes = "0.4"
 futures = "0.1"
-nohash-hasher = "0.1"
+holly = "0.5.1"
 log = "0.4"
-parking_lot = "0.6"
+parking_lot = "0.7"
 rand = "0.6"
-quick-error = "0.1"
-tokio-codec = "0.1"
-tokio-io = "0.1"
+tokio-codec = "0.1.1"
+tokio-io = "0.1.12"
+tokio-timer = "0.2.10"
+void = "1.0.2"
 
 [dev-dependencies]
 quickcheck = "0.8"
-tokio = "0.1"
+tokio = "0.1.17"

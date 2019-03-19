@@ -11,7 +11,7 @@
 use bytes::{BigEndian, BufMut, ByteOrder, BytesMut};
 use crate::{
     Config,
-    error::DecodeError,
+    error::CodecError,
     frame::{header::{Flags, Len, RawHeader, Type, Version}, RawFrame},
     stream
 };
@@ -43,17 +43,18 @@ impl FrameCodec {
 
 impl Encoder for FrameCodec {
     type Item = RawFrame;
-    type Error = io::Error;
+    type Error = CodecError;
 
     fn encode(&mut self, frame: Self::Item, bytes: &mut BytesMut) -> Result<(), Self::Error> {
         self.header_codec.encode(frame.header, bytes)?;
-        self.body_codec.encode(frame.body.freeze(), bytes)
+        self.body_codec.encode(frame.body.freeze(), bytes)?;
+        Ok(())
     }
 }
 
 impl Decoder for FrameCodec {
     type Item = RawFrame;
-    type Error = DecodeError;
+    type Error = CodecError;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         let header =
@@ -69,7 +70,7 @@ impl Decoder for FrameCodec {
         }
         let len = header.length.0 as usize;
         if len > self.max_buf_size {
-            return Err(DecodeError::FrameTooLarge(len))
+            return Err(CodecError::FrameTooLarge(len))
         }
         if src.len() < len {
             let add = len - src.len();
@@ -112,7 +113,7 @@ impl Encoder for HeaderCodec {
 
 impl Decoder for HeaderCodec {
     type Item = RawHeader;
-    type Error = DecodeError;
+    type Error = CodecError;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         if src.len() < 12 {
@@ -126,7 +127,7 @@ impl Decoder for HeaderCodec {
                 1 => Type::WindowUpdate,
                 2 => Type::Ping,
                 3 => Type::GoAway,
-                t => return Err(DecodeError::Type(t))
+                t => return Err(CodecError::Type(t))
             },
             flags: Flags(BigEndian::read_u16(&src[2..4])),
             stream_id: stream::Id::new(BigEndian::read_u32(&src[4..8])),
