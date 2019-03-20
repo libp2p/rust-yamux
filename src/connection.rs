@@ -272,9 +272,14 @@ impl Handle {
             })
     }
 
-    /// Close the connection.
+    /// Gracefully close the connection.
     pub fn close(&self) -> impl Future<Item = (), Error = Error> {
         self.addr.clone().send(Message::Close).from_err().map(|_| ())
+    }
+
+    /// Close the connection immediately.
+    pub fn abort(&self) -> impl Future<Item = (), Error = Error> {
+        self.addr.clone().send(Message::Abort).from_err().map(|_| ())
     }
 }
 
@@ -510,7 +515,9 @@ impl OpenState {
                             let (k, s) = holly::stream::closable(id, rx);
                             admin.streams.insert(id, (k, stream.clone()));
 
-                            // TODO: If no one is handling incoming streams, maybe we should stop.
+                            // We ignore errors because sending can only fail if the `Handle`
+                            // has been dropped and if that happened, the `Drop` impl of
+                            // `Handle` has already triggered a close of this connection.
                             let _ = admin.incoming.unbounded_send(stream);
 
                             let state = Connection::open(admin, input, output);
@@ -609,7 +616,9 @@ impl OpenState {
                             let (k, s) = holly::stream::closable(id, rx);
                             admin.streams.insert(id, (k, stream.clone()));
 
-                            // TODO: If no one is handling incoming streams, maybe we should stop.
+                            // We ignore errors because sending can only fail if the `Handle`
+                            // has been dropped and if that happened, the `Drop` impl of
+                            // `Handle` has already triggered a close of this connection.
                             let _ = admin.incoming.unbounded_send(stream);
 
                             let state = Connection::open(admin, input, output);
