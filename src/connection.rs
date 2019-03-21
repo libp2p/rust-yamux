@@ -39,7 +39,7 @@ use tokio_timer::Timeout;
 
 /// Connection mode.
 ///
-/// Determines if odd (client) or even (server) connection IDs
+/// Determines if odd (client) or even (server) stream IDs
 /// are used when opening a new stream to the remote.
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub enum Mode { Client, Server }
@@ -61,7 +61,7 @@ impl fmt::Display for ConnId {
     }
 }
 
-// Connection actor /////////////////////////////////////////////////////////
+// Connection actor ///////////////////////////////////////////////////////////////////////////////
 
 /// A yamux connection.
 #[derive(Debug)]
@@ -238,7 +238,7 @@ where
     }
 }
 
-// Connection handle ////////////////////////////////////////////////////////
+// Connection handle //////////////////////////////////////////////////////////////////////////////
 
 /// A handle to a yamux connection.
 pub struct Handle {
@@ -292,7 +292,7 @@ impl futures::Stream for Handle {
     }
 }
 
-// Static connection state //////////////////////////////////////////////////
+// Static connection state ////////////////////////////////////////////////////////////////////////
 
 // Static connection state.
 #[derive(Debug)]
@@ -339,7 +339,7 @@ impl ConnAdmin {
     }
 }
 
-// Variable connection state ////////////////////////////////////////////////
+// Variable connection state //////////////////////////////////////////////////////////////////////
 
 type Output = Box<dyn Sink<SinkItem = RawFrame, SinkError = CodecError> + Send>;
 
@@ -363,7 +363,7 @@ impl<T> fmt::Debug for ConnState<T> {
     }
 }
 
-// Open connection state ////////////////////////////////////////////////////
+// Open connection state //////////////////////////////////////////////////////////////////////////
 
 // State used during normal operation.
 struct OpenState {
@@ -377,6 +377,62 @@ struct OpenState {
 }
 
 impl OpenState {
+    /// Process request to open a new stream to the remote.
+    fn open_stream<T>(self, mut admin: ConnAdmin, requestor: oneshot::Sender<Result<Stream, Error>>)
+        -> ActorFuture<Connection<T>>
+    where
+        T: AsyncRead + AsyncWrite + Send + 'static
+    {
+        let (input, output) = (self.input, self.output);
+
+        if admin.streams.len() == admin.config.max_num_streams {
+            error!("{}: maximum number of streams reached", admin.id);
+            let _ = requestor.send(Err(Error::TooManyStreams));
+            return ready_open(admin, input, output)
+        }
+
+        match admin.next_stream_id() {
+            Ok(id) => {
+                // create stream
+                let (tx, rx) = mpsc::unbounded();
+                let stream = Stream::new(id, admin.config.clone(), tx, DEFAULT_CREDIT);
+                if requestor.send(Ok(stream.clone())).is_err() {
+                    return ready_open(admin, input, output)
+                }
+                let (i, s) = holly::stream::closable(id, rx);
+                // Send initial frame to remote informing it of the new stream.
+                // We do not flush as the opener of the stream will presumably send
+                // data and we can defer sending out the open frame until then.
+                let mut frame = Frame::window_update(id, admin.config.receive_window);
+                frame.header_mut().syn();
+                let frame = frame.into_raw();
+                trace!("{}: {}: open: {:?}", admin.id, id, frame.header);
+                let future = send_frame(frame, &admin, output)
+                    .map(move |output| {
+                        admin.streams.insert(id, (i, stream));
+                        let state = Connection::open(admin, input, output);
+                        State::Stream(state, Box::new(s.map(Into::into)))
+                    });
+                Box::new(future)
+            }
+            Err(e) => { // no more stream IDs => transition to closing
+                error!("{}: stream IDs exhausted", admin.id);
+                let _ = requestor.send(Err(e));
+                let n = admin.streams.len();
+                for (_, (_, s)) in admin.streams.drain() {
+                    s.update_state(stream::State::Closed);
+                    s.notify_tasks()
+                }
+                if n == 0 {
+                    // No streams => we can stop right away.
+                    immediate_close(admin, input, output, CODE_TERM)
+                } else {
+                    ready_closing(n, admin, input, output)
+                }
+            }
+        }
+    }
+
     /// Process a new item from our streams.
     fn on_item<T>(self, mut admin: ConnAdmin, item: StreamItem) -> ActorFuture<Connection<T>>
     where
@@ -680,58 +736,9 @@ impl OpenState {
             }
         }
     }
-
-    /// Process request to open a new stream to the remote.
-    fn open_stream<T>(self, mut admin: ConnAdmin, requestor: oneshot::Sender<Result<Stream, Error>>)
-        -> ActorFuture<Connection<T>>
-    where
-        T: AsyncRead + AsyncWrite + Send + 'static
-    {
-        let (input, output) = (self.input, self.output);
-        match admin.next_stream_id() {
-            Ok(id) => {
-                // create stream
-                let (tx, rx) = mpsc::unbounded();
-                let stream = Stream::new(id, admin.config.clone(), tx, DEFAULT_CREDIT);
-                if requestor.send(Ok(stream.clone())).is_err() {
-                    return ready_open(admin, input, output)
-                }
-                let (i, s) = holly::stream::closable(id, rx);
-                // Send initial frame to remote informing it of the new stream.
-                // We do not flush as the opener of the stream will presumably send
-                // data and we can defer sending out the open frame until then.
-                let mut frame = Frame::window_update(id, admin.config.receive_window);
-                frame.header_mut().syn();
-                let frame = frame.into_raw();
-                trace!("{}: {}: open: {:?}", admin.id, id, frame.header);
-                let future = send_frame(frame, &admin, output)
-                    .map(move |output| {
-                        admin.streams.insert(id, (i, stream));
-                        let state = Connection::open(admin, input, output);
-                        State::Stream(state, Box::new(s.map(Into::into)))
-                    });
-                Box::new(future)
-            }
-            Err(e) => { // no more stream IDs => transition to closing
-                error!("{}: stream IDs exhausted", admin.id);
-                let _ = requestor.send(Err(e));
-                let n = admin.streams.len();
-                for (_, (_, s)) in admin.streams.drain() {
-                    s.update_state(stream::State::Closed);
-                    s.notify_tasks()
-                }
-                if n == 0 {
-                    // No streams => we can stop right away.
-                    immediate_close(admin, input, output, CODE_TERM)
-                } else {
-                    ready_closing(n, admin, input, output)
-                }
-            }
-        }
-    }
 }
 
-// Closing connection state /////////////////////////////////////////////////
+// Closing connection state ///////////////////////////////////////////////////////////////////////
 
 // State used while closing the connection.
 // Closing means we are just finishing sending any data items our streams have
@@ -864,7 +871,7 @@ impl ClosingState {
     }
 }
 
-// Utilities ////////////////////////////////////////////////////////////////
+// Utilities //////////////////////////////////////////////////////////////////////////////////////
 
 /// Send frame to remote and honour potential write timeout.
 fn send_frame(f: RawFrame, admin: &ConnAdmin, output: Output)
