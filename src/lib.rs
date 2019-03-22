@@ -67,7 +67,7 @@ pub enum WindowUpdateMode {
 /// - max. number of streams = 8192
 /// - window update mode = on receive
 /// - read after close = true
-/// - write timeout = none
+/// - write timeout = 30s
 #[derive(Debug, Clone)]
 pub struct Config {
     pub(crate) receive_window: u32,
@@ -86,7 +86,7 @@ impl Default for Config {
             max_num_streams: 8192,
             window_update_mode: WindowUpdateMode::OnReceive,
             read_after_close: true,
-            write_timeout: None
+            write_timeout: Some(Duration::from_secs(30))
         }
     }
 }
@@ -122,9 +122,11 @@ impl Config {
         self.read_after_close = b;
     }
 
-    /// Limit maximum duration of write operations.
-    pub fn set_write_timeout(&mut self, d: Duration) {
-        self.write_timeout = Some(d)
+    /// Set maximum duration of write operations.
+    ///
+    /// Use `None` for unlimited duration.
+    pub fn set_write_timeout(&mut self, d: Option<Duration>) {
+        self.write_timeout = d
     }
 }
 
