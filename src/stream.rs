@@ -48,12 +48,31 @@ impl fmt::Display for Id {
     }
 }
 
+// A yamux connection stream.
+#[derive(Debug)]
+pub struct Stream {
+    // Stream representation as shared with `Connection`.
+    repr: StreamRepr,
+    // The channel to send outgoing items to.
+    //
+    // It is not part of `StreamRepr` so that dropping
+    // a `Stream` drops the sender and makes `Connection`
+    // aware of it by ending the stream.
+    outgoing: mpsc::UnboundedSender<Item>
+}
+
+// Stream prepresentation.
+//
+// Shared with `Connection`, hence implements `Clone`,
+// whereas `Stream` does not.
 #[derive(Clone, Debug)]
-pub struct Stream(Arc<Mutex<Inner>>);
+pub(crate) struct StreamRepr(Arc<Mutex<Inner>>);
 
 #[derive(Debug)]
 pub(crate) struct Inner {
+    // stream ID
     id: Id,
+    // shared global configuration
     config: Arc<Config>,
     // incoming bytes buffer
     buf: Chunks,
@@ -61,8 +80,6 @@ pub(crate) struct Inner {
     credit: u32,
     // remaining window for incoming bytes
     window: u32,
-    // channel to connection actor
-    out: mpsc::UnboundedSender<Item>,
     // task waiting for incoming data
     read_task: Option<Task>,
     // task waiting to write data
@@ -71,6 +88,7 @@ pub(crate) struct Inner {
     state: State
 }
 
+/// The states of a yamux [`Stream`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum State {
     /// Stream can read and write.
@@ -99,51 +117,54 @@ impl State {
     }
 }
 
+/// Items are sent to the connection `Sender` for delivery to
+/// the remote endpoint.
 #[derive(Debug)]
 pub(crate) enum Item {
-    /// Ask connection to send data to remote.
+    /// Send data to remote.
     Data(BytesMut),
-    /// Ask connection flush data.
+    /// Flush the connection.
     Flush,
     /// Grant credit to remote.
     Credit,
     /// Tell remote we stopped writing data.
-    HalfClose,
-    /// Tell remote that this stream is reset.
-    Reset
-}
-
-impl Drop for Stream {
-    fn drop(&mut self) {
-        let inner = self.0.lock();
-        if inner.state != State::Closed {
-            let _ = inner.out.unbounded_send(Item::Reset);
-        }
-    }
+    HalfClose
 }
 
 impl Stream {
-    pub(crate) fn new(id: Id, cfg: Arc<Config>, chan: mpsc::UnboundedSender<Item>, credit: u32) -> Self {
-        Self(Arc::new(Mutex::new(Inner {
+    pub(crate) fn new(sr: StreamRepr, outgoing: mpsc::UnboundedSender<Item>) -> Self {
+        Self { repr: sr, outgoing }
+    }
+
+    /// Get current stream state.
+    pub fn state(&self) -> State {
+        self.repr.state()
+    }
+}
+
+impl StreamRepr {
+    pub(crate) fn new(id: Id, cfg: Arc<Config>, credit: u32) -> Self {
+        let inner = Inner {
             id,
             config: cfg,
             buf: Chunks::new(),
             credit,
             window: credit,
-            out: chan,
             read_task: None,
             write_task: None,
             state: State::Open
-        })))
+        };
+        Self(Arc::new(Mutex::new(inner)))
     }
 
-    /// Get current stream state.
-    pub fn state(&self) -> State {
+    /// Current stream state.
+    pub(crate) fn state(&self) -> State {
         self.0.lock().state
     }
 
     /// Update stream state.
-    pub(crate) fn update_state(&self, s: State) {
+    /// Returns state the streams transitions to.
+    pub(crate) fn update_state(&self, s: State) -> State {
         self.0.lock().update_state(s)
     }
 
@@ -200,7 +221,7 @@ impl Stream {
 }
 
 impl Inner {
-    fn update_state(&mut self, s: State) {
+    fn update_state(&mut self, s: State) -> State {
         match (self.state, s) {
             (State::Open, State::WriteOnly) => { self.state = State::WriteOnly }
             (State::Open, State::ReadOnly) => { self.state = State::ReadOnly }
@@ -212,12 +233,13 @@ impl Inner {
             (State::ReadOnly, State::ReadOnly) => {}
             (State::WriteOnly, State::WriteOnly) => {}
         }
+        self.state
     }
 }
 
 impl io::Read for Stream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let mut inner = self.0.lock();
+        let mut inner = self.repr.0.lock();
         if !(inner.state.can_read() || inner.config.read_after_close) {
             return Ok(0)
         }
@@ -242,7 +264,7 @@ impl io::Read for Stream {
             return Ok(0)
         }
         if inner.window == 0 && inner.config.window_update_mode == WindowUpdateMode::OnRead {
-            if inner.out.unbounded_send(Item::Credit).is_err() {
+            if self.outgoing.unbounded_send(Item::Credit).is_err() {
                 inner.update_state(State::Closed);
                 return Ok(0)
             }
@@ -257,7 +279,7 @@ impl AsyncRead for Stream {}
 
 impl io::Write for Stream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let mut inner = self.0.lock();
+        let mut inner = self.repr.0.lock();
         if !inner.state.can_write() {
             return Err(io::ErrorKind::WriteZero.into())
         }
@@ -267,13 +289,13 @@ impl io::Write for Stream {
         }
         let k = min(inner.credit as usize, buf.len());
         let b = (&buf[.. k]).into();
-        if inner.out.unbounded_send(Item::Data(b)).is_err() {
+        if self.outgoing.unbounded_send(Item::Data(b)).is_err() {
             inner.update_state(State::ReadOnly);
             return Err(io::ErrorKind::WriteZero.into())
         }
         inner.credit = inner.credit.saturating_sub(k as u32);
         if inner.credit == 0 {
-            if inner.out.unbounded_send(Item::Flush).is_err() {
+            if self.outgoing.unbounded_send(Item::Flush).is_err() {
                 inner.update_state(State::ReadOnly);
                 return Err(io::ErrorKind::WriteZero.into())
             }
@@ -282,10 +304,10 @@ impl io::Write for Stream {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let mut inner = self.0.lock();
+        let mut inner = self.repr.0.lock();
         if inner.state.can_write() {
-            if inner.out.unbounded_send(Item::Flush).is_err() {
-                inner.update_state(State::ReadOnly)
+            if self.outgoing.unbounded_send(Item::Flush).is_err() {
+                inner.update_state(State::ReadOnly);
             }
         }
         Ok(())
@@ -294,11 +316,11 @@ impl io::Write for Stream {
 
 impl AsyncWrite for Stream {
     fn shutdown(&mut self) -> Poll<(), io::Error> {
-        let mut inner = self.0.lock();
+        let mut inner = self.repr.0.lock();
         if !inner.state.can_write() {
             return Ok(Async::Ready(()))
         }
-        let _ = inner.out.unbounded_send(Item::HalfClose);
+        let _ = self.outgoing.unbounded_send(Item::HalfClose);
         inner.update_state(State::ReadOnly);
         Ok(Async::Ready(()))
     }

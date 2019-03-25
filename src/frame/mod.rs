@@ -10,12 +10,15 @@
 
 #![allow(unused)]
 
-use bytes::BytesMut;
-use crate::{frame::header::{Header, RawHeader}, stream};
-use std::u32;
-
 pub mod codec;
 pub mod header;
+
+use bytes::BytesMut;
+use crate::stream;
+use header::RawHeader;
+use std::u32;
+
+pub use header::Header;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RawFrame {
