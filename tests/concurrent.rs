@@ -56,7 +56,6 @@ fn roundtrip(addr: SocketAddr, nstreams: u64, data: Bytes) {
 }
 
 #[test]
-#[ignore] // FIXME
 fn concurrent_streams() {
     let data = std::iter::repeat(0x42u8).take(100 * 1024).collect::<Vec<_>>().into();
     roundtrip("127.0.0.1:9000".parse().expect("valid address"), 1000, data)
