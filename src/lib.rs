@@ -111,9 +111,8 @@ impl Config {
         self.max_num_streams = n
     }
 
-    /// Set the max. number of pending frames, i.e. frames
-    /// which are to be sent to the remote, but can not right
-    /// away and need to be buffered.
+    /// Set the max. number of pending frames, i.e. outgoing
+    /// frames which have not yet been sent.
     pub fn set_max_pending_frames(&mut self, n: usize) {
         self.max_pending_frames = n
     }

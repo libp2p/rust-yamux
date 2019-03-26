@@ -57,7 +57,7 @@ quick_error! {
             display("maximum number of streams exhausted")
         }
         TooManyPendingFrames {
-            display("maximum number of pending streams reached")
+            display("maximum number of pending frames reached")
         }
         #[doc(hidden)]
         __Nonexhaustive
