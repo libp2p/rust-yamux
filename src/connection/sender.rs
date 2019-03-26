@@ -71,7 +71,7 @@ impl fmt::Debug for Admin {
 // Usually data to be sent to the remote, but also window updates.
 type Item = holly::stream::Event<stream::Id, stream::Item, ()>;
 
-// A [`Stream`] of stream items.
+// A `Stream` of stream items.
 type ItemStream = Box<dyn Stream<Item = Message, Error = Void> + Send>;
 
 /// The messages the [`Sender`] actor understands.
@@ -86,13 +86,13 @@ pub(super) enum Message {
     FromStream(Item),
     // Send a GoAway with the given code and close the connection.
     Close(u32),
-    // Closing the connection without a GoAway frame and stop.
+    // Close the connection without a GoAway frame and stop.
     Drop
 }
 
 /// Message the [`Sender`] actor sends back to the [`Connection`] actor if
-/// a streams terminated. The connection actor can then clean up its internal
-/// state and--if necessary--tell `Sender` to send a reset frame to the remote.
+/// a stream terminated. The connection actor can then clean up its internal
+/// state and--if necessary--tell [`Sender`] to send a reset frame to the remote.
 #[derive(Debug)]
 pub(super) struct EndOfStream(pub(super) stream::Id);
 
@@ -176,8 +176,8 @@ impl Actor<Message, Error> for Sender {
                         }
                     }
                 }
-                // The stream has terminated. We inform [`Connection`] which decides what
-                // (if anything) needs to done.
+                // The stream has terminated. We inform `Connection`, which decides what,
+                // if anything, needs to be done.
                 holly::stream::Event::Error(stream, ()) | holly::stream::Event::End(stream) => {
                     let (id, config) = (admin.id, admin.config);
                     let future = admin.connection.send(EndOfStream(stream)).from_err()

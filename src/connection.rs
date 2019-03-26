@@ -118,7 +118,7 @@ where
     }
 }
 
-// Address of [`sender::Sender`] actor which actually delivers frames to the remote.
+// Address of `Sender` actor which actually delivers frames to the remote.
 type Sender = Addr<sender::Message>;
 
 // Incomding frames from remote.
@@ -138,7 +138,7 @@ enum Message {
     EndOfStream(stream::Id),
     // Incoming frame from the remote.
     FromRemote(IncomingFrame),
-    // The [`sender::Sender`] produced an error.
+    // The `Sender` produced an error.
     SendError(Fail<Error>)
 }
 
@@ -156,21 +156,21 @@ impl fmt::Debug for Message {
     }
 }
 
-// The [`sender::Sender`] informed us that a stream as terminated.
+// The `Sender` informed us that a stream as terminated.
 impl From<sender::EndOfStream> for Message {
     fn from(x: sender::EndOfStream) -> Self {
         Message::EndOfStream(x.0)
     }
 }
 
-// Map incoming frame from remote to a [`Message`] the actor understands.
+// Map incoming frame from remote to a `Message` the actor understands.
 impl From<holly::stream::Event<(), RawFrame, CodecError>> for Message {
     fn from(x: holly::stream::Event<(), RawFrame, CodecError>) -> Self {
         Message::FromRemote(x)
     }
 }
 
-// Map the failure of [`sender::Sender`] so [`Connection`] can process it.
+// Map the failure of `Sender` so `Connection` can process it.
 impl From<Fail<Error>> for Message {
     fn from(e: Fail<Error>) -> Self {
         Message::SendError(e)
@@ -199,7 +199,7 @@ where
                     let (k, i) = holly::stream::stoppable((), stream);
                     let output = Box::new(sink);
 
-                    // For the output we spawn another actor: [`sender::Sender`].
+                    // For the output we spawn another actor: `Sender`.
                     // We hand our own address to `Sender` so it can inform us of terminated streams.
                     let addr = ctx.address().cast();
                     let sender = sender::Sender::new(admin.id, admin.config.clone(), addr, output);
@@ -303,7 +303,7 @@ impl Drop for Handle {
         // there is only ever one `Handle` per connection and
         // the connection and stream messages go into secondary
         // streams, hence the primary actor mailbox is uncontested.
-        // Only [`sender::Sender`] end of stream messages compete with us.
+        // Only `Sender` end of stream messages compete with us.
         let _ = self.close().wait();
     }
 }
