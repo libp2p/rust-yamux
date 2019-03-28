@@ -126,7 +126,7 @@ impl Actor<Message, Error> for Sender {
     type Result = Box<dyn Future<Item = State<Self, Message>, Error = Error> + Send>;
 
     fn process(self, _ctx: &mut Context<Message>, msg: Option<Message>) -> Self::Result {
-        let (admin, output) = (self.admin, self.output);
+        let Sender { admin, output } = self;
         match msg {
             Some(Message::Send(frame)) => {
                 let future = send_frame(frame, &admin, output)
@@ -179,8 +179,8 @@ impl Actor<Message, Error> for Sender {
                 // The stream has terminated. We inform `Connection`, which decides what,
                 // if anything, needs to be done.
                 holly::stream::Event::Error(stream, ()) | holly::stream::Event::End(stream) => {
-                    let (id, config) = (admin.id, admin.config);
-                    let future = admin.connection.send(EndOfStream(stream)).from_err()
+                    let Admin { id, config, connection } = admin;
+                    let future = connection.send(EndOfStream(stream)).from_err()
                         .map(move |connection| {
                             let admin = Admin { id, config, connection };
                             State::Ready(Sender { admin, output })

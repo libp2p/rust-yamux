@@ -430,7 +430,7 @@ impl OpenState {
     where
         T: AsyncRead + AsyncWrite + Send + 'static
     {
-        let (input, sender) = (self.input, self.sender);
+        let OpenState { input, sender } = self;
 
         if admin.streams.len() == admin.config.max_num_streams {
             error!("{}: maximum number of streams reached", admin.id);
@@ -490,7 +490,8 @@ impl OpenState {
     where
         T: AsyncRead + AsyncWrite + Send + 'static
     {
-        let (input, sender) = (self.input, self.sender);
+        let OpenState { input, sender } = self;
+
         if let Some((_, s)) = admin.streams.remove(&id) {
             if s.state() == stream::State::Closed {
                 s.notify_tasks();
@@ -512,7 +513,8 @@ impl OpenState {
     where
         T: AsyncRead + AsyncWrite + Send + 'static
     {
-        let (input, sender) = (self.input, self.sender);
+        let OpenState { input, sender } = self;
+
         match item {
             holly::stream::Event::Item((), raw_frame) => {
                 trace!("{}: {}: recv: {:?}", admin.id, raw_frame.header.stream_id, raw_frame.header);
@@ -764,11 +766,13 @@ impl ClosingState {
     where
         T: AsyncRead + AsyncWrite + Send + 'static
     {
-        let (remaining, input, sender) = (self.remaining, self.input, self.sender);
+        let ClosingState { remaining, input, sender } = self;
+
         if remaining == 1 {
             // This was the last one => close connection and stop.
             return immediate_close(admin, input, sender, CODE_TERM)
         }
+
         if let Some((_, s)) = admin.streams.remove(&id) {
             if s.state() == stream::State::Closed {
                 s.notify_tasks();
@@ -782,6 +786,7 @@ impl ClosingState {
                 });
             return Box::new(future)
         }
+
         ready_closing(remaining - 1, admin, input, sender)
     }
 
@@ -790,7 +795,8 @@ impl ClosingState {
     where
         T: AsyncRead + AsyncWrite + Send + 'static
     {
-        let (remaining, input, sender) = (self.remaining, self.input, self.sender);
+        let ClosingState { remaining, input, sender } = self;
+
         match item {
             holly::stream::Event::Item((), raw_frame) => {
                 trace!("{}: {}: recv: {:?}", admin.id, raw_frame.header.stream_id, raw_frame.header);
