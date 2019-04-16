@@ -304,7 +304,7 @@ impl Drop for Handle {
         // the connection and stream messages go into secondary
         // streams, hence the primary actor mailbox is uncontested.
         // Only `Sender` end of stream messages compete with us.
-        let _ = self.close().wait();
+        let _ = self.abort().wait();
     }
 }
 
