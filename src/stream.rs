@@ -308,6 +308,7 @@ impl io::Write for Stream {
         if inner.state.can_write() {
             if self.outgoing.unbounded_send(Item::Flush).is_err() {
                 inner.update_state(State::ReadOnly);
+                return Err(io::Error::new(io::ErrorKind::Other, "failed to flush stream"))
             }
         }
         Ok(())
