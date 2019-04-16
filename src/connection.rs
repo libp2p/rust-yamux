@@ -608,7 +608,10 @@ impl OpenState {
 
                                 // If the stream window is closed, reset the window and grant the
                                 // remote more credit so it can keep sending data.
-                                if window == 0 && admin.config.window_update_mode == WindowUpdateMode::OnReceive {
+                                if window == 0
+                                    && entry.get().1.state() != stream::State::Closed
+                                    && admin.config.window_update_mode == WindowUpdateMode::OnReceive
+                                {
                                     entry.get().1.set_window(admin.config.receive_window);
                                     let frame = Frame::window_update(id, admin.config.receive_window);
                                     let future = sender.send(sender::Message::SendAndFlush(frame.into_raw()))
