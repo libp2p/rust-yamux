@@ -61,7 +61,7 @@ pub enum Error {
     /// An error during frame encoding/decoding occurred.
     Codec(CodecError),
     /// An error during task execution.
-    Executor(holly::Error),
+    Executor(Box<dyn std::error::Error + Send + Sync>),
     /// A write operation timed out.
     Timeout,
     /// All stream IDs have been used up.
@@ -92,7 +92,7 @@ impl error::Error for Error {
         match self {
             Error::Io(e) => Some(e),
             Error::Codec(e) => Some(e),
-            Error::Executor(e) => Some(e),
+            Error::Executor(e) => Some(&**e),
             Error::NoMoreStreamIds
             | Error::Timeout
             | Error::TooManyStreams
@@ -115,7 +115,7 @@ impl From<CodecError> for Error {
 
 impl From<holly::Error> for Error {
     fn from(e: holly::Error) -> Self {
-        Error::Executor(e)
+        Error::Executor(Box::new(e))
     }
 }
 
