@@ -624,6 +624,10 @@ impl OpenState {
 
                                 return ready_open(admin, input, sender)
                             }
+                            Entry::Vacant(_) if is_finish && frame.body().is_empty() => {
+                                // `FIN` for an unknown stream => ignore
+                                return ready_open(admin, input, sender)
+                            }
                             Entry::Vacant(_) => {
                                 // Data for an unknown stream => ignore and tell
                                 // remote to reset the stream
