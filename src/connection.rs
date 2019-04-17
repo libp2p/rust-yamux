@@ -27,7 +27,7 @@ use crate::{
     notify::Notifier,
     stream::{self, State, StreamEntry, CONNECTION_ID}
 };
-use futures::{executor, prelude::*, stream::{Fuse, Stream}, try_ready};
+use futures::{executor, prelude::*, stream::{Fuse, Stream}};
 use log::{debug, error, trace};
 use parking_lot::{Mutex, MutexGuard};
 use std::{
@@ -90,7 +90,7 @@ where
         let id = connection.next_stream_id()?;
         let mut frame = Frame::window_update(id, connection.config.receive_window);
         frame.header_mut().syn();
-        connection.pending.push_back(frame.into_raw());
+        connection.add_pending(frame.into_raw())?;
         let stream = StreamEntry::new(connection.config.receive_window, DEFAULT_CREDIT);
         let buffer = stream.buffer.clone();
         connection.streams.insert(id, stream);
@@ -98,20 +98,15 @@ where
         Ok(Some(StreamHandle::new(id, buffer, self.clone())))
     }
 
-    #[deprecated(since = "0.1.8", note = "Use `Connection::close`.")]
-    pub fn shutdown(&self) -> Poll<(), io::Error> {
-        self.close()
-    }
-
     /// Closes the underlying connection.
     ///
     /// Implies flushing any buffered data.
-    pub fn close(&self) -> Poll<(), io::Error> {
+    pub fn close(&self) -> Poll<(), ConnectionError> {
         let mut connection = Use::with(self.inner.lock(), Action::Destroy);
         match connection.status {
             ConnStatus::Closed => return Ok(Async::Ready(())),
             ConnStatus::Open => {
-                connection.pending.push_back(Frame::go_away(header::CODE_TERM).into_raw());
+                connection.add_pending(Frame::go_away(header::CODE_TERM).into_raw())?;
                 connection.status = ConnStatus::Shutdown
             }
             ConnStatus::Shutdown => {}
@@ -132,7 +127,7 @@ where
     }
 
     /// Send any buffered data.
-    pub fn flush(&self) -> Poll<(), io::Error> {
+    pub fn flush(&self) -> Poll<(), ConnectionError> {
         let mut connection = Use::with(self.inner.lock(), Action::Destroy);
         if connection.status == ConnStatus::Closed {
             return Ok(Async::Ready(()))
@@ -339,10 +334,21 @@ where
         }
     }
 
-    fn flush_pending(&mut self) -> Poll<(), io::Error> {
+    fn add_pending(&mut self, frame: RawFrame) -> Result<(), ConnectionError> {
+        if self.pending.len() >= self.config.max_pending_frames {
+            return Err(ConnectionError::TooManyPendingFrames)
+        }
+        self.pending.push_back(frame);
+        Ok(())
+    }
+
+    fn flush_pending(&mut self) -> Poll<(), ConnectionError> {
         while let Some(frame) = self.pending.pop_front() {
             trace!("{}: {}: send: {:?}", self.id, frame.header.stream_id, frame.header);
             if let AsyncSink::NotReady(frame) = self.resource.start_send_notify(frame, &self.tasks, 0)? {
+                if self.pending.len() >= self.config.max_pending_frames {
+                    return Err(ConnectionError::TooManyPendingFrames)
+                }
                 self.pending.push_front(frame);
                 self.tasks.insert_current();
                 return Ok(Async::NotReady)
@@ -357,7 +363,7 @@ where
 
     fn process_incoming(&mut self) -> Poll<(), ConnectionError> {
         loop {
-            try_ready!(self.flush_pending());
+            self.flush_pending()?;
             match self.resource.poll_stream_notify(&self.tasks, 0)? {
                 Async::Ready(Some(frame)) => {
                     trace!("{}: {}: recv: {:?}", self.id, frame.header.stream_id, frame.header);
@@ -374,7 +380,7 @@ where
                         }
                     };
                     if let Some(frame) = response {
-                        self.pending.push_back(frame)
+                        self.add_pending(frame)?
                     }
                     self.tasks.notify_all();
                 }
@@ -432,29 +438,36 @@ where
             return Ok(None)
         }
 
-        if let Some(stream) = self.streams.get_mut(&stream_id) {
-            if frame.body().len() > stream.window as usize {
-                error!("{}: {}: frame body larger than window of stream", self.id, stream_id);
-                return Ok(Some(Frame::go_away(ECODE_PROTO)))
-            }
-            if is_finish {
-                stream.update_state(State::RecvClosed)
-            }
-            let max_buffer_size = self.config.max_buffer_size;
-            if stream.buffer.lock().len().map(move |n| n >= max_buffer_size).unwrap_or(true) {
-                error!("{}: {}: buffer of stream grows beyond limit", self.id, stream_id);
-                self.reset(stream_id);
-            } else {
-                stream.window = stream.window.saturating_sub(frame.body().len() as u32);
-                stream.buffer.lock().push(frame.into_body());
-                if stream.window == 0 && self.config.window_update_mode == WindowUpdateMode::OnReceive {
-                    trace!("{}: {}: sending window update", self.id, stream_id);
-                    let frame = Frame::window_update(stream_id, self.config.receive_window);
-                    self.pending.push_back(frame.into_raw());
-                    stream.window = self.config.receive_window
+        let frame =
+            if let Some(stream) = self.streams.get_mut(&stream_id) {
+                if frame.body().len() > stream.window as usize {
+                    error!("{}: {}: frame body larger than window of stream", self.id, stream_id);
+                    return Ok(Some(Frame::go_away(ECODE_PROTO)))
                 }
-            }
-        }
+                if is_finish {
+                    stream.update_state(State::RecvClosed)
+                }
+                let max_buffer_size = self.config.max_buffer_size;
+                if stream.buffer.lock().len().map(move |n| n >= max_buffer_size).unwrap_or(true) {
+                    error!("{}: {}: buffer of stream grows beyond limit", self.id, stream_id);
+                    self.reset(stream_id)?;
+                    return Ok(None)
+                } else {
+                    stream.window = stream.window.saturating_sub(frame.body().len() as u32);
+                    stream.buffer.lock().push(frame.into_body());
+                    if stream.window == 0 && self.config.window_update_mode == WindowUpdateMode::OnReceive {
+                        trace!("{}: {}: sending window update", self.id, stream_id);
+                        stream.window = self.config.receive_window;
+                        Frame::window_update(stream_id, self.config.receive_window)
+                    } else {
+                        return Ok(None)
+                    }
+                }
+            } else {
+                return Ok(None)
+            };
+
+        self.add_pending(frame.into_raw())?;
 
         Ok(None)
     }
@@ -521,35 +534,40 @@ where
         None
     }
 
-    fn reset(&mut self, id: stream::Id) {
+    fn reset(&mut self, id: stream::Id) -> Result<(), ConnectionError> {
         if let Some(stream) = self.streams.remove(&id) {
             if stream.state() == State::Closed {
-                return
+                return Ok(())
             }
         } else {
-            return
+            return Ok(())
         }
         if self.status != ConnStatus::Open {
-            return
+            return Ok(())
         }
         debug!("{}: {}: resetting stream of {:?}", self.id, id, self);
         let mut header = Header::data(id, 0);
         header.rst();
         let frame = Frame::new(header).into_raw();
-        self.pending.push_back(frame)
+        self.add_pending(frame)
     }
 
-    fn finish(&mut self, id: stream::Id) {
-        if let Some(stream) = self.streams.get_mut(&id) {
-            if stream.state().can_write() {
-                debug!("{}: {}: finish stream", self.id, id);
-                let mut header = Header::data(id, 0);
-                header.fin();
-                let frame = Frame::new(header).into_raw();
-                self.pending.push_back(frame);
-                stream.update_state(State::SendClosed)
-            }
-        }
+    fn finish(&mut self, id: stream::Id) -> Result<(), ConnectionError> {
+        let frame =
+            if let Some(stream) = self.streams.get_mut(&id) {
+                if stream.state().can_write() {
+                    debug!("{}: {}: finish stream", self.id, id);
+                    let mut header = Header::data(id, 0);
+                    header.fin();
+                    stream.update_state(State::SendClosed);
+                    Frame::new(header).into_raw()
+                } else {
+                    return Ok(())
+                }
+            } else {
+                return Ok(())
+            };
+        self.add_pending(frame)
     }
 }
 
@@ -590,7 +608,7 @@ where
     fn drop(&mut self) {
         let mut inner = self.connection.inner.lock();
         debug!("{}: {}: dropping stream", inner.id, self.id);
-        inner.reset(self.id)
+        let _ = inner.reset(self.id);
     }
 }
 
@@ -638,13 +656,21 @@ where
 
             if inner.config.window_update_mode == WindowUpdateMode::OnRead {
                 let inner = &mut *inner;
-                if let Some(stream) = inner.streams.get_mut(&self.id) {
-                    if stream.window == 0 {
-                        trace!("{}: {}: read: sending window update", inner.id, self.id);
-                        let frame = Frame::window_update(self.id, inner.config.receive_window);
-                        inner.pending.push_back(frame.into_raw());
-                        stream.window = inner.config.receive_window
-                    }
+                let frame =
+                    if let Some(stream) = inner.streams.get_mut(&self.id) {
+                        if stream.window == 0 {
+                            trace!("{}: {}: read: sending window update", inner.id, self.id);
+                            stream.window = inner.config.receive_window;
+                            Some(Frame::window_update(self.id, inner.config.receive_window))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                if let Some(frame) = frame {
+                    inner.add_pending(frame.into_raw())
+                        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?
                 }
             }
 
@@ -716,7 +742,7 @@ where
             }
         };
         let n = frame.body.len();
-        inner.pending.push_back(frame);
+        inner.add_pending(frame).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         Ok(n)
     }
 
@@ -748,7 +774,7 @@ where
         if connection.status != ConnStatus::Open {
             return Ok(Async::Ready(()))
         }
-        connection.finish(self.id);
+        connection.finish(self.id).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
         match connection.flush_pending() {
             Err(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
             Ok(Async::NotReady) => {

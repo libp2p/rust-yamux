@@ -65,6 +65,7 @@ pub enum WindowUpdateMode {
 /// - receive window = 256 KiB
 /// - max. buffer size (per stream) = 1 MiB
 /// - max. number of streams = 8192
+/// - max. pending frames = 2048
 /// - window update mode = on receive
 /// - read after close = true
 #[derive(Debug, Clone)]
@@ -72,6 +73,7 @@ pub struct Config {
     pub(crate) receive_window: u32,
     pub(crate) max_buffer_size: usize,
     pub(crate) max_num_streams: usize,
+    pub(crate) max_pending_frames: usize,
     pub(crate) window_update_mode: WindowUpdateMode,
     pub(crate) read_after_close: bool
 }
@@ -82,6 +84,7 @@ impl Default for Config {
             receive_window: DEFAULT_CREDIT,
             max_buffer_size: 1024 * 1024,
             max_num_streams: 8192,
+            max_pending_frames: 2048,
             window_update_mode: WindowUpdateMode::OnReceive,
             read_after_close: true
         }
@@ -107,6 +110,13 @@ impl Config {
     pub fn set_max_num_streams(&mut self, n: usize) {
         self.max_num_streams = n
     }
+
+    /// Set the max. number of pending frames, i.e. outgoing
+    /// frames which have not yet been sent.
+    pub fn set_max_pending_frames(&mut self, n: usize) {
+        self.max_pending_frames = n
+    }
+
 
     /// Set the window update mode to use.
     pub fn set_window_update_mode(&mut self, m: WindowUpdateMode) {
