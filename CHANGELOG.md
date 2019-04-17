@@ -1,3 +1,12 @@
+# 0.2.0
+
+- Added `max_pending_frames` setting to `Config`. A `Connection` buffers outgoing
+  frames up to this limit (see pull request #51).
+- Added `ConnectionError::TooManyPendingFrames` if `max_pending_frames` has been reached.
+- Changed error types of `Connection::close` and `Connection::flush` from `std::io::Error`
+  to `yamux::ConnectionError`.
+- Removed `Connection::shutdown` method which was deprecated since version 0.1.8.
+
 # 0.1.9
 
 - Add `read_after_close` setting to `Config` which defaults
