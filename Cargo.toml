@@ -20,5 +20,12 @@ tokio-codec = "0.1"
 tokio-io = "0.1"
 
 [dev-dependencies]
+criterion = "0.2.11"
 quickcheck = "0.8"
+rw-stream-sink = "0.1.1"
 tokio = "0.1"
+
+[[bench]]
+name = "concurrent"
+harness = false
+
