@@ -322,12 +322,12 @@ impl Handle {
             })
     }
 
-    /// Gracefully close the connection.
+    /// Trigger graceful close of the connection.
     pub fn close(&self) -> impl Future<Item = (), Error = Error> {
         self.addr.clone().send(Message::Close).from_err().map(|_| ())
     }
 
-    /// Close the connection immediately.
+    /// Trigger immediate close of the connection.
     pub fn abort(&self) -> impl Future<Item = (), Error = Error> {
         self.addr.clone().send(Message::Abort).from_err().map(|_| ())
     }

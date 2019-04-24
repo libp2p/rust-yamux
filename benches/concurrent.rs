@@ -112,10 +112,10 @@ fn roundtrip(nstreams: u64, nmessages: usize, data: Bytes, send_all: bool) {
         }
         rx.take(nstreams)
             .map_err(|()| panic!("channel interrupted"))
-            .fold(0, |acc, n| Ok::<_, yamux::Error>(acc + n))
-            .and_then(move |n| {
+            .fold(0, |acc, n| Ok(acc + n))
+            .map(move |n| {
                 assert_eq!(n, nstreams as usize * nmessages * msg_len);
-                c.close().map(move |_| std::mem::drop(c))
+                std::mem::drop(c) // Make sure the connection is not closed up to this point.
             })
     });
 
