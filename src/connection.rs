@@ -344,7 +344,7 @@ where
         Ok(())
     }
 
-    // nb. Always registers the current task with the `self.tasks` notifier.
+    // Always registers the current task with the `self.tasks` notifier.
     fn flush_pending(&mut self) -> Poll<(), ConnectionError> {
         // The current task must be registered with `self.tasks` *before*
         // calling `start_send_notify` or `poll_flush_notify` on the underlying
@@ -368,9 +368,10 @@ where
 
     fn process_incoming(&mut self) -> Poll<(), ConnectionError> {
         loop {
-            // nb. Registers the current task with `self.tasks`. The current task
-            // must be registered with `self.tasks` *before* calling `poll_stream_notify`
-            // on the underlying resource, in order not to risk missing a notification.
+            // Relies on `flush_pending` always registering the current task with `self.tasks`.
+            // The current task must be registered with `self.tasks` *before* calling
+            // `poll_stream_notify` on the underlying resource, in order not to risk missing
+            // a notification.
             self.flush_pending()?;
             match self.resource.poll_stream_notify(&self.tasks, 0)? {
                 Async::Ready(Some(frame)) => {
