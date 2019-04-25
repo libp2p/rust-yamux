@@ -115,12 +115,14 @@ where
             connection.on_drop(Action::None);
             return Ok(Async::NotReady)
         }
+        // Make sure the current task is registered before calling
+        // `close_notify`, in order not to risk missing a notification.
+        connection.tasks.insert_current();
         let result = {
             let c = &mut *connection;
             c.resource.close_notify(&c.tasks, 0)?
         };
         if result.is_not_ready() {
-            connection.tasks.insert_current();
             connection.on_drop(Action::None)
         }
         Ok(result)
