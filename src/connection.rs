@@ -342,7 +342,12 @@ where
         Ok(())
     }
 
+    // nb. Always registers the current task with the `self.tasks` notifier.
     fn flush_pending(&mut self) -> Poll<(), ConnectionError> {
+        // The current task must be registered with `self.tasks` *before*
+        // calling `start_send_notify` or `poll_flush_notify` on the underlying
+        // resource, in order not to risk missing a notification.
+        self.tasks.insert_current();
         while let Some(frame) = self.pending.pop_front() {
             trace!("{}: {}: send: {:?}", self.id, frame.header.stream_id, frame.header);
             if let AsyncSink::NotReady(frame) = self.resource.start_send_notify(frame, &self.tasks, 0)? {
@@ -350,12 +355,10 @@ where
                     return Err(ConnectionError::TooManyPendingFrames)
                 }
                 self.pending.push_front(frame);
-                self.tasks.insert_current();
                 return Ok(Async::NotReady)
             }
         }
         if self.resource.poll_flush_notify(&self.tasks, 0)?.is_not_ready() {
-            self.tasks.insert_current();
             return Ok(Async::NotReady)
         }
         Ok(Async::Ready(()))
@@ -363,6 +366,9 @@ where
 
     fn process_incoming(&mut self) -> Poll<(), ConnectionError> {
         loop {
+            // nb. Registers the current task with `self.tasks`. The current task
+            // must be registered with `self.tasks` *before* calling `poll_stream_notify`
+            // on the underlying resource, in order not to risk missing a notification.
             self.flush_pending()?;
             match self.resource.poll_stream_notify(&self.tasks, 0)? {
                 Async::Ready(Some(frame)) => {
@@ -390,7 +396,6 @@ where
                     return Ok(Async::Ready(()))
                 }
                 Async::NotReady => {
-                    self.tasks.insert_current();
                     return Ok(Async::NotReady)
                 }
             }
@@ -455,7 +460,7 @@ where
                 } else {
                     stream.window = stream.window.saturating_sub(frame.body().len() as u32);
                     stream.buffer.lock().push(frame.into_body());
-                    if stream.window == 0 && self.config.window_update_mode == WindowUpdateMode::OnReceive {
+                    if !is_finish && stream.window == 0 && self.config.window_update_mode == WindowUpdateMode::OnReceive {
                         trace!("{}: {}: sending window update", self.id, stream_id);
                         stream.window = self.config.receive_window;
                         Frame::window_update(stream_id, self.config.receive_window)
