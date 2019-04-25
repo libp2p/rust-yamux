@@ -1,3 +1,7 @@
+# 0.2.1
+
+- Bugfix release (pull request #54).
+
 # 0.2.0
 
 - Added `max_pending_frames` setting to `Config`. A `Connection` buffers outgoing
