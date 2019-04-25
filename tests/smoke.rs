@@ -17,8 +17,7 @@ use std::{fmt::{Debug, Display}, io, net::{Ipv4Addr, SocketAddr, SocketAddrV4}};
 use tokio::{
     codec::{BytesCodec, Framed, Encoder, Decoder},
     executor::DefaultExecutor,
-    net::{TcpListener, TcpStream},
-    runtime::Runtime
+    net::{TcpListener, TcpStream}
 };
 use yamux::{Config, Connection, Mode, Handle, State};
 
@@ -46,9 +45,7 @@ fn send_recv() {
                 })
         });
 
-    let mut rt = Runtime::new().expect("runtime");
-    rt.spawn(server);
-    rt.block_on_all(client).expect("send_recv ok")
+    tokio::run(server.join(client).map(|_| ()));
 }
 
 #[test]
@@ -80,9 +77,7 @@ fn prop_max_streams() {
             })
         });
 
-        let mut rt = Runtime::new().expect("runtime");
-        rt.spawn(server);
-        rt.block_on_all(client).expect("prop_max_streams ok");
+        tokio::run(server.join(client).map(|_| ()));
         true
     }
 
@@ -102,12 +97,8 @@ fn prop_send_recv_half_closed() {
                     let stream = stream.expect("S: incoming stream");
                     let buf = vec![0; msg_len];
                     tokio::io::read_exact(stream, buf)
-                        .and_then(|(stream, buf)| {
-                            tokio::io::write_all(stream, buf)
-                        })
-                        .and_then(move |(stream, _buf)| {
-                            tokio::io::flush(stream).map(|_| handle)
-                        })
+                        .and_then(|(stream, buf)| tokio::io::write_all(stream, buf))
+                        .and_then(move |(stream, _buf)| tokio::io::flush(stream).map(|_| handle))
                         .map(|_| ())
                 })
                 .map_err(|e| error!("S: connection error: {}", e))
@@ -119,9 +110,7 @@ fn prop_send_recv_half_closed() {
                 .and_then(move |stream| {
                     let stream = stream.expect("C: outgoing stream");
                     tokio::io::write_all(stream, msg.clone())
-                        .and_then(|(stream, _buf)| {
-                            tokio::io::shutdown(stream)
-                        })
+                        .and_then(|(stream, _buf)| tokio::io::shutdown(stream))
                         .and_then(move |stream| {
                             assert_eq!(stream.state(), State::ReadOnly);
                             let buf = vec![0; msg_len];
@@ -136,9 +125,7 @@ fn prop_send_recv_half_closed() {
                 })
         });
 
-        let mut rt = Runtime::new().expect("runtime");
-        rt.spawn(server);
-        rt.block_on_all(client).expect("prop_max_streams ok");
+        tokio::run(server.join(client).map(|_| ()));
         true
     }
 
