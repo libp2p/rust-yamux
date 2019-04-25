@@ -76,8 +76,8 @@ where
 {
     /// Create a new connection.
     ///
-    /// This will spawn a new connection actor using the provided executor
-    /// and return a handle that allows controlling it.
+    /// This will spawn a new connection task using the provided executor
+    /// and return a [`Handle`] that allows controlling the connection.
     pub fn new<E>(e: E, res: T, cfg: Config, mode: Mode) -> Result<Handle, Error>
     where
         E: Executor<Box<dyn Future<Item = (), Error = ()> + Send>> + Send + Sync + 'static
@@ -129,7 +129,8 @@ enum Message {
     // Begin I/O setup for this connection
     Setup,
     // Close connection gracefully.
-    Close,
+    // Optionally contains a sender to notify when streams have been marked as closed.
+    Close(Option<oneshot::Sender<()>>),
     // Close connection immediately.
     Abort,
     // Request to open a new stream which should be reported back to the oneshot channel.
@@ -146,7 +147,7 @@ impl fmt::Debug for Message {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Message::Setup => f.write_str("Message::Setup"),
-            Message::Close => f.write_str("Message::Close"),
+            Message::Close(_) => f.write_str("Message::Close"),
             Message::Abort => f.write_str("Message::Abort"),
             Message::OpenStream(_) => f.write_str("Message::OpenStream"),
             Message::EndOfStream(id) => f.debug_tuple("Message::EndOfStream").field(&id).finish(),
@@ -231,12 +232,18 @@ where
                     // obvious programmer error which deserves a panic.
                     panic!("{}: received setup message while already open", admin.id);
                 }
-                Some(Message::Close) => {
+                Some(Message::Close(mut requestor)) => {
                     debug!("{}: shutting down connection", admin.id);
                     let n = admin.streams.len();
                     for (_, (_, s)) in admin.streams.drain() {
                         s.update_state(stream::State::Closed);
                         s.notify_tasks()
+                    }
+                    if let Some(r) = requestor.take() {
+                        // Inform requestor that all streams have been marked as closed.
+                        // We do not care if the requestor is already gone, hence we ignore
+                        // the possible send error.
+                        let _ = r.send(());
                     }
                     if n == 0 {
                         // No streams => we can stop right away.
@@ -266,7 +273,7 @@ where
                     // obvious programmer error which deserves a panic.
                     panic!("{}: received setup message while closing", admin.id);
                 }
-                m@Some(Message::Close) | m@Some(Message::OpenStream(_)) => {
+                m@Some(Message::Close(_)) | m@Some(Message::OpenStream(_)) => {
                     debug!("{}: ignoring message: {:?}", admin.id, m);
                     ready_closing(state.remaining, admin, state.input, state.sender)
                 }
@@ -304,7 +311,7 @@ impl Drop for Handle {
         // the connection and stream messages go into secondary
         // streams, hence the primary actor mailbox is uncontested.
         // Only `Sender` end of stream messages compete with us.
-        let _ = self.close().wait();
+        let _ = self.send_close().wait();
     }
 }
 
@@ -322,12 +329,38 @@ impl Handle {
             })
     }
 
-    /// Trigger graceful close of the connection.
+    /// Graceful close of the connection.
+    ///
+    /// The returned future will only resolve once the connection told
+    /// us that it has marked all streams as closed. This may be
+    /// useful for clients which rely on certain stream states in their
+    /// own processing.
+    ///
+    /// Upon receiving a close message, the connection will mark all
+    /// streams as closed and attempt to send buffered data.
     pub fn close(&self) -> impl Future<Item = (), Error = Error> {
-        self.addr.clone().send(Message::Close).from_err().map(|_| ())
+        let (tx, rx) = oneshot::channel();
+        self.addr.clone()
+            .send(Message::Close(Some(tx)))
+            .from_err()
+            .and_then(move |_| rx.then(move |_| Ok(())))
+    }
+
+    /// Trigger a graceful close of the connection.
+    ///
+    /// The returned future will resolve as soon as the close message
+    /// has been sent to the connection.
+    ///
+    /// Upon receiving a close message, the connection will mark all
+    /// streams as closed and attempt to send buffered data.
+    pub fn send_close(&self) -> impl Future<Item = (), Error = Error> {
+        self.addr.clone().send(Message::Close(None)).from_err().map(|_| ())
     }
 
     /// Trigger immediate close of the connection.
+    ///
+    /// Upon receiving an abort message, the connection will close and
+    /// any buffered data will be thrown away.
     pub fn abort(&self) -> impl Future<Item = (), Error = Error> {
         self.addr.clone().send(Message::Abort).from_err().map(|_| ())
     }
