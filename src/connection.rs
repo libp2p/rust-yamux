@@ -133,7 +133,8 @@ enum Message {
     // Optionally contains a sender to notify when streams have been marked as closed.
     Close(Option<oneshot::Sender<()>>),
     // Close connection immediately.
-    Abort,
+    // The sender will be notified when the message has been processed.
+    Abort(oneshot::Sender<()>),
     // Request to open a new stream which should be reported back to the oneshot channel.
     OpenStream(oneshot::Sender<Result<stream::Stream, Error>>),
     // One of our in-memory streams terminated.
@@ -149,7 +150,7 @@ impl fmt::Debug for Message {
         match self {
             Message::Setup => f.write_str("Message::Setup"),
             Message::Close(_) => f.write_str("Message::Close"),
-            Message::Abort => f.write_str("Message::Abort"),
+            Message::Abort(_) => f.write_str("Message::Abort"),
             Message::OpenStream(_) => f.write_str("Message::OpenStream"),
             Message::EndOfStream(id) => f.debug_tuple("Message::EndOfStream").field(&id).finish(),
             Message::FromRemote(_) => f.write_str("Message::FromRemote"),
@@ -253,9 +254,12 @@ where
                         ready_closing(n, admin, state.input, state.sender)
                     }
                 }
-                Some(Message::Abort) => {
+                Some(Message::Abort(requestor)) => {
                     debug!("{}: aborting connection", admin.id);
-                    Box::new(state.sender.send(sender::Message::Drop).then(|_| Ok(State::Done)))
+                    Box::new(state.sender.send(sender::Message::Drop).then(move |_| {
+                        let _ = requestor.send(()); // if the receiver is already gone, so be it
+                        Ok(State::Done)
+                    }))
                 }
                 Some(Message::SendError(fail)) => {
                     warn!("{}: send error: {}", admin.id, fail.error());
@@ -278,9 +282,12 @@ where
                     debug!("{}: ignoring message: {:?}", admin.id, m);
                     ready_closing(state.remaining, admin, state.input, state.sender)
                 }
-                Some(Message::Abort) => {
+                Some(Message::Abort(requestor)) => {
                     debug!("{}: aborting connection", admin.id);
-                    Box::new(state.sender.send(sender::Message::Drop).then(|_| Ok(State::Done)))
+                    Box::new(state.sender.send(sender::Message::Drop).then(move |_| {
+                        let _ = requestor.send(()); // if the receiver is already gone, so be it
+                        Ok(State::Done)
+                    }))
                 }
                 Some(Message::SendError(fail)) => {
                     warn!("{}: send error during shutdown: {}", admin.id, fail.error());
@@ -312,7 +319,7 @@ impl Drop for Handle {
         // the connection and stream messages go into secondary
         // streams, hence the primary actor mailbox is uncontested.
         // Only `Sender` end of stream messages compete with us.
-        let _ = self.send_close().wait();
+        let _ = self.addr.clone().send(Message::Close(None)).wait();
     }
 }
 
@@ -347,23 +354,16 @@ impl Handle {
             .and_then(move |_| rx.then(move |_| Ok(())))
     }
 
-    /// Trigger a graceful close of the connection.
-    ///
-    /// The returned future will resolve as soon as the close message
-    /// has been sent to the connection.
-    ///
-    /// Upon receiving a close message, the connection will mark all
-    /// streams as closed and attempt to send buffered data.
-    pub fn send_close(&self) -> impl Future<Item = (), Error = Error> {
-        self.addr.clone().send(Message::Close(None)).from_err().map(|_| ())
-    }
-
     /// Trigger immediate close of the connection.
     ///
     /// Upon receiving an abort message, the connection will close and
     /// any buffered data will be thrown away.
     pub fn abort(&self) -> impl Future<Item = (), Error = Error> {
-        self.addr.clone().send(Message::Abort).from_err().map(|_| ())
+        let (tx, rx) = oneshot::channel();
+        self.addr.clone()
+            .send(Message::Abort(tx))
+            .from_err()
+            .and_then(move |_| rx.then(move |_| Ok(())))
     }
 }
 
