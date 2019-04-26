@@ -36,6 +36,7 @@ use holly::{actor::Fail, prelude::*, stream::KillCord};
 use std::{collections::{hash_map::Entry, HashMap}, fmt, sync::Arc};
 use tokio_codec::Framed;
 use tokio_io::{AsyncRead, AsyncWrite};
+use void::Void;
 
 /// Connection mode.
 ///
@@ -179,10 +180,10 @@ impl From<Fail<Error>> for Message {
 }
 
 // Result type of `Connection::process`.
-type ActorFuture<A> = Box<dyn Future<Item = State<A, Message>, Error = Error> + Send>;
+type ActorFuture<A> = Box<dyn Future<Item = State<A, Message>, Error = Void> + Send>;
 
 // The actual actor implementation.
-impl<T> Actor<Message, Error> for Connection<T>
+impl<T> Actor<Message, Void> for Connection<T>
 where
     T: AsyncRead + AsyncWrite + Send + 'static
 {
@@ -209,10 +210,13 @@ where
                     // encounters an error.
                     let options = holly::actor::Options::default().supervisor(ctx.address());
                     let future = future::result(ctx.scheduler().spawn_ext(sender, options))
-                        .from_err()
                         .map(move |sender| {
                             let state = Connection::open(admin, k, sender);
                             State::Stream(state, Box::new(i.map(Into::into)))
+                        })
+                        .or_else(|e| {
+                            error!("failed to spawn sender: {}", e);
+                            Ok(State::Done)
                         });
 
                     Box::new(future)
@@ -235,10 +239,7 @@ where
                 Some(Message::Close(mut requestor)) => {
                     debug!("{}: shutting down connection", admin.id);
                     let n = admin.streams.len();
-                    for (_, (_, s)) in admin.streams.drain() {
-                        s.update_state(stream::State::Closed);
-                        s.notify_tasks()
-                    }
+                    close_all_streams(&mut admin);
                     if let Some(r) = requestor.take() {
                         // Inform requestor that all streams have been marked as closed.
                         // We do not care if the requestor is already gone, hence we ignore
@@ -254,7 +255,7 @@ where
                 }
                 Some(Message::Abort) => {
                     debug!("{}: aborting connection", admin.id);
-                    Box::new(state.sender.send(sender::Message::Drop).from_err().map(|_| State::Done))
+                    Box::new(state.sender.send(sender::Message::Drop).then(|_| Ok(State::Done)))
                 }
                 Some(Message::SendError(fail)) => {
                     warn!("{}: send error: {}", admin.id, fail.error());
@@ -279,7 +280,7 @@ where
                 }
                 Some(Message::Abort) => {
                     debug!("{}: aborting connection", admin.id);
-                    Box::new(state.sender.send(sender::Message::Drop).from_err().map(|_| State::Done))
+                    Box::new(state.sender.send(sender::Message::Drop).then(|_| Ok(State::Done)))
                 }
                 Some(Message::SendError(fail)) => {
                     warn!("{}: send error during shutdown: {}", admin.id, fail.error());
@@ -390,10 +391,7 @@ struct ConnAdmin {
 
 impl Drop for ConnAdmin {
     fn drop(&mut self) {
-        for (_, (_, s)) in self.streams.drain() {
-            s.update_state(stream::State::Closed);
-            s.notify_tasks()
-        }
+        close_all_streams(self)
     }
 }
 
@@ -487,25 +485,27 @@ impl OpenState {
                 let mut frame = Frame::window_update(id, admin.config.receive_window);
                 frame.header_mut().syn();
                 let frame = frame.into_raw();
-                let future = sender.send(sender::Message::Send(frame)).from_err()
+                let future = sender.send(sender::Message::Send(frame))
                     .and_then(move |sender| {
                         let stream = Box::new(s.map(sender::Message::from));
-                        sender.send(sender::Message::AddStream(stream)).from_err()
+                        sender.send(sender::Message::AddStream(stream))
                     })
                     .map(move |sender| {
                         admin.streams.insert(id, (i, strepr));
                         State::Ready(Connection::open(admin, input, sender))
+                    })
+                    .or_else(|e| {
+                        error!("sender is gone: {}", e);
+                        Ok(State::Done)
                     });
+
                 Box::new(future)
             }
             Err(e) => { // no more stream IDs => transition to closing
                 error!("{}: stream IDs exhausted", admin.id);
                 let _ = req.send(Err(e));
                 let n = admin.streams.len();
-                for (_, (_, s)) in admin.streams.drain() {
-                    s.update_state(stream::State::Closed);
-                    s.notify_tasks()
-                }
+                close_all_streams(&mut admin);
                 if n == 0 {
                     // No streams => we can stop right away.
                     immediate_close(admin, input, sender, CODE_TERM)
@@ -535,6 +535,10 @@ impl OpenState {
             let future = send_reset(id, sender)
                 .map(move |sender| {
                     State::Ready(Connection::open(admin, input, sender))
+                })
+                .or_else(|e| {
+                    error!("sender is gone: {}", e);
+                    Ok(State::Done)
                 });
             return Box::new(future)
         }
@@ -605,9 +609,13 @@ impl OpenState {
                             let _ = admin.incoming.unbounded_send(stream);
 
                             let stream = Box::new(s.map(sender::Message::from));
-                            let future = sender.send(sender::Message::AddStream(stream)).from_err()
+                            let future = sender.send(sender::Message::AddStream(stream))
                                 .map(move |sender| {
                                     State::Ready(Connection::open(admin, input, sender))
+                                })
+                                .or_else(|e| {
+                                    error!("sender is gone: {}", e);
+                                    Ok(State::Done)
                                 });
                             return Box::new(future)
                         }
@@ -632,6 +640,10 @@ impl OpenState {
                                     let future = send_reset(id, sender)
                                         .map(move |sender| {
                                             State::Ready(Connection::open(admin, input, sender))
+                                        })
+                                        .or_else(|e| {
+                                            error!("sender is gone: {}", e);
+                                            Ok(State::Done)
                                         });
                                     return Box::new(future)
                                 }
@@ -648,9 +660,12 @@ impl OpenState {
                                     entry.get().1.set_window(admin.config.receive_window);
                                     let frame = Frame::window_update(id, admin.config.receive_window);
                                     let future = sender.send(sender::Message::SendAndFlush(frame.into_raw()))
-                                        .from_err()
                                         .map(move |sender| {
                                             State::Ready(Connection::open(admin, input, sender))
+                                        })
+                                        .or_else(|e| {
+                                            error!("sender is gone: {}", e);
+                                            Ok(State::Done)
                                         });
                                     return Box::new(future)
                                 }
@@ -668,6 +683,10 @@ impl OpenState {
                                 let future = send_reset(id, sender)
                                     .map(move |sender| {
                                         State::Ready(Connection::open(admin, input, sender))
+                                    })
+                                    .or_else(|e| {
+                                        error!("sender is gone: {}", e);
+                                        Ok(State::Done)
                                     });
                                 return Box::new(future)
                             }
@@ -718,9 +737,13 @@ impl OpenState {
                             let _ = admin.incoming.unbounded_send(stream);
 
                             let stream = Box::new(s.map(sender::Message::from));
-                            let future = sender.send(sender::Message::AddStream(stream)).from_err()
+                            let future = sender.send(sender::Message::AddStream(stream))
                                 .map(move |sender| {
                                     State::Ready(Connection::open(admin, input, sender))
+                                })
+                                .or_else(|e| {
+                                    error!("sender is gone: {}", e);
+                                    Ok(State::Done)
                                 });
                             return Box::new(future)
                         }
@@ -738,6 +761,10 @@ impl OpenState {
                             let future = send_reset(id, sender)
                                 .map(move |sender| {
                                     State::Ready(Connection::open(admin, input, sender))
+                                })
+                                .or_else(|e| {
+                                    error!("sender is gone: {}", e);
+                                    Ok(State::Done)
                                 });
                             Box::new(future)
                         }
@@ -755,9 +782,12 @@ impl OpenState {
                             h.ack();
                             let frame = Frame::new(h).into_raw();
                             let future = sender.send(sender::Message::SendAndFlush(frame))
-                                .from_err()
                                 .map(move |sender| {
                                     State::Ready(Connection::open(admin, input, sender))
+                                })
+                                .or_else(|e| {
+                                    error!("sender is gone: {}", e);
+                                    Ok(State::Done)
                                 });
                             return Box::new(future)
                         }
@@ -766,17 +796,17 @@ impl OpenState {
                     }
                     Type::GoAway => {
                         debug!("{}: received GoAway", admin.id);
-                        Box::new(sender.send(sender::Message::Drop).from_err().map(|_| State::Done))
+                        Box::new(sender.send(sender::Message::Drop).then(|_| Ok(State::Done)))
                     }
                 }
             }
             holly::stream::Event::End(()) => { // connection closed
                 debug!("{}: connection closed", admin.id);
-                Box::new(sender.send(sender::Message::Drop).from_err().map(|_| State::Done))
+                Box::new(sender.send(sender::Message::Drop).then(|_| Ok(State::Done)))
             }
             holly::stream::Event::Error((), e) => { // connection error
                 debug!("{}: connection error: {}", admin.id, e);
-                Box::new(sender.send(sender::Message::Drop).from_err().map(|_| State::Done))
+                Box::new(sender.send(sender::Message::Drop).then(|_| Ok(State::Done)))
             }
         }
     }
@@ -823,6 +853,10 @@ impl ClosingState {
             let future = send_reset(id, sender)
                 .map(move |sender| {
                     State::Ready(Connection::closing(remaining - 1, admin, input, sender))
+                })
+                .or_else(|e| {
+                    error!("sender is gone: {}", e);
+                    Ok(State::Done)
                 });
             return Box::new(future)
         }
@@ -858,9 +892,12 @@ impl ClosingState {
                             h.ack();
                             let frame = Frame::new(h).into_raw();
                             let future = sender.send(sender::Message::SendAndFlush(frame))
-                                .from_err()
                                 .map(move |sender| {
                                     State::Ready(Connection::closing(remaining, admin, input, sender))
+                                })
+                                .or_else(|e| {
+                                    error!("sender is gone: {}", e);
+                                    Ok(State::Done)
                                 });
                             return Box::new(future)
                         }
@@ -869,17 +906,17 @@ impl ClosingState {
                     }
                     Type::GoAway => {
                         debug!("{}: received GoAway", admin.id);
-                        Box::new(sender.send(sender::Message::Drop).from_err().map(|_| State::Done))
+                        Box::new(sender.send(sender::Message::Drop).then(|_| Ok(State::Done)))
                     }
                 }
             }
             holly::stream::Event::End(()) => { // connection closed
                 debug!("{}: connection closed", admin.id);
-                Box::new(sender.send(sender::Message::Drop).from_err().map(|_| State::Done))
+                Box::new(sender.send(sender::Message::Drop).then(|_| Ok(State::Done)))
             }
             holly::stream::Event::Error((), e) => { // connection error
                 debug!("{}: connection error: {}", admin.id, e);
-                Box::new(sender.send(sender::Message::Drop).from_err().map(|_| State::Done))
+                Box::new(sender.send(sender::Message::Drop).then(|_| Ok(State::Done)))
             }
         }
     }
@@ -900,7 +937,7 @@ fn immediate_close<T>(_admin: ConnAdmin, _input: KillCord, sender: Sender, code:
 where
     T: AsyncRead + AsyncWrite + Send + 'static
 {
-    Box::new(sender.send(sender::Message::Close(code)).from_err().map(|_| State::Done))
+    Box::new(sender.send(sender::Message::Close(code)).then(|_| Ok(State::Done)))
 }
 
 /// Syntactic sugar to transition to `State::Ready` in `ConnState::Open`.
@@ -919,3 +956,12 @@ where
 {
     Box::new(future::ok(State::Ready(Connection::closing(rem, admin, input, sender))))
 }
+
+/// Mark all streams as closed.
+fn close_all_streams(admin: &mut ConnAdmin) {
+    for (_, (_, s)) in admin.streams.drain() {
+        s.update_state(stream::State::Closed);
+        s.notify_tasks()
+    }
+}
+
