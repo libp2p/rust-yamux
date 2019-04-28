@@ -31,7 +31,7 @@ use futures::{
     prelude::*,
     sync::{mpsc, oneshot}
 };
-use log::{debug, error, trace, warn};
+use log::{debug, error, trace};
 use holly::{actor::Fail, prelude::*, stream::KillCord};
 use std::{collections::{hash_map::Entry, HashMap}, fmt, sync::Arc};
 use tokio_codec::Framed;
@@ -262,7 +262,7 @@ where
                     }))
                 }
                 Some(Message::SendError(fail)) => {
-                    warn!("{}: send error: {}", admin.id, fail.error());
+                    debug!("{}: send error: {}", admin.id, fail.error());
                     Box::new(future::ok(State::Done))
                 }
                 None => {
@@ -290,7 +290,7 @@ where
                     }))
                 }
                 Some(Message::SendError(fail)) => {
-                    warn!("{}: send error during shutdown: {}", admin.id, fail.error());
+                    debug!("{}: send error during shutdown: {}", admin.id, fail.error());
                     Box::new(future::ok(State::Done))
                 }
                 None => {
@@ -464,7 +464,7 @@ impl OpenState {
         let OpenState { input, sender } = self;
 
         if admin.streams.len() == admin.config.max_num_streams {
-            error!("{}: maximum number of streams reached", admin.id);
+            debug!("{}: maximum number of streams reached", admin.id);
             let _ = req.send(Err(Error::TooManyStreams));
             return ready_open(admin, input, sender)
         }
@@ -495,14 +495,14 @@ impl OpenState {
                         State::Ready(Connection::open(admin, input, sender))
                     })
                     .or_else(|e| {
-                        error!("sender is gone: {}", e);
+                        debug!("sender is gone: {}", e);
                         Ok(State::Done)
                     });
 
                 Box::new(future)
             }
             Err(e) => { // no more stream IDs => transition to closing
-                error!("{}: stream IDs exhausted", admin.id);
+                debug!("{}: stream IDs exhausted", admin.id);
                 let _ = req.send(Err(e));
                 let n = admin.streams.len();
                 close_all_streams(&mut admin);
@@ -537,7 +537,7 @@ impl OpenState {
                     State::Ready(Connection::open(admin, input, sender))
                 })
                 .or_else(|e| {
-                    error!("sender is gone: {}", e);
+                    debug!("sender is gone: {}", e);
                     Ok(State::Done)
                 });
             return Box::new(future)
@@ -574,19 +574,19 @@ impl OpenState {
                         // Is this a new stream?
                         if frame.header().flags().contains(SYN) {
                             if !admin.is_valid_remote_id(id, Type::Data) {
-                                error!("{}: {}: invalid stream id", admin.id, id);
+                                debug!("{}: {}: invalid stream id", admin.id, id);
                                 return immediate_close(admin, input, sender, ECODE_PROTO)
                             }
                             if frame.body().len() > DEFAULT_CREDIT as usize {
-                                error!("{}: {}: initial frame body too large", admin.id, id);
+                                debug!("{}: {}: initial frame body too large", admin.id, id);
                                 return immediate_close(admin, input, sender, ECODE_PROTO)
                             }
                             if admin.streams.contains_key(&id) {
-                                error!("{}: {}: stream already in use", admin.id, id);
+                                debug!("{}: {}: stream already in use", admin.id, id);
                                 return immediate_close(admin, input, sender, ECODE_PROTO)
                             }
                             if admin.streams.len() == admin.config.max_num_streams {
-                                error!("{}: {}: too many streams", admin.id, id);
+                                debug!("{}: {}: too many streams", admin.id, id);
                                 return immediate_close(admin, input, sender, ECODE_INTERNAL)
                             }
 
@@ -614,7 +614,7 @@ impl OpenState {
                                     State::Ready(Connection::open(admin, input, sender))
                                 })
                                 .or_else(|e| {
-                                    error!("sender is gone: {}", e);
+                                    debug!("sender is gone: {}", e);
                                     Ok(State::Done)
                                 });
                             return Box::new(future)
@@ -624,7 +624,7 @@ impl OpenState {
                         match admin.streams.entry(id) {
                             Entry::Occupied(entry) => {
                                 if frame.body().len() > entry.get().1.window() as usize {
-                                    error!("{}: {}: frame body too large", admin.id, id);
+                                    debug!("{}: {}: frame body too large", admin.id, id);
                                     return immediate_close(admin, input, sender, ECODE_PROTO)
                                 }
                                 if is_finish {
@@ -633,7 +633,7 @@ impl OpenState {
                                 let max_buffer_size = admin.config.max_buffer_size;
                                 // Stream buffer grows beyond limit => remove & reset stream
                                 if entry.get().1.buflen().map(move |n| n >= max_buffer_size).unwrap_or(true) {
-                                    warn!("{}: {}: max. stream buffer size reached", admin.id, id);
+                                    debug!("{}: {}: max. stream buffer size reached", admin.id, id);
                                     let stream = entry.remove();
                                     stream.1.update_state(stream::State::Closed);
                                     stream.1.notify_tasks();
@@ -642,7 +642,7 @@ impl OpenState {
                                             State::Ready(Connection::open(admin, input, sender))
                                         })
                                         .or_else(|e| {
-                                            error!("sender is gone: {}", e);
+                                            debug!("sender is gone: {}", e);
                                             Ok(State::Done)
                                         });
                                     return Box::new(future)
@@ -664,7 +664,7 @@ impl OpenState {
                                             State::Ready(Connection::open(admin, input, sender))
                                         })
                                         .or_else(|e| {
-                                            error!("sender is gone: {}", e);
+                                            debug!("sender is gone: {}", e);
                                             Ok(State::Done)
                                         });
                                     return Box::new(future)
@@ -685,7 +685,7 @@ impl OpenState {
                                         State::Ready(Connection::open(admin, input, sender))
                                     })
                                     .or_else(|e| {
-                                        error!("sender is gone: {}", e);
+                                        debug!("sender is gone: {}", e);
                                         Ok(State::Done)
                                     });
                                 return Box::new(future)
@@ -708,15 +708,15 @@ impl OpenState {
                         // Is this a new stream?
                         if frame.header().flags().contains(SYN) {
                             if !admin.is_valid_remote_id(id, Type::WindowUpdate) {
-                                error!("{}: {}: invalid stream id", admin.id, id);
+                                debug!("{}: {}: invalid stream id", admin.id, id);
                                 return immediate_close(admin, input, sender, ECODE_PROTO)
                             }
                             if admin.streams.contains_key(&id) {
-                                error!("{}: {}: stream already in use", admin.id, id);
+                                debug!("{}: {}: stream already in use", admin.id, id);
                                 return immediate_close(admin, input, sender, ECODE_PROTO)
                             }
                             if admin.streams.len() == admin.config.max_num_streams {
-                                error!("{}: {}: too many streams", admin.id, id);
+                                debug!("{}: {}: too many streams", admin.id, id);
                                 return immediate_close(admin, input, sender, ECODE_INTERNAL)
                             }
 
@@ -742,7 +742,7 @@ impl OpenState {
                                     State::Ready(Connection::open(admin, input, sender))
                                 })
                                 .or_else(|e| {
-                                    error!("sender is gone: {}", e);
+                                    debug!("sender is gone: {}", e);
                                     Ok(State::Done)
                                 });
                             return Box::new(future)
@@ -763,7 +763,7 @@ impl OpenState {
                                     State::Ready(Connection::open(admin, input, sender))
                                 })
                                 .or_else(|e| {
-                                    error!("sender is gone: {}", e);
+                                    debug!("sender is gone: {}", e);
                                     Ok(State::Done)
                                 });
                             Box::new(future)
@@ -786,7 +786,7 @@ impl OpenState {
                                     State::Ready(Connection::open(admin, input, sender))
                                 })
                                 .or_else(|e| {
-                                    error!("sender is gone: {}", e);
+                                    debug!("sender is gone: {}", e);
                                     Ok(State::Done)
                                 });
                             return Box::new(future)
@@ -855,7 +855,7 @@ impl ClosingState {
                     State::Ready(Connection::closing(remaining - 1, admin, input, sender))
                 })
                 .or_else(|e| {
-                    error!("sender is gone: {}", e);
+                    debug!("sender is gone: {}", e);
                     Ok(State::Done)
                 });
             return Box::new(future)
@@ -896,7 +896,7 @@ impl ClosingState {
                                     State::Ready(Connection::closing(remaining, admin, input, sender))
                                 })
                                 .or_else(|e| {
-                                    error!("sender is gone: {}", e);
+                                    debug!("sender is gone: {}", e);
                                     Ok(State::Done)
                                 });
                             return Box::new(future)

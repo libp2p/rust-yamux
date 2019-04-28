@@ -19,7 +19,7 @@ use log::{debug, trace};
 use holly::prelude::*;
 use std::{fmt, sync::Arc};
 use super::ConnId;
-use tokio_timer::Timeout;
+use tokio_timer::{timeout, Timeout};
 use void::Void;
 
 // Connection actor address.
@@ -204,54 +204,43 @@ impl Actor<Message, Error> for Sender {
 }
 
 /// Send frame to remote and honour potential write timeout.
-fn send_frame(f: RawFrame, admin: &Admin, output: Output)
-    -> impl Future<Item = Output, Error = Error>
-{
+fn send_frame(f: RawFrame, admin: &Admin, output: Output) -> impl Future<Item = Output, Error = Error> {
     trace!("{}: {}: send: {:?}", admin.id, f.header.stream_id, f.header);
-    let d = admin.config.write_timeout;
-    let f = holly::sink::send(output, f);
-    if let Some(d) = d {
-        Either::A(Timeout::new(f, d).from_err())
-    } else {
-        Either::B(f.from_err())
-    }
+    with_timeout(admin, holly::sink::send(output, f))
 }
 
 /// Send frame to remote, flush the connection and honour potential write timeout.
-fn send_frame_flush(f: RawFrame, admin: &Admin, output: Output)
-    -> impl Future<Item = Output, Error = Error>
-{
+fn send_frame_flush(f: RawFrame, admin: &Admin, output: Output) -> impl Future<Item = Output, Error = Error> {
     trace!("{}: {}: send: {:?}", admin.id, f.header.stream_id, f.header);
-    let d = admin.config.write_timeout;
-    let f = holly::sink::send(output, f).and_then(holly::sink::flush);
-    if let Some(d) = d {
-        Either::A(Timeout::new(f, d).from_err())
-    } else {
-        Either::B(f.from_err())
-    }
+    with_timeout(admin, holly::sink::send(output, f).and_then(holly::sink::flush))
 }
 
 /// Flush the connection and honour potential write timeout.
 fn flush(admin: &Admin, output: Output) -> impl Future<Item = Output, Error = Error> {
     trace!("{}: flush", admin.id);
-    let d = admin.config.write_timeout;
-    let f = holly::sink::flush(output);
-    if let Some(d) = d {
-        Either::A(Timeout::new(f, d).from_err())
-    } else {
-        Either::B(f.from_err())
-    }
+    with_timeout(admin, holly::sink::flush(output))
 }
 
 /// Send GoAway frame and close output.
 fn close(admin: Admin, output: Output, code: u32) -> impl Future<Item = (), Error = Error> {
     debug!("{}: send GoAway [code = {}]", admin.id, code);
-    let d = admin.config.write_timeout;
-    let f = holly::sink::send(output, Frame::go_away(code).into_raw())
-        .and_then(holly::sink::close);
-    if let Some(d) = d {
-        Either::A(Timeout::new(f, d).from_err())
-    } else {
-        Either::B(f.from_err())
-    }
+    let f = holly::sink::send(output, Frame::go_away(code).into_raw()).and_then(holly::sink::close);
+    with_timeout(&admin, f)
+}
+
+/// Attach timeout to the given future (if any).
+fn with_timeout<F, T, E>(admin: &Admin, f: F) -> impl Future<Item = T, Error = Error>
+where
+    F: Future<Item = T, Error = E>,
+    Error: From<E> + From<timeout::Error<E>>
+{
+    let future =
+        if let Some(d) = admin.config.write_timeout {
+            Either::A(Timeout::new(f, d).from_err())
+        } else {
+            Either::B(f.from_err())
+        };
+
+    let id = admin.id;
+    future.map_err(move |e| { debug!("{}: {}", id, e); e })
 }
