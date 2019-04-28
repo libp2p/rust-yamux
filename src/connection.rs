@@ -961,6 +961,7 @@ where
 fn close_all_streams(admin: &mut ConnAdmin) {
     for (_, (_, s)) in admin.streams.drain() {
         s.update_state(stream::State::Closed);
+        s.disconnected();
         s.notify_tasks()
     }
 }

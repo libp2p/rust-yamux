@@ -85,7 +85,9 @@ pub(crate) struct Inner {
     // task waiting to write data
     write_task: Option<Task>,
     // stream state
-    state: State
+    state: State,
+    // connection status
+    connected: bool
 }
 
 /// The states of a yamux [`Stream`].
@@ -152,7 +154,8 @@ impl StreamRepr {
             window: credit,
             read_task: None,
             write_task: None,
-            state: State::Open
+            state: State::Open,
+            connected: true
         };
         Self(Arc::new(Mutex::new(inner)))
     }
@@ -166,6 +169,11 @@ impl StreamRepr {
     /// Returns state the streams transitions to.
     pub(crate) fn update_state(&self, s: State) -> State {
         self.0.lock().update_state(s)
+    }
+
+    /// Inform this stream that the connection is closed.
+    pub(crate) fn disconnected(&self) {
+        self.0.lock().connected = false
     }
 
     /// Add incoming data to buffer and notify pending read tasks if any.
@@ -240,7 +248,7 @@ impl Inner {
 impl io::Read for Stream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let mut inner = self.repr.0.lock();
-        if !(inner.state.can_read() || inner.config.read_after_close) {
+        if !(inner.connected || inner.config.read_after_close) {
             return Ok(0)
         }
         let mut n = 0;
