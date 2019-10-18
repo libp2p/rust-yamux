@@ -1,3 +1,7 @@
+# 0.2.2
+
+- Updated dependencies (#56).
+
 # 0.2.1
 
 - Bugfix release (pull request #54).
