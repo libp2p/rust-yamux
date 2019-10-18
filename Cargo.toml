@@ -1,6 +1,6 @@
 [package]
 name = "yamux"
-version = "0.2.1"
+version = "0.2.2"
 authors = ["Parity Technologies <admin@parity.io>"]
 license = "Apache-2.0 OR MIT"
 description = "Multiplexer over reliable, ordered connections"
@@ -9,21 +9,21 @@ readme = "README.md"
 edition = "2018"
 
 [dependencies]
-bytes = "0.4"
-futures = "0.1"
-nohash-hasher = "0.1"
-log = "0.4"
-parking_lot = "0.6"
-rand = "0.6"
-quick-error = "0.1"
-tokio-codec = "0.1"
-tokio-io = "0.1"
+bytes = "0.4.12"
+futures = "0.1.29"
+nohash-hasher = "0.1.2"
+log = "0.4.8"
+parking_lot = "0.9.0"
+rand = "0.7.2"
+quick-error = "1.2.2"
+tokio-codec = "0.1.1"
+tokio-io = "0.1.12"
 
 [dev-dependencies]
-criterion = "0.2.11"
-quickcheck = "0.8"
-rw-stream-sink = "0.1.1"
-tokio = "0.1"
+criterion = "0.3.0"
+quickcheck = "0.9.0"
+rw-stream-sink = "0.1.2"
+tokio = "0.1.22"
 
 [[bench]]
 name = "concurrent"
