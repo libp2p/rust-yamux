@@ -157,6 +157,8 @@ where
                 } else {
                     continue
                 };
+            // The following code before return shall not panic,
+            // or else a double lock will happen when unwinding.
             connection.on_drop(Action::None);
             return Ok(Async::Ready(Some(stream)))
         }
