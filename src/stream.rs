@@ -50,21 +50,21 @@ pub enum State {
     Open,
     SendClosed,
     RecvClosed,
-    Closed
+    Closed,
 }
 
 impl State {
     pub fn can_read(self) -> bool {
         match self {
             State::RecvClosed | State::Closed => false,
-            _ => true
+            _ => true,
         }
     }
 
     pub fn can_write(self) -> bool {
         match self {
             State::SendClosed | State::Closed => false,
-            _ => true
+            _ => true,
         }
     }
 }
@@ -74,7 +74,7 @@ pub(crate) struct StreamEntry {
     state: State,
     pub(crate) window: u32,
     pub(crate) credit: u32,
-    pub(crate) buffer: Arc<Mutex<Chunks>>
+    pub(crate) buffer: Arc<Mutex<Chunks>>,
 }
 
 impl StreamEntry {
@@ -83,7 +83,7 @@ impl StreamEntry {
             state: State::Open,
             buffer: Arc::new(Mutex::new(Chunks::new())),
             window,
-            credit
+            credit,
         }
     }
 
@@ -97,17 +97,16 @@ impl StreamEntry {
         let current = self.state;
 
         match (current, next) {
-            (Closed,              _) => {}
-            (Open,                _) => self.state = next,
-            (RecvClosed,     Closed) => self.state = Closed,
-            (RecvClosed,       Open) => {}
+            (Closed, _) => {}
+            (Open, _) => self.state = next,
+            (RecvClosed, Closed) => self.state = Closed,
+            (RecvClosed, Open) => {}
             (RecvClosed, RecvClosed) => {}
             (RecvClosed, SendClosed) => self.state = Closed,
-            (SendClosed,     Closed) => self.state = Closed,
-            (SendClosed,       Open) => {}
+            (SendClosed, Closed) => self.state = Closed,
+            (SendClosed, Open) => {}
             (SendClosed, RecvClosed) => self.state = Closed,
             (SendClosed, SendClosed) => {}
         }
     }
 }
-

@@ -8,8 +8,11 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
+use crate::{
+    frame::header::{Header, RawHeader},
+    stream,
+};
 use bytes::BytesMut;
-use crate::{frame::header::{Header, RawHeader}, stream};
 use std::u32;
 
 pub mod codec;
@@ -18,7 +21,7 @@ pub mod header;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RawFrame {
     pub header: RawHeader,
-    pub body: BytesMut
+    pub body: BytesMut,
 }
 
 impl RawFrame {
@@ -39,19 +42,22 @@ pub enum GoAway {}
 #[derive(Clone, Debug)]
 pub struct Frame<T> {
     header: Header<T>,
-    body: BytesMut
+    body: BytesMut,
 }
 
 impl<T> Frame<T> {
     pub(crate) fn assert(raw: RawFrame) -> Self {
         Frame {
             header: Header::assert(raw.header),
-            body: raw.body
+            body: raw.body,
         }
     }
 
     pub fn new(header: Header<T>) -> Frame<T> {
-        Frame { header, body: BytesMut::new() }
+        Frame {
+            header,
+            body: BytesMut::new(),
+        }
     }
 
     pub fn header(&self) -> &Header<T> {
@@ -65,7 +71,7 @@ impl<T> Frame<T> {
     pub fn into_raw(self) -> RawFrame {
         RawFrame {
             header: self.header.into_raw(),
-            body: self.body
+            body: self.body,
         }
     }
 }
@@ -74,7 +80,7 @@ impl Frame<Data> {
     pub fn data(id: stream::Id, b: BytesMut) -> Self {
         Frame {
             header: Header::data(id, b.len() as u32),
-            body: b
+            body: b,
         }
     }
 
@@ -91,7 +97,7 @@ impl Frame<WindowUpdate> {
     pub fn window_update(id: stream::Id, n: u32) -> Self {
         Frame {
             header: Header::window_update(id, n),
-            body: BytesMut::new()
+            body: BytesMut::new(),
         }
     }
 }
@@ -100,8 +106,7 @@ impl Frame<GoAway> {
     pub fn go_away(error: u32) -> Self {
         Frame {
             header: Header::go_away(error),
-            body: BytesMut::new()
+            body: BytesMut::new(),
         }
     }
 }
-

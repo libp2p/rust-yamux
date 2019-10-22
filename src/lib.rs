@@ -26,7 +26,7 @@ mod notify;
 mod stream;
 
 pub use crate::connection::{Connection, Mode, StreamHandle};
-pub use crate::error::{DecodeError, ConnectionError};
+pub use crate::error::{ConnectionError, DecodeError};
 pub use crate::stream::State;
 
 pub(crate) const DEFAULT_CREDIT: u32 = 256 * 1024; // as per yamux specification
@@ -55,7 +55,7 @@ pub enum WindowUpdateMode {
     /// - Endpoints *A* and *B* write at most *n* frames concurrently such that the sum
     ///   of the frame lengths is less or equal to the available credit of *A* and *B*
     ///   respectively.
-    OnRead
+    OnRead,
 }
 
 /// Yamux configuration.
@@ -75,7 +75,7 @@ pub struct Config {
     pub(crate) max_num_streams: usize,
     pub(crate) max_pending_frames: usize,
     pub(crate) window_update_mode: WindowUpdateMode,
-    pub(crate) read_after_close: bool
+    pub(crate) read_after_close: bool,
 }
 
 impl Default for Config {
@@ -86,7 +86,7 @@ impl Default for Config {
             max_num_streams: 8192,
             max_pending_frames: 2048,
             window_update_mode: WindowUpdateMode::OnReceive,
-            read_after_close: true
+            read_after_close: true,
         }
     }
 }
@@ -96,7 +96,7 @@ impl Config {
     pub fn set_receive_window(&mut self, n: u32) -> Result<(), ()> {
         if n >= DEFAULT_CREDIT {
             self.receive_window = n;
-            return Ok(())
+            return Ok(());
         }
         Err(())
     }
@@ -117,7 +117,6 @@ impl Config {
         self.max_pending_frames = n
     }
 
-
     /// Set the window update mode to use.
     pub fn set_window_update_mode(&mut self, m: WindowUpdateMode) {
         self.window_update_mode = m
@@ -129,4 +128,3 @@ impl Config {
         self.read_after_close = b;
     }
 }
-

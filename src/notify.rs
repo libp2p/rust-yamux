@@ -15,19 +15,21 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 static NEXT_TASK_ID: AtomicUsize = AtomicUsize::new(0);
 
-task_local!{
+task_local! {
     static TASK_ID: usize = NEXT_TASK_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 /// A notifier maintains a collection of tasks which should be
 /// notified at some point. Useful in conjuction with `futures::executor::Spawn`.
 pub struct Notifier {
-    tasks: Mutex<IntMap<usize, task::Task>>
+    tasks: Mutex<IntMap<usize, task::Task>>,
 }
 
 impl Notifier {
     pub fn new() -> Self {
-        Notifier { tasks: Mutex::new(IntMap::default()) }
+        Notifier {
+            tasks: Mutex::new(IntMap::default()),
+        }
     }
 
     /// Insert the current task to the set of tasks to be notified.
@@ -36,7 +38,9 @@ impl Notifier {
     ///
     /// If called outside of a futures task.
     pub fn insert_current(&self) {
-        self.tasks.lock().insert(TASK_ID.with(|&t| t), task::current());
+        self.tasks
+            .lock()
+            .insert(TASK_ID.with(|&t| t), task::current());
     }
 
     /// Notify all registered tasks.
@@ -58,4 +62,3 @@ impl executor::Notify for Notifier {
         self.notify_all()
     }
 }
-

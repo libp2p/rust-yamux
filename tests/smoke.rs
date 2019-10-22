@@ -9,23 +9,30 @@
 // at https://opensource.org/licenses/MIT.
 
 use bytes::Bytes;
-use futures::{future::{self, Either, Loop}, prelude::*};
+use futures::{
+    future::{self, Either, Loop},
+    prelude::*,
+};
 use log::{debug, error};
 use quickcheck::{quickcheck, Arbitrary, Gen, QuickCheck, TestResult};
 use rand::Rng;
-use std::{fmt::{Debug, Display}, io, net::{Ipv4Addr, SocketAddr, SocketAddrV4}};
-use tokio::{
-    codec::{BytesCodec, Framed, Encoder, Decoder},
-    net::{TcpListener, TcpStream},
-    runtime::Runtime
+use std::{
+    fmt::{Debug, Display},
+    io,
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
 };
-use yamux::{Config, Connection, Mode, StreamHandle, State};
+use tokio::{
+    codec::{BytesCodec, Decoder, Encoder, Framed},
+    net::{TcpListener, TcpStream},
+    runtime::Runtime,
+};
+use yamux::{Config, Connection, Mode, State, StreamHandle};
 
 #[test]
 fn prop_send_recv() {
     fn prop(msgs: Vec<Msg>) -> TestResult {
         if msgs.is_empty() {
-            return TestResult::discard()
+            return TestResult::discard();
         }
         let (l, a) = bind();
         let cfg = Config::default();
@@ -37,14 +44,12 @@ fn prop_send_recv() {
         let client = client(cfg, a).and_then(move |c| loop_send_recv(c, codec, stream));
         let responses = run(server, client);
         TestResult::from_bool(
-            responses.len() == num_requests &&
-            responses.into_iter().map(|m| m.freeze()).eq(iter))
+            responses.len() == num_requests && responses.into_iter().map(|m| m.freeze()).eq(iter),
+        )
     }
 
     // A single run with up to QUICKCHECK_GENERATOR_SIZE messages
-    QuickCheck::new()
-        .tests(1)
-        .quickcheck(prop as fn(_) -> _);
+    QuickCheck::new().tests(1).quickcheck(prop as fn(_) -> _);
 }
 
 #[test]
@@ -58,7 +63,7 @@ fn prop_max_streams() {
         let server = server(cfg.clone(), l).and_then(move |c| repeat_echo(c, codec, 1));
         let client = client(cfg, a).and_then(move |conn| {
             let mut v = Vec::new();
-            for _ in 0 .. max_streams {
+            for _ in 0..max_streams {
                 v.push(new_stream(&conn))
             }
             Ok(conn.open_stream().is_err())
@@ -78,7 +83,8 @@ fn prop_send_recv_half_closed() {
 
         // Server should be able to write on a stream shutdown by the client.
         let server = server(cfg.clone(), l).and_then(|c| {
-            c.into_future().map_err(|(e,_)| e)
+            c.into_future()
+                .map_err(|(e, _)| e)
                 .and_then(|(stream, _)| {
                     let s = stream.expect("S: No incoming stream");
                     let buf = vec![0; msg_len];
@@ -87,9 +93,8 @@ fn prop_send_recv_half_closed() {
                             assert!(s.state() == Some(State::RecvClosed));
                             tokio::io::write_all(s, buf)
                         })
-                        .and_then(|(s, _buf)| {
-                            tokio::io::flush(s).map(|_| true)
-                        }).from_err()
+                        .and_then(|(s, _buf)| tokio::io::flush(s).map(|_| true))
+                        .from_err()
                 })
                 .map_err(|e| error!("S: connection error: {}", e))
         });
@@ -98,9 +103,7 @@ fn prop_send_recv_half_closed() {
         let client = client(cfg, a).and_then(move |c| {
             let s = new_stream(&c);
             tokio::io::write_all(s, msg.clone())
-                .and_then(|(s, _buf)| {
-                    tokio::io::shutdown(s)
-                })
+                .and_then(|(s, _buf)| tokio::io::shutdown(s))
                 .and_then(move |s| {
                     assert!(s.state() == Some(State::SendClosed));
                     let buf = vec![0; msg_len];
@@ -173,7 +176,7 @@ fn client(c: Config, a: SocketAddr) -> impl Future<Item = Connection<TcpStream>,
 fn repeat_echo<D>(c: Connection<TcpStream>, d: D, n: u64) -> impl Future<Item = (), Error = ()>
 where
     D: Encoder<Error = io::Error> + Decoder<Error = io::Error> + Copy,
-    <D as Encoder>::Item: From<<D as Decoder>::Item>
+    <D as Encoder>::Item: From<<D as Decoder>::Item>,
 {
     c.for_each(move |stream| {
         let (stream_out, stream_in) = Framed::new(stream, d).split();
@@ -183,13 +186,17 @@ where
             .forward(stream_out)
             .from_err()
             .map(|_| ())
-    }).map_err(|e| error!("S: connection error: {}", e))
+    })
+    .map_err(|e| error!("S: connection error: {}", e))
 }
 
 /// Sequentially send a sequence of messages on a connection, with a new
 /// stream for each message, collecting the responses.
-fn loop_send_recv<D,I>(c: Connection<TcpStream>, d: D, i: I)
-    -> impl Future<Item = Vec<<D as Decoder>::Item>, Error = ()>
+fn loop_send_recv<D, I>(
+    c: Connection<TcpStream>,
+    d: D,
+    i: I,
+) -> impl Future<Item = Vec<<D as Decoder>::Item>, Error = ()>
 where
     I: Iterator<Item = <D as Encoder>::Item>,
     D: Encoder + Decoder + Clone,
@@ -206,22 +213,25 @@ where
             }
             None => {
                 debug!("C: done");
-                return Either::B(future::ok(Loop::Break((v, it))))
+                return Either::B(future::ok(Loop::Break((v, it))));
             }
         };
         match c.open_stream() {
             Ok(Some(stream)) => {
                 debug!("C: new stream: {:?}", stream);
                 let codec = Framed::new(stream, d.clone());
-                let future = codec.send(msg)
+                let future = codec
+                    .send(msg)
                     .map_err(|e| error!("C: send error: {}", e))
                     .and_then(move |codec| {
-                        codec.collect().and_then(move |data| {
-                            debug!("C: received {:?}", data);
-                            v.extend(data);
-                            Ok(Loop::Continue((v, it)))
-                        })
-                        .map_err(|e| error!("C: receive error: {}", e))
+                        codec
+                            .collect()
+                            .and_then(move |data| {
+                                debug!("C: received {:?}", data);
+                                v.extend(data);
+                                Ok(Loop::Continue((v, it)))
+                            })
+                            .map_err(|e| error!("C: receive error: {}", e))
                     });
                 Either::A(future)
             }
@@ -234,25 +244,25 @@ where
                 Either::B(future::ok(Loop::Break((v, it))))
             }
         }
-    }).map(|(v, _)| v)
+    })
+    .map(|(v, _)| v)
 }
 
 fn new_stream(c: &Connection<TcpStream>) -> StreamHandle<TcpStream> {
     match c.open_stream() {
         Ok(Some(s)) => s,
         Ok(None) => panic!("unexpected EOF when opening stream"),
-        Err(e) => panic!("unexpected error when opening stream: {}", e)
+        Err(e) => panic!("unexpected error when opening stream: {}", e),
     }
 }
 
-fn run<R,S,C>(server: S, client: C) -> R
+fn run<R, S, C>(server: S, client: C) -> R
 where
     S: Future<Item = (), Error = ()> + Send + 'static,
     C: Future<Item = R, Error = ()> + Send + 'static,
-    R: Send + 'static
+    R: Send + 'static,
 {
     let mut rt = Runtime::new().unwrap();
     rt.spawn(server);
     client.wait().unwrap()
 }
-

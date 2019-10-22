@@ -8,7 +8,10 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-use crate::{frame::{Data, WindowUpdate, Ping, GoAway}, stream};
+use crate::{
+    frame::{Data, GoAway, Ping, WindowUpdate},
+    stream,
+};
 use std::marker::PhantomData;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -16,7 +19,7 @@ pub enum Type {
     Data,
     WindowUpdate,
     Ping,
-    GoAway
+    GoAway,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -56,20 +59,20 @@ pub struct RawHeader {
     pub typ: Type,
     pub flags: Flags,
     pub stream_id: stream::Id,
-    pub length: Len
+    pub length: Len,
 }
 
 #[derive(Clone, Debug)]
 pub struct Header<T> {
     raw_header: RawHeader,
-    header_type: PhantomData<T>
+    header_type: PhantomData<T>,
 }
 
 impl<T> Header<T> {
     pub(crate) fn assert(raw: RawHeader) -> Self {
         Header {
             raw_header: raw,
-            header_type: PhantomData
+            header_type: PhantomData,
         }
     }
 
@@ -94,9 +97,9 @@ impl Header<Data> {
                 typ: Type::Data,
                 flags: Flags(0),
                 stream_id: id,
-                length: Len(len)
+                length: Len(len),
             },
-            header_type: PhantomData
+            header_type: PhantomData,
         }
     }
 
@@ -129,9 +132,9 @@ impl Header<WindowUpdate> {
                 typ: Type::WindowUpdate,
                 flags: Flags(0),
                 stream_id: id,
-                length: Len(credit)
+                length: Len(credit),
             },
-            header_type: PhantomData
+            header_type: PhantomData,
         }
     }
 
@@ -164,9 +167,9 @@ impl Header<Ping> {
                 typ: Type::Ping,
                 flags: Flags(0),
                 stream_id: stream::Id::new(0),
-                length: Len(nonce)
+                length: Len(nonce),
             },
-            header_type: PhantomData
+            header_type: PhantomData,
         }
     }
 
@@ -191,9 +194,9 @@ impl Header<GoAway> {
                 typ: Type::GoAway,
                 flags: Flags(0),
                 stream_id: stream::Id::new(0),
-                length: Len(error_code)
+                length: Len(error_code),
             },
-            header_type: PhantomData
+            header_type: PhantomData,
         }
     }
 
@@ -201,4 +204,3 @@ impl Header<GoAway> {
         self.raw_header.length.0
     }
 }
-

@@ -1,22 +1,31 @@
 use bytes::{Bytes, BytesMut};
 use futures::{future, prelude::*, sync::mpsc};
 use std::{io, net::SocketAddr};
-use tokio::{codec::{LengthDelimitedCodec, Framed}, net::{TcpListener, TcpStream}, runtime::Runtime};
+use tokio::{
+    codec::{Framed, LengthDelimitedCodec},
+    net::{TcpListener, TcpStream},
+    runtime::Runtime,
+};
 use yamux::{Config, Connection, Mode};
 
 fn roundtrip(addr: SocketAddr, nstreams: u64, data: Bytes) {
     let rt = Runtime::new().expect("runtime");
     let e1 = rt.executor();
 
-    let server = TcpListener::bind(&addr).expect("tcp bind").incoming()
+    let server = TcpListener::bind(&addr)
+        .expect("tcp bind")
+        .incoming()
         .into_future()
         .then(move |sock| {
             let sock = sock.expect("sock ok").0.expect("some sock");
-            Connection::new(sock, Config::default(), Mode::Server)
-                .for_each(|stream| {
-                    let (sink, stream) = Framed::new(stream, LengthDelimitedCodec::new()).split();
-                    stream.map(BytesMut::freeze).forward(sink).from_err().map(|_| ())
-                })
+            Connection::new(sock, Config::default(), Mode::Server).for_each(|stream| {
+                let (sink, stream) = Framed::new(stream, LengthDelimitedCodec::new()).split();
+                stream
+                    .map(BytesMut::freeze)
+                    .forward(sink)
+                    .from_err()
+                    .map(|_| ())
+            })
         })
         .map_err(|e| panic!("server error: {}", e));
 
@@ -25,7 +34,7 @@ fn roundtrip(addr: SocketAddr, nstreams: u64, data: Bytes) {
         .and_then(move |sock| {
             let (tx, rx) = mpsc::unbounded();
             let c = Connection::new(sock, Config::default(), Mode::Client);
-            for _ in 0 .. nstreams {
+            for _ in 0..nstreams {
                 let t = tx.clone();
                 let d = data.clone();
                 let s = c.open_stream().expect("ok stream").expect("not eof");
@@ -52,11 +61,15 @@ fn roundtrip(addr: SocketAddr, nstreams: u64, data: Bytes) {
         })
         .map_err(|e| panic!("client error: {}", e));
 
-    rt.block_on_all(server.join(client).map(|_| ())).expect("runtime")
+    rt.block_on_all(server.join(client).map(|_| ()))
+        .expect("runtime")
 }
 
 #[test]
 fn concurrent_streams() {
-    let data = std::iter::repeat(0x42u8).take(100 * 1024).collect::<Vec<_>>().into();
+    let data = std::iter::repeat(0x42u8)
+        .take(100 * 1024)
+        .collect::<Vec<_>>()
+        .into();
     roundtrip("127.0.0.1:9000".parse().expect("valid address"), 1000, data)
 }

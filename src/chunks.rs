@@ -18,12 +18,14 @@ use std::collections::VecDeque;
 /// lengths of all `BytesMut` elements.
 #[derive(Debug)]
 pub struct Chunks {
-    seq: VecDeque<BytesMut>
+    seq: VecDeque<BytesMut>,
 }
 
 impl Chunks {
     pub fn new() -> Self {
-        Chunks { seq: VecDeque::new() }
+        Chunks {
+            seq: VecDeque::new(),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
