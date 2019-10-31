@@ -65,7 +65,7 @@ impl State {
 ///
 /// Once you are finished using a `Stream` *you must properly close it*
 /// by calling [`AsyncWrite::poll_close`]. Otherwise the other end may
-/// not realise that the `Stream` is no longer used ans accumulate
+/// not realise that the `Stream` is no longer used and accumulate
 /// `Stream`s until eventually exceeding [`Config::max_num_streams`].
 pub struct Stream {
     id: StreamId,
