@@ -343,7 +343,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
 
         if frame.header().flags().contains(header::RST) { // stream reset
             if let Some(s) = self.streams.get_mut(&stream_id.val()) {
-                s.shared().update_state(self.id, stream_id, State::Closed)
+                let mut shared = s.shared();
+                shared.update_state(self.id, stream_id, State::Closed);
+                if let Some(w) = shared.reader.take() {
+                    w.wake()
+                }
+                if let Some(w) = shared.writer.take() {
+                    w.wake()
+                }
             }
             return Action::None
         }
@@ -428,7 +435,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
 
         if frame.header().flags().contains(header::RST) { // stream reset
             if let Some(s) = self.streams.get_mut(&stream_id.val()) {
-                s.shared().update_state(self.id, stream_id, State::Closed)
+                let mut shared = s.shared();
+                shared.update_state(self.id, stream_id, State::Closed);
+                if let Some(w) = shared.reader.take() {
+                    w.wake()
+                }
+                if let Some(w) = shared.writer.take() {
+                    w.wake()
+                }
             }
             return Action::None
         }
