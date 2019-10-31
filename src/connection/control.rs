@@ -66,10 +66,10 @@ impl Control {
 
     /// [`Poll`] based alternative to [`Control::open_stream`].
     pub fn poll_open_stream(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<Stream>> {
-        ready!(self.sender.poll_ready(cx)?);
         loop {
             match self.pending_open.take() {
                 None => {
+                    ready!(self.sender.poll_ready(cx)?);
                     let (tx, rx) = oneshot::channel();
                     self.sender.start_send(Command::OpenStream(tx))?;
                     self.pending_open = Some(rx)
@@ -85,17 +85,17 @@ impl Control {
         }
     }
 
-    /// Abort an ongoning open stream operation started by `poll_open_stream`.
+    /// Abort an ongoing open stream operation started by `poll_open_stream`.
     pub fn abort_open_stream(&mut self) {
         self.pending_open = None
     }
 
     /// [`Poll`] based alternative to [`Control::close`].
     pub fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<()>> {
-        ready!(self.sender.poll_ready(cx)?);
         loop {
             match self.pending_close.take() {
                 None => {
+                    ready!(self.sender.poll_ready(cx)?);
                     let (tx, rx) = oneshot::channel();
                     self.sender.start_send(Command::CloseConnection(tx))?;
                     self.pending_close = Some(rx)
