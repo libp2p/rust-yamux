@@ -21,10 +21,6 @@
 //    `Command::Flush` so that `Streams` can trigger a flush which they
 //    would have to when they run out of credit, or else a `SinkExt::send_all`
 //    might never finish.
-// 3. When garbage collecting dropped `Streams` and their state is not
-//    `Closed`, send a RST to the remote so it is aware that the stream is
-//    no more. We currently rely on applications calling `Stream::poll_close`
-//    but they may not always do that.
 
 mod control;
 mod stream;

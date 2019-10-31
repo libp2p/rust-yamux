@@ -57,6 +57,16 @@ impl State {
 }
 
 /// A multiplexed Yamux stream.
+///
+/// Streams are created either outbound via [`crate::Control::open_stream`]
+/// or inbound via [`crate::Connection::next_stream`].
+///
+/// # Closing a stream
+///
+/// Once you are finished using a `Stream` *you must properly close it*
+/// by calling [`AsyncWrite::poll_close`]. Otherwise the other end may
+/// not realise that the `Stream` is no longer used ans accumulate
+/// `Stream`s until eventually exceeding [`Config::max_num_streams`].
 pub struct Stream {
     id: StreamId,
     conn: connection::Id,
