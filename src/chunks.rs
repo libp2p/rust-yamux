@@ -26,6 +26,10 @@ impl Chunks {
         Chunks { seq: VecDeque::new() }
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.seq.iter().all(|x| x.is_empty())
+    }
+
     pub(crate) fn len(&self) -> Option<usize> {
         self.seq.iter().fold(Some(0), |total, x| {
             total.and_then(|n| n.checked_add(x.len()))

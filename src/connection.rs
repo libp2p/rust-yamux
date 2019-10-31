@@ -83,7 +83,8 @@ pub struct Connection<T> {
     next_id: u32,
     streams: IntMap<u32, Stream>,
     sender: mpsc::Sender<Command>,
-    receiver: mpsc::Receiver<Command>
+    receiver: mpsc::Receiver<Command>,
+    garbage: Vec<StreamId>
 }
 
 /// Connection commands.
@@ -153,7 +154,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             next_id: match mode {
                 Mode::Client => 1,
                 Mode::Server => 2
-            }
+            },
+            garbage: Vec::new()
         }
     }
 
@@ -200,33 +202,16 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         }
     }
 
-    /// The actual implementation of `next_stream`.
+    /// Get the next inbound `Stream` and make progress along the way.
     ///
-    /// It is wrapped in order to guarantee proper closing in case of an
-    /// error or at EOF.
+    /// It is called from `Connection::next_stream` instead of being a
+    /// public method itself in order to guarantee proper closing in
+    /// case of an error or at EOF.
     async fn next(&mut self) -> Result<Option<Stream>> {
         loop {
-            // Remove stale streams on each iteration.
-            // If we ever get async destructors we can replace this with
-            // streams sending a proper command when dropped.
-            let conn_id = self.id;
-            self.streams.retain(|&id, stream| {
-                if stream.strong_count() == 1 {
-                    log::trace!("{}: removing dropped {}", conn_id, stream);
-                    let mut shared = stream.shared();
-                    shared.update_state(conn_id, StreamId::new(id), State::Closed);
-                    if let Some(w) = shared.reader.take() {
-                        w.wake()
-                    }
-                    if let Some(w) = shared.writer.take() {
-                        w.wake()
-                    }
-                    return false
-                }
-                true
-            });
+            self.garbage_collect().await?;
             futures::select! {
-                // Handle commands from remote control or our own streams.
+                // Handle commands from control or our own streams.
                 command = self.receiver.next() => match command {
                     Some(Command::OpenStream(reply)) => {
                         if self.streams.len() >= self.config.max_num_streams {
@@ -273,7 +258,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                         let _ = reply.send(());
                         break
                     }
-                    // The remote control and all our streams are gone, so terminate.
+                    // The control and all our streams are gone, so terminate.
                     None => {
                         log::debug!("{}: end of channel", self.id);
                         let frame = Frame::term().cast();
@@ -326,6 +311,81 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         }
 
         Ok(None)
+    }
+
+    /// Remove stale streams and send necessary messages to the remote.
+    ///
+    /// If we ever get async destructors we can replace this with streams
+    /// sending a proper command when dropped.
+    async fn garbage_collect(&mut self) -> Result<()> {
+        let conn_id = self.id;
+        let win_update_mode = self.config.window_update_mode;
+        for stream in self.streams.values_mut() {
+            if stream.strong_count() > 1 {
+                continue
+            }
+            log::trace!("{}: removing dropped {}", conn_id, stream);
+            let stream_id = stream.id();
+            let frame = {
+                let mut shared = stream.shared();
+                let frame = match shared.update_state(conn_id, stream_id, State::Closed) {
+                    // The stream was dropped without calling `poll_close`.
+                    // We reset the stream to inform the remote of the closure.
+                    State::Open => {
+                        let mut header = Header::data(stream_id, 0);
+                        header.rst();
+                        Some(Frame::new(header).cast())
+                    }
+                    // The stream was dropped without calling `poll_close`.
+                    // We have already received a FIN from remote and send one
+                    // back which closes the stream for good.
+                    State::RecvClosed => {
+                        let mut header = Header::data(stream_id, 0);
+                        header.fin();
+                        Some(Frame::new(header).cast())
+                    }
+                    // The stream was properly closed. We either already have
+                    // or will at some later point send our FIN frame.
+                    // The remote may be out of credit though and blocked on
+                    // writing more data. We may need to reset the stream.
+                    State::SendClosed =>
+                        if win_update_mode == WindowUpdateMode::OnRead && !shared.buffer.is_empty() {
+                            // The stream has unconsumed data left when closed.
+                            // The remote may be waiting for a window update
+                            // which we will never send, so reset the stream now.
+                            let mut header = Header::data(stream_id, 0);
+                            header.rst();
+                            Some(Frame::new(header).cast())
+                        } else {
+                            // The remote is not blocked as we send window updates
+                            // for as long as we know the stream. For unknown streams
+                            // we send a RST in `Connection::on_data`.
+                            // For `OnRead` and empty stream buffers we have or will
+                            // send another window update too.
+                            None
+                        }
+                    // The stream was properly closed. We either already have
+                    // or will at some later point send our FIN frame. The
+                    // remote end has already done so in the past.
+                    State::Closed => None
+                };
+                if let Some(w) = shared.reader.take() {
+                    w.wake()
+                }
+                if let Some(w) = shared.writer.take() {
+                    w.wake()
+                }
+                frame
+            };
+            if let Some(f) = frame {
+                self.socket.send(f).await.or(Err(ConnectionError::Closed))?
+            }
+            self.garbage.push(stream_id)
+        }
+        for id in self.garbage.drain(..) {
+            self.streams.remove(&id.val());
+        }
+        Ok(())
     }
 
     /// Dispatch frame handling based on the frame's runtime type [`Tag`].
@@ -382,7 +442,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             {
                 let mut shared = stream.shared();
                 if is_finish {
-                    shared.update_state(self.id, stream_id, State::RecvClosed)
+                    shared.update_state(self.id, stream_id, State::RecvClosed);
                 }
                 shared.window = shared.window.saturating_sub(frame.body_len());
                 shared.buffer.push(frame.into_body());
@@ -398,7 +458,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 return Action::Terminate(Frame::protocol_error())
             }
             if is_finish {
-                shared.update_state(self.id, stream_id, State::RecvClosed)
+                shared.update_state(self.id, stream_id, State::RecvClosed);
             }
             let max_buffer_size = self.config.max_buffer_size;
             if shared.buffer.len().map(move |n| n >= max_buffer_size).unwrap_or(true) {
@@ -469,7 +529,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 Stream::new(stream_id, self.id, config, DEFAULT_CREDIT, credit, sender)
             };
             if is_finish {
-                stream.shared().update_state(self.id, stream_id, State::RecvClosed)
+                stream.shared().update_state(self.id, stream_id, State::RecvClosed);
             }
             self.streams.insert(stream_id.val(), stream.clone());
             return Action::New(stream)
@@ -479,7 +539,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             let mut shared = stream.shared();
             shared.credit += frame.header().credit();
             if is_finish {
-                shared.update_state(self.id, stream_id, State::RecvClosed)
+                shared.update_state(self.id, stream_id, State::RecvClosed);
             }
             if let Some(w) = shared.writer.take() {
                 w.wake()

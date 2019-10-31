@@ -60,13 +60,6 @@ impl State {
 ///
 /// Streams are created either outbound via [`crate::Control::open_stream`]
 /// or inbound via [`crate::Connection::next_stream`].
-///
-/// # Closing a stream
-///
-/// Once you are finished using a `Stream` *you must properly close it*
-/// by calling [`AsyncWrite::poll_close`]. Otherwise the other end may
-/// not realise that the `Stream` is no longer used and accumulate
-/// `Stream`s until eventually exceeding [`Config::max_num_streams`].
 pub struct Stream {
     id: StreamId,
     conn: connection::Id,
@@ -288,7 +281,8 @@ impl Shared {
         self.state
     }
 
-    pub(crate) fn update_state(&mut self, cid: connection::Id, sid: StreamId, next: State) {
+    /// Update the stream state and return the state before it was updated.
+    pub(crate) fn update_state(&mut self, cid: connection::Id, sid: StreamId, next: State) -> State {
         use self::State::*;
 
         let current = self.state;
@@ -306,7 +300,9 @@ impl Shared {
             (SendClosed, SendClosed) => {}
         }
 
-        log::trace!("{}/{}: update state: ({:?} {:?} {:?})", cid, sid, current, next, self.state)
+        log::trace!("{}/{}: update state: ({:?} {:?} {:?})", cid, sid, current, next, self.state);
+
+        current // Return the previous stream state for informational purposes.
     }
 }
 
