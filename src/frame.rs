@@ -56,6 +56,12 @@ impl Frame<Data> {
         &self.body
     }
 
+    pub fn body_len(&self) -> u32 {
+        // Safe cast since we construct `Frame::<Data>`s only with
+        // `Bytes` of length [0, u32::MAX] in `Frame::data` above.
+        self.body().len() as u32
+    }
+
     pub fn into_body(self) -> Bytes {
         self.body
     }

@@ -381,7 +381,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 if is_finish {
                     shared.update_state(self.id, stream_id, State::RecvClosed)
                 }
-                shared.window = shared.window.saturating_sub(frame.body().len() as u32);
+                shared.window = shared.window.saturating_sub(frame.body_len());
                 shared.buffer.push(frame.into_body());
             }
             self.streams.insert(stream_id.val(), stream.clone());
@@ -404,7 +404,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 header.rst();
                 return Action::Reset(Frame::new(header))
             }
-            shared.window = shared.window.saturating_sub(frame.body().len() as u32);
+            shared.window = shared.window.saturating_sub(frame.body_len());
             shared.buffer.push(frame.into_body());
             if let Some(w) = shared.reader.take() {
                 w.wake()
