@@ -24,6 +24,7 @@ anyhow = "1.0"
 async-std = "0.99"
 criterion = "0.3"
 quickcheck = "0.9"
+tokio = "0.2.0-alpha.6"
 
 [[bench]]
 name = "concurrent"

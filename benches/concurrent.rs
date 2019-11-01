@@ -42,8 +42,10 @@ fn concurrent(c: &mut Criterion) {
     let data0 = Bytes::from(vec![0x42; 4096]);
     let data1 = data0.clone();
     let data2 = data0.clone();
+    let data3 = data0.clone();
+    let data4 = data0.clone();
 
-    c.bench_function_over_inputs("one by one", move |b, &&params| {
+    c.bench_function_over_inputs("one by one (async-std)", move |b, &&params| {
             let data = data1.clone();
             b.iter(move || {
                 task::block_on(roundtrip(params.streams, params.messages, data.clone(), false))
@@ -51,10 +53,28 @@ fn concurrent(c: &mut Criterion) {
         },
         params);
 
-    c.bench_function_over_inputs("all at once", move |b, &&params| {
+    c.bench_function_over_inputs("all at once (async-std)", move |b, &&params| {
             let data = data2.clone();
             b.iter(move || {
                 task::block_on(roundtrip(params.streams, params.messages, data.clone(), true))
+            })
+        },
+        params);
+
+    c.bench_function_over_inputs("one by one (tokio)", move |b, &&params| {
+            let data = data3.clone();
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            b.iter(move || {
+                rt.block_on(roundtrip_tokio(params.streams, params.messages, data.clone(), false))
+            })
+        },
+        params);
+
+    c.bench_function_over_inputs("all at once (tokio)", move |b, &&params| {
+            let data = data4.clone();
+            let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+            b.iter(move || {
+                rt.block_on(roundtrip_tokio(params.streams, params.messages, data.clone(), true))
             })
         },
         params);
@@ -89,6 +109,69 @@ async fn roundtrip(nstreams: u64, nmessages: u64, data: Bytes, send_all: bool) {
         let tx = tx.clone();
         let mut ctrl = ctrl.clone();
         task::spawn(async move {
+            let stream = ctrl.open_stream().await.expect("open stream");
+            let (mut os, mut is) = Framed::new(stream, LengthCodec).split();
+            if send_all {
+                // Send `nmessages` messages and receive `nmessages` messages.
+                os.send_all(&mut stream::iter(iter::repeat(data).take(u64_as_usize(nmessages))))
+                    .await
+                    .expect("send_all");
+                os.close().await.expect("close");
+                let n = is.try_fold(0, |n, d| future::ready(Ok(n + d.len() as u64)))
+                    .await
+                    .expect("try_fold");
+                tx.unbounded_send(n).expect("unbounded_send")
+            } else {
+                // Send and receive `nmessages` messages.
+                let mut n = 0;
+                for m in iter::repeat(data).take(u64_as_usize(nmessages)) {
+                    os.send(m).await.expect("send");
+                    if let Some(d) = is.try_next().await.expect("receive") {
+                        n += d.len() as u64
+                    } else {
+                        break
+                    }
+                }
+                os.close().await.expect("close");
+                tx.unbounded_send(n).expect("unbounded_send");
+            }
+        });
+    }
+
+    let n = rx.take(nstreams).fold(0, |acc, n| future::ready(acc + n)).await;
+    assert_eq!(n, nstreams * nmessages * msg_len);
+    ctrl.close().await.expect("close")
+}
+
+async fn roundtrip_tokio(nstreams: u64, nmessages: u64, data: Bytes, send_all: bool) {
+    let msg_len = data.len() as u64;
+    let (server, client) = Endpoint::new();
+    let server = server.into_async_read();
+    let client = client.into_async_read();
+
+    let server = async move {
+        yamux::into_stream(Connection::new(server, Config::default(), Mode::Server))
+            .try_for_each_concurrent(None, |stream| async {
+                let (os, is) = Framed::new(stream, LengthCodec).split();
+                is.forward(os).await?;
+                Ok(())
+            })
+            .await
+            .expect("server works")
+    };
+
+    tokio::spawn(server);
+
+    let (tx, rx) = mpsc::unbounded();
+    let conn = Connection::new(client, Config::default(), Mode::Client);
+    let mut ctrl = conn.control();
+    tokio::spawn(yamux::into_stream(conn).for_each(|_| future::ready(())));
+
+    for _ in 0 .. nstreams {
+        let data = data.clone();
+        let tx = tx.clone();
+        let mut ctrl = ctrl.clone();
+        tokio::spawn(async move {
             let stream = ctrl.open_stream().await.expect("open stream");
             let (mut os, mut is) = Framed::new(stream, LengthCodec).split();
             if send_all {
