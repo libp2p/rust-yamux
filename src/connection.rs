@@ -36,6 +36,7 @@ use crate::{
 use futures::{channel::{mpsc, oneshot}, prelude::*, stream::Fuse};
 use futures_codec::Framed;
 use nohash_hasher::IntMap;
+use smallvec::SmallVec;
 use std::{fmt, sync::Arc};
 
 pub use control::Control;
@@ -91,7 +92,8 @@ pub struct Connection<T> {
     streams: IntMap<u32, Stream>,
     sender: mpsc::Sender<Command>,
     receiver: mpsc::Receiver<Command>,
-    garbage: Vec<StreamId>
+    garbage: Vec<StreamId>,
+    close_replies: SmallVec<[oneshot::Sender<()>; 2]>
 }
 
 /// Connection commands.
@@ -162,7 +164,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 Mode::Client => 1,
                 Mode::Server => 2
             },
-            garbage: Vec::new()
+            garbage: Vec::new(),
+            close_replies: SmallVec::new()
         }
     }
 
@@ -260,17 +263,17 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                         self.socket.send(frame).await.or(Err(ConnectionError::Closed))?
                     }
                     Some(Command::CloseConnection(reply)) => {
-                        log::debug!("{}: closing connection", self.id);
-                        let frame = Frame::term().cast();
-                        self.socket.send(frame).await.or(Err(ConnectionError::Closed))?;
-                        let _ = reply.send(());
-                        break
+                        log::trace!("{}: starting connection closure", self.id);
+                        self.receiver.close();
+                        self.close_replies.push(reply)
                     }
-                    // The control and all our streams are gone, so terminate.
                     None => {
-                        log::debug!("{}: end of channel", self.id);
+                        log::debug!("{}: closing {}", self.id, self);
                         let frame = Frame::term().cast();
                         self.socket.send(frame).await.or(Err(ConnectionError::Closed))?;
+                        for tx in self.close_replies.drain() {
+                            let _ = tx.send(());
+                        }
                         break
                     }
                 },
