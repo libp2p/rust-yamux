@@ -8,19 +8,47 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-// Potential improvements:
-// =======================
+// This module contains the `Connection` type and associated helpers.
+// A `Connection` wraps an underlying (async) I/O resource and multiplexes
+// `Stream`s over it.
 //
-// 1. Instead of `futures::mpsc` use a more efficient channel implementation,
-//    e.g. `tokio-sync`. Unfortunately `tokio-sync` is about to be merged
-//    into `tokio` and depending on this large crate is not attractive,
-//    especially given the dire situation around cargo's flag resolution.
-//    Also the different `AsyncRead`/`AsyncWrite` traits require more work.
-// 2. Instead of `SinkExt::send` use a custom send operation that does not
-//    always perform an implicit flush. This also requires adding a
-//    `Command::Flush` so that `Streams` can trigger a flush which they
-//    would have to when they run out of credit, or else a `SinkExt::send_all`
-//    might never finish.
+// The overall idea is as follows: The `Connection` makes progress via calls
+// to its `next_stream` method which polls two futures, one that decodes
+// `Frame`s from the I/O resource and another one that consumes `Command`s
+// from an MPSC channel. This channel is shared with every `Stream` created
+// and whenever a `Stream` wishes to send a `Frame` to the remote end, it
+// enqueues it into this channel (waiting if the channel is full). So the
+// `Connection` alternates randomly between command processing and incoming
+// frame processing. It updates the `Stream` state based on incoming frames,
+// (e.g. it pushes incoming data to the `Stream`'s buffer or increases the
+// sending credit if the remote has sent us a corresponding
+// `Frame::<WindowUpdate>`). Updating a `Stream`'s state acquires a `Mutex`
+// which every `Stream` has around it's `Shared` state. While blocking, we
+// make sure the lock is only held for brief periods and *never* while doing
+// I/O. The only contention is between the `Connection` and a single `Stream`
+// which should resolve quickly. Ideally, we could use `futures::lock::Mutex`
+// but it does not offer a poll-based API as of futures-preview 0.3.0-alpha.19,
+// which makes it difficult to use in a `Stream`'s `AsyncRead` and `AsyncWrite`
+// trait implementations.
+//
+// Other potential improvements are possible, for example:
+//
+// - Instead of `futures::mpsc` a more efficient channel implementation,
+//   could be used, e.g. `tokio-sync`. Unfortunately `tokio-sync` is about
+//   to be merged into `tokio` and depending on this large crate is not
+//   attractive, especially given the dire situation around cargo's flag
+//   resolution. Also the different `AsyncRead`/`AsyncWrite` traits require
+//   more integration work.
+// - Instead of sending data over the I/O resource with `SinkExt::send` a
+//   custom send operation could be used that does not always perform an
+//   implicit flush. This also requires adding a `Command::Flush` so that
+//   `Stream`s can trigger a flush (which they would have to when they run
+//   out of credit, or else a `SinkExt::send_all` might never finish).
+// - If Rust gets async destructors, the `garbage_collect()` method can be
+//   removed. Instead a `Stream` would send a `Command::Dropped(StreamId)`
+//   or something similar and the removal logic could happen within regular
+//   command processing instead of having to scan the whole collection of
+//   `Stream`s on each loop iteration which is not great.
 
 mod control;
 mod stream;
