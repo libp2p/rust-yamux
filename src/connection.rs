@@ -234,6 +234,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                         log::debug!("{}: new outbound {} of {}", self.id, stream, self);
                         if reply.send(Ok(stream)).is_err() {
                             log::debug!("{}: opening stream {} has been cancelled", self.id, id);
+                            self.streams.remove(&id.val());
                             let mut header = Header::data(id, 0);
                             header.rst();
                             let frame = Frame::new(header).cast();
