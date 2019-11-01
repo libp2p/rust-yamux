@@ -15,19 +15,18 @@
 //!
 //! The three primary objects, clients of this crate interact with, are:
 //!
-//! - [`Connection`], which wraps the underlying I/O resource (e.g. a socket),
+//! - [`Connection`], which wraps the underlying I/O resource, e.g. a socket,
 //! - [`Stream`], which implements [`futures::io::AsyncRead`] and
 //!   [`futures::io::AsyncWrite`], and
 //! - [`Control`], to asynchronously control the [`Connection`].
 //!
 //! [1]: https://github.com/hashicorp/yamux/blob/master/spec.md
 
-#![recursion_limit = "1024"]
-
 mod chunks;
 mod connection;
 mod error;
 mod frame;
+mod pause;
 
 pub use crate::connection::{Connection, Mode, Control, State, Stream, into_stream};
 pub use crate::error::ConnectionError;
@@ -38,13 +37,13 @@ const DEFAULT_CREDIT: u32 = 256 * 1024; // as per yamux specification
 /// Specifies when window update frames are sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowUpdateMode {
-    /// Send window updates as soon as a stream's receive window drops to 0.
+    /// Send window updates as soon as a [`Stream`]'s receive window drops to 0.
     ///
     /// This ensures that the sender can resume sending more data as soon as possible
     /// but a slow reader on the receiving side may be overwhelmed, i.e. it accumulates
     /// data in its buffer which may reach its limit (see `set_max_buffer_size`).
     /// In this mode, window updates merely prevent head of line blocking but do not
-    /// effectively exercise back-pressure on senders.
+    /// effectively exercise back pressure on senders.
     OnReceive,
 
     /// Send window updates only when data is read on the receiving end.
@@ -55,7 +54,7 @@ pub enum WindowUpdateMode {
     /// do not read before finishing their writes. Use this mode only if you are sure
     /// that this will never happen, i.e. if
     ///
-    /// - Endpoints *A* and *B* never write at the same time, or
+    /// - Endpoints *A* and *B* never write at the same time, *or*
     /// - Endpoints *A* and *B* write at most *n* frames concurrently such that the sum
     ///   of the frame lengths is less or equal to the available credit of *A* and *B*
     ///   respectively.

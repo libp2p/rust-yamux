@@ -11,14 +11,14 @@
 use crate::{Stream, error::ConnectionError};
 use futures::{ready, channel::{mpsc, oneshot}, prelude::*};
 use std::{pin::Pin, task::{Context, Poll}};
-use super::Command;
+use super::ControlCommand;
 
 type Result<T> = std::result::Result<T, ConnectionError>;
 
 /// The Yamux `Connection` controller.
 ///
 /// While a Yamux connection makes progress via its `next_stream` method,
-/// this controller can be used to asynchronously direct the connection,
+/// this controller can be used to concurrently direct the connection,
 /// e.g. to open a new stream to the remote or to close the connection.
 ///
 /// The possible operations are implemented as async methods and redundantly
@@ -26,7 +26,7 @@ type Result<T> = std::result::Result<T, ConnectionError>;
 /// environments such as certain trait implementations.
 #[derive(Debug)]
 pub struct Control {
-    sender: mpsc::Sender<Command>,
+    sender: mpsc::Sender<ControlCommand>,
     pending_open: Option<oneshot::Receiver<Result<Stream>>>,
     pending_close: Option<oneshot::Receiver<()>>
 }
@@ -42,7 +42,7 @@ impl Clone for Control {
 }
 
 impl Control {
-    pub(crate) fn new(sender: mpsc::Sender<Command>) -> Self {
+    pub(crate) fn new(sender: mpsc::Sender<ControlCommand>) -> Self {
         Control {
             sender,
             pending_open: None,
@@ -53,15 +53,18 @@ impl Control {
     /// Open a new stream to the remote.
     pub async fn open_stream(&mut self) -> Result<Stream> {
         let (tx, rx) = oneshot::channel();
-        self.sender.send(Command::OpenStream(tx)).await?;
+        self.sender.send(ControlCommand::OpenStream(tx)).await?;
         rx.await?
     }
 
     /// Close the connection.
     pub async fn close(&mut self) -> Result<()> {
         let (tx, rx) = oneshot::channel();
-        self.sender.send(Command::CloseConnection(tx)).await?;
-        Ok(rx.await?)
+        self.sender.send(ControlCommand::CloseConnection(tx)).await?;
+        // A dropped `oneshot::Sender` means the `Connection` is gone,
+        // so we do not treat receive errors differently here.
+        let _ = rx.await;
+        Ok(())
     }
 
     /// [`Poll`] based alternative to [`Control::open_stream`].
@@ -71,11 +74,13 @@ impl Control {
                 None => {
                     ready!(self.sender.poll_ready(cx)?);
                     let (tx, rx) = oneshot::channel();
-                    self.sender.start_send(Command::OpenStream(tx))?;
+                    self.sender.start_send(ControlCommand::OpenStream(tx))?;
                     self.pending_open = Some(rx)
                 }
-                Some(mut rx) => match Pin::new(&mut rx).poll(cx)? {
-                    Poll::Ready(result) => return Poll::Ready(result),
+                Some(mut rx) => match rx.poll_unpin(cx)? {
+                    Poll::Ready(result) => {
+                        return Poll::Ready(result)
+                    }
                     Poll::Pending => {
                         self.pending_open = Some(rx);
                         return Poll::Pending
@@ -97,11 +102,18 @@ impl Control {
                 None => {
                     ready!(self.sender.poll_ready(cx)?);
                     let (tx, rx) = oneshot::channel();
-                    self.sender.start_send(Command::CloseConnection(tx))?;
+                    self.sender.start_send(ControlCommand::CloseConnection(tx))?;
                     self.pending_close = Some(rx)
                 }
-                Some(mut rx) => match Pin::new(&mut rx).poll(cx)? {
-                    Poll::Ready(()) => return Poll::Ready(Ok(())),
+                Some(mut rx) => match rx.poll_unpin(cx) {
+                    Poll::Ready(Ok(())) => {
+                        return Poll::Ready(Ok(()))
+                    }
+                    Poll::Ready(Err(oneshot::Canceled)) => {
+                        // A dropped `oneshot::Sender` means the `Connection` is gone,
+                        // which is `Ok`ay for us here.
+                        return Poll::Ready(Ok(()))
+                    }
                     Poll::Pending => {
                         self.pending_close = Some(rx);
                         return Poll::Pending

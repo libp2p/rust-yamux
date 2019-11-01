@@ -13,7 +13,7 @@ use crate::{
     Config,
     WindowUpdateMode,
     chunks::Chunks,
-    connection::{self, Command},
+    connection::{self, StreamCommand},
     frame::{
         Frame,
         header::{StreamId, WindowUpdate}
@@ -64,7 +64,7 @@ pub struct Stream {
     id: StreamId,
     conn: connection::Id,
     config: Arc<Config>,
-    sender: mpsc::Sender<Command>,
+    sender: mpsc::Sender<StreamCommand>,
     pending: Option<Frame<WindowUpdate>>,
     shared: Arc<Mutex<Shared>>
 }
@@ -92,7 +92,7 @@ impl Stream {
         , config: Arc<Config>
         , window: u32
         , credit: u32
-        , sender: mpsc::Sender<Command>
+        , sender: mpsc::Sender<StreamCommand>
         ) -> Self
     {
         Stream {
@@ -150,7 +150,7 @@ impl AsyncRead for Stream {
         if self.pending.is_some() {
             ready!(self.sender.poll_ready(cx).map_err(|_| self.write_zero_err())?);
             let frm = self.pending.take().expect("pending.is_some()");
-            let cmd = Command::SendFrame(frm.cast());
+            let cmd = StreamCommand::SendFrame(frm.cast());
             self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?
         }
 
@@ -202,7 +202,7 @@ impl AsyncRead for Stream {
         let frame = Frame::window_update(self.id, self.config.receive_window);
         match self.sender.poll_ready(cx).map_err(|_| self.write_zero_err())? {
             Poll::Ready(()) => {
-                let cmd = Command::SendFrame(frame.cast());
+                let cmd = StreamCommand::SendFrame(frame.cast());
                 self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?
             }
             Poll::Pending => self.pending = Some(frame)
@@ -233,7 +233,7 @@ impl AsyncWrite for Stream {
         let n = body.len();
         let frame = Frame::data(self.id, body).expect("body <= u32::MAX");
         log::trace!("{}/{}: write {} bytes", self.conn, self.id, n);
-        let cmd = Command::SendFrame(frame.cast());
+        let cmd = StreamCommand::SendFrame(frame.cast());
         self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?;
         Poll::Ready(Ok(n))
     }
@@ -248,7 +248,7 @@ impl AsyncWrite for Stream {
         }
         log::trace!("{}/{}: close", self.conn, self.id);
         ready!(self.sender.poll_ready(cx).map_err(|_| self.write_zero_err())?);
-        let cmd = Command::CloseStream(self.id);
+        let cmd = StreamCommand::CloseStream(self.id);
         self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?;
         self.shared().update_state(self.conn, self.id, State::SendClosed);
         Poll::Ready(Ok(()))
