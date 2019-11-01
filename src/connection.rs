@@ -41,6 +41,13 @@ use std::{fmt, sync::Arc};
 pub use control::Control;
 pub use stream::{State, Stream};
 
+/// Arbitrary limit of our internal command channel.
+///
+/// Since each `mpsc::Sender` gets a guaranteed slot in a channel the
+/// actual upper bound is this value + number of senders (i.e. number
+/// of streams + number of controls).
+const MAX_COMMAND_BACKLOG: usize = 32;
+
 type Result<T> = std::result::Result<T, ConnectionError>;
 
 /// How the connection is used.
@@ -141,7 +148,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     pub fn new(socket: T, cfg: Config, mode: Mode) -> Self {
         let id = Id(rand::random());
         log::debug!("new connection: {} ({:?})", id, mode);
-        let (sender, receiver) = mpsc::channel(cfg.max_pending_frames);
+        let (sender, receiver) = mpsc::channel(MAX_COMMAND_BACKLOG);
         let socket = Framed::new(socket, frame::Codec::new(cfg.max_buffer_size)).fuse();
         Connection {
             id,
