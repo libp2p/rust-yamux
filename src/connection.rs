@@ -21,18 +21,17 @@
 // it enqueues it into this channel (waiting if the channel is full). The
 // former is shared with every `Control` clone and used to open new outbound
 // streams or to trigger a connection close.
-// The `Connection` thus alternates randomly between command processing and
-// incoming frame processing. It updates the `Stream` state based on incoming
-// frames, e.g. it pushes incoming data to the `Stream`'s buffer or increases
-// the sending credit if the remote has sent us a corresponding
-// `Frame::<WindowUpdate>`. Updating a `Stream`'s state acquires a `Mutex`,
-// which every `Stream` has around its `Shared` state. While blocking, we
-// make sure the lock is only held for brief moments and *never* while doing
-// I/O. The only contention is between the `Connection` and a single `Stream`,
-// which should resolve quickly. Ideally, we could use `futures::lock::Mutex`
-// but it does not offer a poll-based API as of futures-preview 0.3.0-alpha.19,
-// which makes it difficult to use in a `Stream`'s `AsyncRead` and `AsyncWrite`
-// trait implementations.
+// The `Connection` updates the `Stream` state based on incoming frames, e.g.
+// it pushes incoming data to the `Stream`'s buffer or increases the sending
+// credit if the remote has sent us a corresponding `Frame::<WindowUpdate>`.
+// Updating a `Stream`'s state acquires a `Mutex`, which every `Stream` has
+// around its `Shared` state. While blocking, we make sure the lock is only
+// held for brief moments and *never* while doing I/O. The only contention is
+// between the `Connection` and a single `Stream`, which should resolve
+// quickly. Ideally, we could use `futures::lock::Mutex` but it does not offer
+// a poll-based API as of futures-preview 0.3.0-alpha.19, which makes it
+// difficult to use in a `Stream`'s `AsyncRead` and `AsyncWrite` trait
+// implementations.
 //
 // Closing a `Connection`
 // ----------------------
@@ -52,12 +51,12 @@
 //    and further close commands would mean we need to save those
 //    `oneshot::Sender`s for later. On the other hand we also do not simply
 //    close the control channel as this would signal to `Control`s that
-//    try to send close commands that the connection is already closed,
-//    which it is not. So we just do not process control commands which
+//    try to send close commands, that the connection is already closed,
+//    which it is not. So we just pause processing control commands which
 //    means such `Control`s will wait.
 // 4. We keep processing I/O and stream commands until the remaining stream
 //    commands have all been consumed, at which point we transition the
-//    closing state to `ClosingState::Complete` which entails sending the
+//    closing state to `ClosingState::Complete`, which entails sending the
 //    final termination frame to the remote, informing the `Control` and
 //    now also closing the control channel.
 // 5. Now that we are closed we go through all pending control commands
@@ -101,10 +100,15 @@ use crate::{
     frame::header::{self, CONNECTION_ID, Data, GoAway, Header, Ping, StreamId, Tag, WindowUpdate},
     pause::Pausable
 };
-use futures::{channel::{mpsc, oneshot}, prelude::*, stream::Fuse};
+use futures::{
+    channel::{mpsc, oneshot},
+    future::{self, Either},
+    prelude::*,
+    stream::{Fuse, FusedStream}
+};
 use futures_codec::Framed;
 use nohash_hasher::IntMap;
-use std::{fmt, sync::Arc};
+use std::{fmt, sync::Arc, task::{Context, Poll}};
 
 pub use control::Control;
 pub use stream::{State, Stream};
@@ -332,13 +336,76 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     async fn next(&mut self) -> Result<Option<Stream>> {
         loop {
             self.garbage_collect().await?;
-            futures::select! {
-                val = self.stream_receiver.next() => self.on_stream_command(val).await?,
-                val = self.control_receiver.next() => self.on_control_command(val).await?,
-                val = self.socket.try_next().err_into() =>
-                    if let Some(stream) = self.on_frame(val).await? {
-                        return Ok(Some(stream))
+
+            // For each channel and the socket we create a future that gets
+            // the next item. We will poll each future and if any one of them
+            // yields an item, we return the tuple of poll results which are
+            // then all processed.
+            //
+            // For terminated sources we create non-finishing futures.
+            // This guarantees that if the remaining futures are pending
+            // we properly wait until woken up because we actually can make
+            // progress.
+            //
+            // While it should never happen that all futures are terminated
+            // we nevertheless count them and return early if they are.
+
+            let mut num_terminated = 0;
+
+            let mut next_inbound_frame =
+                if self.socket.is_terminated() {
+                    num_terminated += 1;
+                    Either::Left(future::pending())
+                } else {
+                    Either::Right(self.socket.try_next().err_into())
+                };
+
+            let mut next_stream_command =
+                if self.stream_receiver.is_terminated() {
+                    num_terminated += 1;
+                    Either::Left(future::pending())
+                } else {
+                    Either::Right(self.stream_receiver.next())
+                };
+
+            let mut next_control_command =
+                if self.control_receiver.is_terminated() {
+                    num_terminated += 1;
+                    Either::Left(future::pending())
+                } else {
+                    Either::Right(self.control_receiver.next())
+                };
+
+            if num_terminated == 3 {
+                log::error!("{}: all futures are terminated", self.id);
+                return Err(ConnectionError::Closed)
+            }
+
+            let next_item =
+                future::poll_fn(move |cx: &mut Context| {
+                    let a = next_stream_command.poll_unpin(cx);
+                    let b = next_control_command.poll_unpin(cx);
+                    let c = next_inbound_frame.poll_unpin(cx);
+                    if a.is_pending() && b.is_pending() && c.is_pending() {
+                        return Poll::Pending
                     }
+                    Poll::Ready((a, b, c))
+                });
+
+            let (stream_command, control_command, inbound_frame) = next_item.await;
+
+            if let Poll::Ready(cmd) = control_command {
+                self.on_control_command(cmd).await?
+            }
+
+            if let Poll::Ready(cmd) = stream_command {
+                self.on_stream_command(cmd).await?
+            }
+
+            if let Poll::Ready(frame) = inbound_frame {
+                if let Some(stream) = self.on_frame(frame).await? {
+                    return Ok(Some(stream))
+                }
             }
         }
     }
