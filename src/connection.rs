@@ -174,7 +174,7 @@ pub(crate) enum ControlCommand {
     /// Open a new stream to the remote end.
     OpenStream(oneshot::Sender<Result<Stream>>),
     /// Close the whole connection.
-    CloseConnection(oneshot::Sender<()>),
+    CloseConnection(oneshot::Sender<()>)
 }
 
 /// `Stream` to `Connection` commands.
@@ -294,8 +294,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     ///
     /// This must be called repeatedly in order to make progress.
     /// Once `Ok(None)` or `Err(_)` is returned the connection is
-    /// considered closed and no further invocations of this method
+    /// considered closed and no further invocation of this method
     /// must be attempted.
+    ///
+    /// # Cancellation
+    ///
+    /// Please note that if you poll the returned [`Future`] it *must
+    /// not be cancelled* but polled until [`Poll::Ready`] is returned.
     pub async fn next_stream(&mut self) -> Result<Option<Stream>> {
         let result = self.next().await;
 
