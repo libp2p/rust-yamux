@@ -307,25 +307,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         // We close all streams and wake up the associated tasks before
         // closing the socket. The connection is then considered closed.
 
-        for (id, s) in self.streams.drain() {
-            let mut shared = s.shared();
-            shared.update_state(self.id, StreamId::new(id), State::Closed);
-            if let Some(w) = shared.reader.take() {
-                w.wake()
-            }
-            if let Some(w) = shared.writer.take() {
-                w.wake()
-            }
+        self.drop_all_streams();
+
+        if let Err(ConnectionError::Closed) = result {
+            return Ok(None)
         }
 
-        match &result {
-            Err(ConnectionError::Io(_)) => result,
-            Err(ConnectionError::Closed) => Ok(None),
-            _ => {
-                self.socket.close().await.or(Ok::<_, ConnectionError>(()))?;
-                result
-            }
-        }
+        result
     }
 
     /// Get the next inbound `Stream` and make progress along the way.
@@ -468,6 +456,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 // No further processing of commands of any kind or incoming frames
                 // will happen.
                 debug_assert!(self.closing.is_complete());
+                self.socket.close().await.or(Err(ConnectionError::Closed))?;
                 return Err(ConnectionError::Closed)
             }
         }
@@ -829,6 +818,28 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             self.streams.remove(&id.val());
         }
         Ok(())
+    }
+}
+
+impl<T> Connection<T> {
+    /// Close and drop all `Stream`s and wake any pending `Waker`s.
+    fn drop_all_streams(&mut self) {
+        for (id, s) in self.streams.drain() {
+            let mut shared = s.shared();
+            shared.update_state(self.id, StreamId::new(id), State::Closed);
+            if let Some(w) = shared.reader.take() {
+                w.wake()
+            }
+            if let Some(w) = shared.writer.take() {
+                w.wake()
+            }
+        }
+    }
+}
+
+impl<T> Drop for Connection<T> {
+    fn drop(&mut self) {
+        self.drop_all_streams()
     }
 }
 
