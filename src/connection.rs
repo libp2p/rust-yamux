@@ -21,6 +21,7 @@
 // it enqueues it into this channel (waiting if the channel is full). The
 // former is shared with every `Control` clone and used to open new outbound
 // streams or to trigger a connection close.
+//
 // The `Connection` updates the `Stream` state based on incoming frames, e.g.
 // it pushes incoming data to the `Stream`'s buffer or increases the sending
 // credit if the remote has sent us a corresponding `Frame::<WindowUpdate>`.
@@ -36,14 +37,14 @@
 // Closing a `Connection`
 // ----------------------
 //
-// Every `Control` may send a `ControlCommand::Close` at any time and waits
-// then on a `oneshot::Receiver` for confirmation that the connection is
+// Every `Control` may send a `ControlCommand::Close` at any time and then
+// waits on a `oneshot::Receiver` for confirmation that the connection is
 // closed. The closing proceeds as follows:
 //
 // 1. As soon as we receive the close command we close the MPSC receiver
-//    of `StreamCommand`s. We want to proces any stream commands which are
+//    of `StreamCommand`s. We want to process any stream commands which are
 //    already enqueued at this point but no more.
-// 2. We change the internal closing state to `ClosingState::Started` which
+// 2. We change the internal shutdown state to `Shutdown::InProgress` which
 //    contains the `oneshot::Sender` of the `Control` which triggered the
 //    closure and which we need to notify eventually.
 // 3. Crucially -- while closing -- we no longer process further control
@@ -56,7 +57,7 @@
 //    means such `Control`s will wait.
 // 4. We keep processing I/O and stream commands until the remaining stream
 //    commands have all been consumed, at which point we transition the
-//    closing state to `ClosingState::Complete`, which entails sending the
+//    shutdown state to `Shutdown::Complete`, which entails sending the
 //    final termination frame to the remote, informing the `Control` and
 //    now also closing the control channel.
 // 5. Now that we are closed we go through all pending control commands
@@ -71,12 +72,11 @@
 // There is always more work that can be done to make this a better crate,
 // for example:
 //
-// - Instead of `futures::mpsc` a more efficient channel implementation,
+// - Instead of `futures::mpsc` a more efficient channel implementation
 //   could be used, e.g. `tokio-sync`. Unfortunately `tokio-sync` is about
 //   to be merged into `tokio` and depending on this large crate is not
 //   attractive, especially given the dire situation around cargo's flag
-//   resolution. Also the different `AsyncRead`/`AsyncWrite` traits require
-//   more integration work.
+//   resolution.
 // - Instead of sending data over the I/O resource with `SinkExt::send` a
 //   custom send operation could be used that does not always perform an
 //   implicit flush. This also requires adding a `StreamCommand::Flush` so
@@ -165,7 +165,7 @@ pub struct Connection<T> {
     stream_sender: mpsc::Sender<StreamCommand>,
     stream_receiver: mpsc::Receiver<StreamCommand>,
     garbage: Vec<StreamId>, // see `Connection::garbage_collect()`
-    closing: ClosingState
+    shutdown: Shutdown
 }
 
 /// `Control` to `Connection` commands.
@@ -205,27 +205,27 @@ enum Action {
 
 /// This enum captures the various stages of shutting down the connection.
 #[derive(Debug)]
-enum ClosingState {
+enum Shutdown {
     /// We are open for business.
-    None,
+    NotStarted,
     /// We have received a `ControlCommand::Close` and are shutting
     /// down operations. The `Sender` will be informed once we are done.
-    Started(oneshot::Sender<()>),
+    InProgress(oneshot::Sender<()>),
     /// The shutdown is complete and we are closed for good.
     Complete
 }
 
-impl ClosingState {
-    fn is_none(&self) -> bool {
-        if let ClosingState::None = self {
+impl Shutdown {
+    fn has_not_started(&self) -> bool {
+        if let Shutdown::NotStarted = self {
             true
         } else {
             false
         }
     }
 
-    fn is_started(&self) -> bool {
-        if let ClosingState::Started(_) = self {
+    fn is_in_progress(&self) -> bool {
+        if let Shutdown::InProgress(_) = self {
             true
         } else {
             false
@@ -233,7 +233,7 @@ impl ClosingState {
     }
 
     fn is_complete(&self) -> bool {
-        if let ClosingState::Complete = self {
+        if let Shutdown::Complete = self {
             true
         } else {
             false
@@ -281,7 +281,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 Mode::Server => 2
             },
             garbage: Vec::new(),
-            closing: ClosingState::None
+            shutdown: Shutdown::NotStarted
         }
     }
 
@@ -411,7 +411,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     async fn on_control_command(&mut self, cmd: Option<ControlCommand>) -> Result<()> {
         match cmd {
             Some(ControlCommand::OpenStream(reply)) => {
-                if self.closing.is_complete() {
+                if self.shutdown.is_complete() {
                     // We are already closed so just inform the control.
                     let _ = reply.send(Err(ConnectionError::Closed));
                     return Ok(())
@@ -444,14 +444,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 }
             }
             Some(ControlCommand::CloseConnection(reply)) => {
-                if self.closing.is_complete() {
+                if self.shutdown.is_complete() {
                     // We are already closed so just inform the control.
                     let _ = reply.send(());
                     return Ok(())
                 }
                 // Handle initial close command.
-                debug_assert!(self.closing.is_none());
-                self.closing = ClosingState::Started(reply);
+                debug_assert!(self.shutdown.has_not_started());
+                self.shutdown = Shutdown::InProgress(reply);
                 log::trace!("{}: shutting down connection", self.id);
                 self.control_receiver.pause();
                 self.stream_receiver.close()
@@ -460,7 +460,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 // We only get here after the whole connection shutdown is complete.
                 // No further processing of commands of any kind or incoming frames
                 // will happen.
-                debug_assert!(self.closing.is_complete());
+                debug_assert!(self.shutdown.is_complete());
                 self.socket.close().await.or(Err(ConnectionError::Closed))?;
                 return Err(ConnectionError::Closed)
             }
@@ -488,13 +488,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 // command. Now that we are at the end of the stream command queue,
                 // we send the final term frame to the remote and complete the
                 // closure.
-                debug_assert!(self.closing.is_started());
+                debug_assert!(self.shutdown.is_in_progress());
                 log::debug!("{}: closing {}", self.id, self);
                 let frame = Frame::term().cast();
                 self.socket.send(frame).await.or(Err(ConnectionError::Closed))?;
-                let cstate = std::mem::replace(&mut self.closing, ClosingState::Complete);
-                if let ClosingState::Started(tx) = cstate {
-                    // Inform the `Control` that intiated the shutdown.
+                let shutdown = std::mem::replace(&mut self.shutdown, Shutdown::Complete);
+                if let Shutdown::InProgress(tx) = shutdown {
+                    // Inform the `Control` that initiated the shutdown.
                     let _ = tx.send(());
                 }
                 debug_assert!(self.control_receiver.is_paused());

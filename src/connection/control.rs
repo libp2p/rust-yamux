@@ -26,8 +26,11 @@ type Result<T> = std::result::Result<T, ConnectionError>;
 /// environments such as certain trait implementations.
 #[derive(Debug)]
 pub struct Control {
+    /// Command channel to `Connection`.
     sender: mpsc::Sender<ControlCommand>,
+    /// Pending state of `poll_open_stream`.
     pending_open: Option<oneshot::Receiver<Result<Stream>>>,
+    /// Pending state of `poll_close`.
     pending_close: Option<oneshot::Receiver<()>>
 }
 

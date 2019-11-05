@@ -99,7 +99,7 @@ impl Frame<GoAway> {
     }
 }
 
-/// A decoder and encoder or message frames.
+/// A decoder and encoder of message frames.
 pub struct Codec {
     header_codec: header::Codec,
     body_codec: BytesCodec,
@@ -115,7 +115,7 @@ impl fmt::Debug for Codec {
 }
 
 impl Codec {
-    /// Create a codec which accepts frames up to the max. body size.
+    /// Create a codec which accepts frames up to the given max. body size.
     pub fn new(max_body_len: usize) -> Codec {
         Codec {
             header_codec: header::Codec::new(max_body_len),
@@ -192,6 +192,7 @@ pub enum FrameDecodeError {
 mod tests {
     use bytes::BytesMut;
     use quickcheck::{Arbitrary, Gen, QuickCheck};
+    use rand::RngCore;
     use super::*;
 
     impl Arbitrary for Frame<()> {
@@ -200,7 +201,9 @@ mod tests {
             let body =
                 if header.tag() == header::Tag::Data {
                     header.set_len(header.len().val() % 4096);
-                    Bytes::from(vec![0; crate::u32_as_usize(header.len().val())])
+                    let mut b = vec![0; crate::u32_as_usize(header.len().val())];
+                    rand::thread_rng().fill_bytes(&mut b);
+                    Bytes::from(b)
                 } else {
                     Bytes::new()
                 };

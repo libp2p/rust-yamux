@@ -317,7 +317,7 @@ pub struct Codec {
 }
 
 impl Codec {
-    /// Create a new codec which accepts frames up to the given max. body length.
+    /// Create a new codec which accepts headers up to the given max. body length.
     pub fn new(max_body_len: usize) -> Self {
         Codec { max_body_len }
     }
@@ -382,7 +382,7 @@ pub enum HeaderDecodeError {
     #[error("unknown flags type: {:0x}", .0)]
     Flags(u16),
 
-    /// The frame body length larger than the configured maximum.
+    /// A data frame body length is larger than the configured maximum.
     #[error("frame body is too large ({0})")]
     FrameTooLarge(usize),
 
