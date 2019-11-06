@@ -1,62 +1,67 @@
-use bytes::{Bytes, BytesMut};
-use futures::{future, prelude::*, sync::mpsc};
-use std::{io, net::SocketAddr};
-use tokio::{codec::{LengthDelimitedCodec, Framed}, net::{TcpListener, TcpStream}, runtime::Runtime};
+// Copyright (c) 2018-2019 Parity Technologies (UK) Ltd.
+//
+// Licensed under the Apache License, Version 2.0 or MIT license, at your option.
+//
+// A copy of the Apache License, Version 2.0 is included in the software as
+// LICENSE-APACHE and a copy of the MIT license is included in the software
+// as LICENSE-MIT. You may also obtain a copy of the Apache License, Version 2.0
+// at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
+// at https://opensource.org/licenses/MIT.
+
+use async_std::{net::{TcpStream, TcpListener}, task};
+use bytes::Bytes;
+use futures::{channel::mpsc, prelude::*};
+use futures_codec::{Framed, LengthCodec};
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use yamux::{Config, Connection, Mode};
 
-fn roundtrip(addr: SocketAddr, nstreams: u64, data: Bytes) {
-    let rt = Runtime::new().expect("runtime");
-    let e1 = rt.executor();
+async fn roundtrip(address: SocketAddr, nstreams: u64, data: Bytes) {
+    let listener = TcpListener::bind(&address).await.expect("bind");
+    let address = listener.local_addr().expect("local address");
 
-    let server = TcpListener::bind(&addr).expect("tcp bind").incoming()
-        .into_future()
-        .then(move |sock| {
-            let sock = sock.expect("sock ok").0.expect("some sock");
-            Connection::new(sock, Config::default(), Mode::Server)
-                .for_each(|stream| {
-                    let (sink, stream) = Framed::new(stream, LengthDelimitedCodec::new()).split();
-                    stream.map(BytesMut::freeze).forward(sink).from_err().map(|_| ())
-                })
-        })
-        .map_err(|e| panic!("server error: {}", e));
+    let server = async move {
+        let socket = listener.accept().await.expect("accept").0;
+        yamux::into_stream(Connection::new(socket, Config::default(), Mode::Server))
+            .try_for_each_concurrent(None, |stream| async {
+                log::debug!("S: accepted new stream");
+                let (os, is) = Framed::new(stream, LengthCodec).split();
+                is.forward(os).await?;
+                Ok(())
+            })
+            .await
+            .expect("server works")
+    };
 
-    let client = TcpStream::connect(&addr)
-        .from_err()
-        .and_then(move |sock| {
-            let (tx, rx) = mpsc::unbounded();
-            let c = Connection::new(sock, Config::default(), Mode::Client);
-            for _ in 0 .. nstreams {
-                let t = tx.clone();
-                let d = data.clone();
-                let s = c.open_stream().expect("ok stream").expect("not eof");
-                let f = {
-                    let (sink, stream) = Framed::new(s, LengthDelimitedCodec::new()).split();
-                    sink.send(d.clone())
-                        .and_then(|mut sink| future::poll_fn(move || sink.close()))
-                        .and_then(move |()| stream.concat2())
-                        .map(move |frame| {
-                            assert_eq!(d.len(), frame.len());
-                            t.unbounded_send(1).expect("send to channel")
-                        })
-                };
-                e1.spawn(f.map_err(|e| panic!("client error: {}", e)));
-            }
-            rx.take(nstreams)
-                .map_err(|()| panic!("channel interrupted"))
-                .fold(0, |acc, n| Ok::<_, io::Error>(acc + n))
-                .and_then(move |n| {
-                    assert_eq!(nstreams, n);
-                    std::mem::drop(c);
-                    Ok::<_, io::Error>(())
-                })
-        })
-        .map_err(|e| panic!("client error: {}", e));
+    task::spawn(server);
 
-    rt.block_on_all(server.join(client).map(|_| ())).expect("runtime")
+    let socket = TcpStream::connect(&address).await.expect("connect");
+    let (tx, rx) = mpsc::unbounded();
+    let conn = Connection::new(socket, Config::default(), Mode::Client);
+    let mut ctrl = conn.control();
+    task::spawn(yamux::into_stream(conn).for_each(|_| future::ready(())));
+    for _ in 0 .. nstreams {
+        let data = data.clone();
+        let tx = tx.clone();
+        let mut ctrl = ctrl.clone();
+        task::spawn(async move {
+            let stream = ctrl.open_stream().await.expect("open stream");
+            log::debug!("C: opened new stream");
+            let (mut os, is) = Framed::new(stream, LengthCodec).split();
+            os.send(data.clone()).await.expect("send");
+            os.close().await.expect("close");
+            let frame = is.try_concat().await.expect("try_concat");
+            assert_eq!(data, frame);
+            tx.unbounded_send(1).expect("mpsc send")
+        });
+    }
+    let n = rx.take(nstreams).fold(0, |acc, n| future::ready(acc + n)).await;
+    ctrl.close().await.expect("close connection");
+    assert_eq!(nstreams, n)
 }
 
 #[test]
 fn concurrent_streams() {
-    let data = std::iter::repeat(0x42u8).take(100 * 1024).collect::<Vec<_>>().into();
-    roundtrip("127.0.0.1:9000".parse().expect("valid address"), 1000, data)
+    let data = Bytes::from(vec![0x42; 100 * 1024]);
+    let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
+    task::block_on(roundtrip(addr, 1000, data))
 }

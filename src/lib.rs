@@ -1,4 +1,4 @@
-// Copyright 2018 Parity Technologies (UK) Ltd.
+// Copyright (c) 2018-2019 Parity Technologies (UK) Ltd.
 //
 // Licensed under the Apache License, Version 2.0 or MIT license, at your option.
 //
@@ -8,39 +8,42 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-//! Implementation of [yamux](https://github.com/hashicorp/yamux/blob/master/spec.md), a multiplexer
-//! over reliable, ordered connections, such as TCP/IP.
+//! This crate implements the [Yamux specification][1].
 //!
-//! The two primary objects, clients of this crate interact with, are `Connection` and
-//! `StreamHandle`. The former wraps the underlying connection and multiplexes `StreamHandle`s
-//! which implement `tokio_io::AsyncRead` and `tokio_io::AsyncWrite` over it.
-//! `Connection` implements `futures::Stream` yielding `StreamHandle`s for inbound connection
-//! attempts.
+//! It multiplexes independent I/O streams over reliable, ordered connections,
+//! such as TCP/IP.
+//!
+//! The three primary objects, clients of this crate interact with, are:
+//!
+//! - [`Connection`], which wraps the underlying I/O resource, e.g. a socket,
+//! - [`Stream`], which implements [`futures::io::AsyncRead`] and
+//!   [`futures::io::AsyncWrite`], and
+//! - [`Control`], to asynchronously control the [`Connection`].
+//!
+//! [1]: https://github.com/hashicorp/yamux/blob/master/spec.md
 
 mod chunks;
 mod connection;
 mod error;
-#[allow(dead_code)]
 mod frame;
-mod notify;
-mod stream;
+mod pause;
 
-pub use crate::connection::{Connection, Mode, StreamHandle};
-pub use crate::error::{DecodeError, ConnectionError};
-pub use crate::stream::State;
+pub use crate::connection::{Connection, Mode, Control, State, Stream, into_stream};
+pub use crate::error::ConnectionError;
+pub use crate::frame::{FrameDecodeError, header::{HeaderDecodeError, StreamId}};
 
-pub(crate) const DEFAULT_CREDIT: u32 = 256 * 1024; // as per yamux specification
+const DEFAULT_CREDIT: u32 = 256 * 1024; // as per yamux specification
 
 /// Specifies when window update frames are sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowUpdateMode {
-    /// Send window updates as soon as a stream's receive window drops to 0.
+    /// Send window updates as soon as a [`Stream`]'s receive window drops to 0.
     ///
     /// This ensures that the sender can resume sending more data as soon as possible
     /// but a slow reader on the receiving side may be overwhelmed, i.e. it accumulates
     /// data in its buffer which may reach its limit (see `set_max_buffer_size`).
     /// In this mode, window updates merely prevent head of line blocking but do not
-    /// effectively exercise back-pressure on senders.
+    /// effectively exercise back pressure on senders.
     OnReceive,
 
     /// Send window updates only when data is read on the receiving end.
@@ -51,7 +54,7 @@ pub enum WindowUpdateMode {
     /// do not read before finishing their writes. Use this mode only if you are sure
     /// that this will never happen, i.e. if
     ///
-    /// - Endpoints *A* and *B* never write at the same time, or
+    /// - Endpoints *A* and *B* never write at the same time, *or*
     /// - Endpoints *A* and *B* write at most *n* frames concurrently such that the sum
     ///   of the frame lengths is less or equal to the available credit of *A* and *B*
     ///   respectively.
@@ -65,17 +68,15 @@ pub enum WindowUpdateMode {
 /// - receive window = 256 KiB
 /// - max. buffer size (per stream) = 1 MiB
 /// - max. number of streams = 8192
-/// - max. pending frames = 2048
 /// - window update mode = on receive
 /// - read after close = true
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub(crate) receive_window: u32,
-    pub(crate) max_buffer_size: usize,
-    pub(crate) max_num_streams: usize,
-    pub(crate) max_pending_frames: usize,
-    pub(crate) window_update_mode: WindowUpdateMode,
-    pub(crate) read_after_close: bool
+    receive_window: u32,
+    max_buffer_size: usize,
+    max_num_streams: usize,
+    window_update_mode: WindowUpdateMode,
+    read_after_close: bool
 }
 
 impl Default for Config {
@@ -84,7 +85,6 @@ impl Default for Config {
             receive_window: DEFAULT_CREDIT,
             max_buffer_size: 1024 * 1024,
             max_num_streams: 8192,
-            max_pending_frames: 2048,
             window_update_mode: WindowUpdateMode::OnReceive,
             read_after_close: true
         }
@@ -93,40 +93,44 @@ impl Default for Config {
 
 impl Config {
     /// Set the receive window (must be >= 256 KiB).
-    pub fn set_receive_window(&mut self, n: u32) -> Result<(), ()> {
-        if n >= DEFAULT_CREDIT {
-            self.receive_window = n;
-            return Ok(())
-        }
-        Err(())
+    ///
+    /// # Panics
+    ///
+    /// If the given receive window is < 256 KiB.
+    pub fn set_receive_window(&mut self, n: u32) -> &mut Self {
+        assert!(n >= DEFAULT_CREDIT);
+        self.receive_window = n;
+        self
     }
 
     /// Set the max. buffer size per stream.
-    pub fn set_max_buffer_size(&mut self, n: usize) {
-        self.max_buffer_size = n
+    pub fn set_max_buffer_size(&mut self, n: usize) -> &mut Self {
+        self.max_buffer_size = n;
+        self
     }
 
     /// Set the max. number of streams.
-    pub fn set_max_num_streams(&mut self, n: usize) {
-        self.max_num_streams = n
+    pub fn set_max_num_streams(&mut self, n: usize) -> &mut Self {
+        self.max_num_streams = n;
+        self
     }
-
-    /// Set the max. number of pending frames, i.e. outgoing
-    /// frames which have not yet been sent.
-    pub fn set_max_pending_frames(&mut self, n: usize) {
-        self.max_pending_frames = n
-    }
-
 
     /// Set the window update mode to use.
-    pub fn set_window_update_mode(&mut self, m: WindowUpdateMode) {
-        self.window_update_mode = m
+    pub fn set_window_update_mode(&mut self, m: WindowUpdateMode) -> &mut Self {
+        self.window_update_mode = m;
+        self
     }
 
     /// Allow or disallow streams to read from buffered data after
     /// the connection has been closed.
-    pub fn set_read_after_close(&mut self, b: bool) {
+    pub fn set_read_after_close(&mut self, b: bool) -> &mut Self {
         self.read_after_close = b;
+        self
     }
+}
+
+#[cfg(any(target_pointer_width = "32", target_pointer_width = "64"))]
+const fn u32_as_usize(a: u32) -> usize {
+    a as usize
 }
 

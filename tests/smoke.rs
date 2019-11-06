@@ -1,4 +1,4 @@
-// Copyright 2018 Parity Technologies (UK) Ltd.
+// Copyright (c) 2018-2019 Parity Technologies (UK) Ltd.
 //
 // Licensed under the Apache License, Version 2.0 or MIT license, at your option.
 //
@@ -8,18 +8,16 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
+#![type_length_limit="1162088"]
+
+use async_std::{net::{TcpStream, TcpListener}, task};
 use bytes::Bytes;
-use futures::{future::{self, Either, Loop}, prelude::*};
-use log::{debug, error};
-use quickcheck::{quickcheck, Arbitrary, Gen, QuickCheck, TestResult};
+use futures::{future, prelude::*};
+use futures_codec::{BytesCodec, Framed};
+use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};
 use rand::Rng;
-use std::{fmt::{Debug, Display}, io, net::{Ipv4Addr, SocketAddr, SocketAddrV4}};
-use tokio::{
-    codec::{BytesCodec, Framed, Encoder, Decoder},
-    net::{TcpListener, TcpStream},
-    runtime::Runtime
-};
-use yamux::{Config, Connection, Mode, StreamHandle, State};
+use std::{fmt::Debug, io, net::{Ipv4Addr, SocketAddr, SocketAddrV4}};
+use yamux::{Config, Connection, ConnectionError, Mode, Control, State};
 
 #[test]
 fn prop_send_recv() {
@@ -27,100 +25,113 @@ fn prop_send_recv() {
         if msgs.is_empty() {
             return TestResult::discard()
         }
-        let (l, a) = bind();
-        let cfg = Config::default();
-        let codec = BytesCodec::new();
-        let server = server(cfg.clone(), l).and_then(move |c| repeat_echo(c, codec, 1));
-        let num_requests = msgs.len();
-        let iter = msgs.into_iter().map(Bytes::from);
-        let stream = iter.clone();
-        let client = client(cfg, a).and_then(move |c| loop_send_recv(c, codec, stream));
-        let responses = run(server, client);
-        TestResult::from_bool(
-            responses.len() == num_requests &&
-            responses.into_iter().map(|m| m.freeze()).eq(iter))
-    }
+        task::block_on(async move {
+            let num_requests = msgs.len();
+            let iter = msgs.into_iter().map(Bytes::from);
 
-    // A single run with up to QUICKCHECK_GENERATOR_SIZE messages
-    QuickCheck::new()
-        .tests(1)
-        .quickcheck(prop as fn(_) -> _);
+            let (listener, address) = bind().await.expect("bind");
+
+            let server = async {
+                let socket = listener.accept().await.expect("accept").0;
+                let connection = Connection::new(socket, Config::default(), Mode::Server);
+                repeat_echo(connection, 1).await.expect("repeat_echo")
+            };
+
+            let client = async {
+                let socket = TcpStream::connect(address).await.expect("connect");
+                let connection = Connection::new(socket, Config::default(), Mode::Client);
+                let control = connection.control();
+                task::spawn(yamux::into_stream(connection).for_each(|_| future::ready(())));
+                send_recv(control, iter.clone()).await.expect("send_recv")
+            };
+
+            let result = futures::join!(server, client).1;
+            TestResult::from_bool(result.len() == num_requests && result.into_iter().eq(iter))
+        })
+    }
+    QuickCheck::new().tests(1).quickcheck(prop as fn(_) -> _)
 }
 
 #[test]
 fn prop_max_streams() {
     fn prop(n: usize) -> bool {
-        let (l, a) = bind();
-        let mut cfg = Config::default();
         let max_streams = n % 100;
+        let mut cfg = Config::default();
         cfg.set_max_num_streams(max_streams);
-        let codec = BytesCodec::new();
-        let server = server(cfg.clone(), l).and_then(move |c| repeat_echo(c, codec, 1));
-        let client = client(cfg, a).and_then(move |conn| {
+
+        task::block_on(async move {
+            let (listener, address) = bind().await.expect("bind");
+
+            let cfg_s = cfg.clone();
+            let server = async move {
+                let socket = listener.accept().await.expect("accept").0;
+                let connection = Connection::new(socket, cfg_s, Mode::Server);
+                repeat_echo(connection, 1).await
+            };
+
+            task::spawn(server);
+
+            let socket = TcpStream::connect(address).await.expect("connect");
+            let connection = Connection::new(socket, cfg, Mode::Client);
+            let mut control = connection.control();
+            task::spawn(yamux::into_stream(connection).for_each(|_| future::ready(())));
             let mut v = Vec::new();
             for _ in 0 .. max_streams {
-                v.push(new_stream(&conn))
+                v.push(control.open_stream().await.expect("open_stream"))
             }
-            Ok(conn.open_stream().is_err())
-        });
-        run(server, client)
+            if let Err(ConnectionError::TooManyStreams) = control.open_stream().await {
+                true
+            } else {
+                false
+            }
+        })
     }
-
-    quickcheck(prop as fn(_) -> _);
+    QuickCheck::new().tests(7).quickcheck(prop as fn(_) -> _)
 }
 
 #[test]
 fn prop_send_recv_half_closed() {
-    fn prop(msg: Msg) -> bool {
-        let (l, a) = bind();
-        let cfg = Config::default();
+    fn prop(msg: Msg) {
         let msg_len = msg.0.len();
+        task::block_on(async move {
+            let (listener, address) = bind().await.expect("bind");
 
-        // Server should be able to write on a stream shutdown by the client.
-        let server = server(cfg.clone(), l).and_then(|c| {
-            c.into_future().map_err(|(e,_)| e)
-                .and_then(|(stream, _)| {
-                    let s = stream.expect("S: No incoming stream");
-                    let buf = vec![0; msg_len];
-                    tokio::io::read_exact(s, buf)
-                        .and_then(|(s, buf)| {
-                            assert!(s.state() == Some(State::RecvClosed));
-                            tokio::io::write_all(s, buf)
-                        })
-                        .and_then(|(s, _buf)| {
-                            tokio::io::flush(s).map(|_| true)
-                        }).from_err()
-                })
-                .map_err(|e| error!("S: connection error: {}", e))
-        });
+            // Server should be able to write on a stream shutdown by the client.
+            let server = async {
+                let socket = listener.accept().await.expect("accept").0;
+                let mut connection = Connection::new(socket, Config::default(), Mode::Server);
+                let mut stream = connection.next_stream().await
+                    .expect("S: next_stream")
+                    .expect("S: some stream");
+                task::spawn(yamux::into_stream(connection).for_each(|_| future::ready(())));
+                let mut buf = vec![0; msg_len];
+                stream.read_exact(&mut buf).await.expect("S: read_exact");
+                stream.write_all(&buf).await.expect("S: send");
+                stream.close().await.expect("S: close")
+            };
 
-        // Client should be able to read after shutting down the stream.
-        let client = client(cfg, a).and_then(move |c| {
-            let s = new_stream(&c);
-            tokio::io::write_all(s, msg.clone())
-                .and_then(|(s, _buf)| {
-                    tokio::io::shutdown(s)
-                })
-                .and_then(move |s| {
-                    assert!(s.state() == Some(State::SendClosed));
-                    let buf = vec![0; msg_len];
-                    tokio::io::read_exact(s, buf)
-                })
-                .and_then(move |(s, buf)| {
-                    assert!(s.state() == Some(State::Closed));
-                    future::ok(buf == msg.0)
-                })
-                .map_err(|e| error!("C: connection error: {}", e))
-        });
+            // Client should be able to read after shutting down the stream.
+            let client = async {
+                let socket = TcpStream::connect(address).await.expect("connect");
+                let connection = Connection::new(socket, Config::default(), Mode::Client);
+                let mut control = connection.control();
+                task::spawn(yamux::into_stream(connection).for_each(|_| future::ready(())));
+                let mut stream = control.open_stream().await.expect("C: open_stream");
+                stream.write_all(&msg.0).await.expect("C: send");
+                stream.close().await.expect("C: close");
+                assert_eq!(State::SendClosed, stream.state());
+                let mut buf = vec![0; msg_len];
+                stream.read_exact(&mut buf).await.expect("C: read_exact");
+                assert_eq!(buf, msg.0);
+                assert_eq!(Some(0), stream.read(&mut buf).await.ok());
+                assert_eq!(State::Closed, stream.state());
+            };
 
-        client.join(server).wait() == Ok((true, true))
+            futures::join!(server, client);
+        })
     }
-
-    QuickCheck::new().tests(3).quickcheck(prop as fn(_) -> _);
+    QuickCheck::new().tests(7).quickcheck(prop as fn(_))
 }
-
-//////////////////////////////////////////////////////////////////////////////
-// Utilities
 
 #[derive(Clone, Debug)]
 struct Msg(Vec<u8>);
@@ -146,113 +157,47 @@ impl Arbitrary for Msg {
     }
 }
 
-fn bind() -> (TcpListener, SocketAddr) {
+async fn bind() -> io::Result<(TcpListener, SocketAddr)> {
     let i = Ipv4Addr::new(127, 0, 0, 1);
     let s = SocketAddr::V4(SocketAddrV4::new(i, 0));
-    let l = TcpListener::bind(&s).unwrap();
-    let a = l.local_addr().unwrap();
-    (l, a)
+    let l = TcpListener::bind(&s).await?;
+    let a = l.local_addr()?;
+    Ok((l, a))
 }
 
-fn server(c: Config, l: TcpListener) -> impl Future<Item = Connection<TcpStream>, Error = ()> {
-    l.incoming()
-        .map(move |sock| Connection::new(sock, c.clone(), Mode::Server))
-        .into_future()
-        .map_err(|(e, _rem)| error!("accept failed: {}", e))
-        .and_then(|(maybe, _rem)| maybe.ok_or(()))
+/// For each incoming stream of `c` echo back `n` frames to the sender.
+async fn repeat_echo(c: Connection<TcpStream>, n: u64) -> Result<(), ConnectionError> {
+    let c = yamux::into_stream(c);
+    c.try_for_each_concurrent(None, |stream| async {
+        let (os, is) = Framed::new(stream, BytesCodec {}).split();
+        is.take(n).forward(os).await?;
+        Ok(())
+    })
+    .await?;
+    Ok(())
 }
 
-fn client(c: Config, a: SocketAddr) -> impl Future<Item = Connection<TcpStream>, Error = ()> {
-    TcpStream::connect(&a)
-        .map_err(|e| error!("connect failed: {}", e))
-        .map(move |sock| Connection::new(sock, c, Mode::Client))
-}
-
-/// Read `n` frames from each incoming stream on the connection and echo them
-/// back to the sender, logging any connection errors.
-fn repeat_echo<D>(c: Connection<TcpStream>, d: D, n: u64) -> impl Future<Item = (), Error = ()>
+/// For each message in `iter`, open a new stream, send the message and
+/// collect the response. The sequence of responses will be returned.
+async fn send_recv<I>(mut control: Control, iter: I) -> Result<Vec<Bytes>, ConnectionError>
 where
-    D: Encoder<Error = io::Error> + Decoder<Error = io::Error> + Copy,
-    <D as Encoder>::Item: From<<D as Decoder>::Item>
+    I: Iterator<Item = Bytes>
 {
-    c.for_each(move |stream| {
-        let (stream_out, stream_in) = Framed::new(stream, d).split();
-        stream_in
-            .take(n)
-            .map(|frame_in| frame_in.into())
-            .forward(stream_out)
-            .from_err()
-            .map(|_| ())
-    }).map_err(|e| error!("S: connection error: {}", e))
-}
-
-/// Sequentially send a sequence of messages on a connection, with a new
-/// stream for each message, collecting the responses.
-fn loop_send_recv<D,I>(c: Connection<TcpStream>, d: D, i: I)
-    -> impl Future<Item = Vec<<D as Decoder>::Item>, Error = ()>
-where
-    I: Iterator<Item = <D as Encoder>::Item>,
-    D: Encoder + Decoder + Clone,
-    <D as Encoder>::Item: Debug,
-    <D as Encoder>::Error: Debug + Display,
-    <D as Decoder>::Item: Debug,
-    <D as Decoder>::Error: Debug + Display,
-{
-    future::loop_fn((vec![], i), move |(mut v, mut it)| {
-        let msg = match it.next() {
-            Some(msg) => {
-                debug!("C: sending: {:?}", msg);
-                msg
-            }
-            None => {
-                debug!("C: done");
-                return Either::B(future::ok(Loop::Break((v, it))))
-            }
-        };
-        match c.open_stream() {
-            Ok(Some(stream)) => {
-                debug!("C: new stream: {:?}", stream);
-                let codec = Framed::new(stream, d.clone());
-                let future = codec.send(msg)
-                    .map_err(|e| error!("C: send error: {}", e))
-                    .and_then(move |codec| {
-                        codec.collect().and_then(move |data| {
-                            debug!("C: received {:?}", data);
-                            v.extend(data);
-                            Ok(Loop::Continue((v, it)))
-                        })
-                        .map_err(|e| error!("C: receive error: {}", e))
-                    });
-                Either::A(future)
-            }
-            Ok(None) => {
-                debug!("eof");
-                Either::B(future::ok(Loop::Break((v, it))))
-            }
-            Err(e) => {
-                error!("C: connection error: {}", e);
-                Either::B(future::ok(Loop::Break((v, it))))
-            }
-        }
-    }).map(|(v, _)| v)
-}
-
-fn new_stream(c: &Connection<TcpStream>) -> StreamHandle<TcpStream> {
-    match c.open_stream() {
-        Ok(Some(s)) => s,
-        Ok(None) => panic!("unexpected EOF when opening stream"),
-        Err(e) => panic!("unexpected error when opening stream: {}", e)
+    let mut result = Vec::new();
+    for msg in iter {
+        let stream = control.open_stream().await?;
+        log::debug!("C: new stream: {}", stream);
+        let id = stream.id();
+        let len = msg.len();
+        let mut codec = Framed::new(stream, BytesCodec {});
+        codec.send(msg).await?;
+        log::debug!("C: {}: sent {} bytes", id, len);
+        let data: Vec<Bytes> = codec.try_collect().await?;
+        log::debug!("C: received {} bytes", data.len());
+        result.extend(data)
     }
-}
-
-fn run<R,S,C>(server: S, client: C) -> R
-where
-    S: Future<Item = (), Error = ()> + Send + 'static,
-    C: Future<Item = R, Error = ()> + Send + 'static,
-    R: Send + 'static
-{
-    let mut rt = Runtime::new().unwrap();
-    rt.spawn(server);
-    client.wait().unwrap()
+    log::debug!("C: closing connection");
+    control.close().await?;
+    Ok(result)
 }
 
