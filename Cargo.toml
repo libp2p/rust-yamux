@@ -8,10 +8,16 @@ repository = "https://github.com/paritytech/yamux"
 readme = "README.md"
 edition = "2018"
 
+[features]
+# Opt-in feature which allows reading data into read buffers without
+# having to initialise them first. Use only if you are certain that
+# your `AsyncRead` implementation only writes to the given buffer and
+# never reads from it.
+use_unitialised_read_buffer = []
+
 [dependencies]
 bytes = "0.4.12"
-futures-preview = "0.3.0-alpha.19"
-futures_codec = "0.3"
+futures = "0.3.1"
 log = "0.4.8"
 nohash-hasher = "0.1.2"
 parking_lot = "0.9"
@@ -20,11 +26,10 @@ thiserror = "1.0"
 
 [dev-dependencies]
 anyhow = "1.0"
-async-std = "0.99"
+async-std = "0.99.12"
 criterion = "0.3"
-futures-preview = { version = "0.3.0-alpha.19", features = ["async-await"] }
+futures_codec = "0.3.1"
 quickcheck = "0.9"
-tokio = "0.2.0-alpha.6"
 
 [[bench]]
 name = "concurrent"
