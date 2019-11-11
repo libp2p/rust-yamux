@@ -8,13 +8,6 @@ repository = "https://github.com/paritytech/yamux"
 readme = "README.md"
 edition = "2018"
 
-[features]
-# Opt-in feature which allows reading data into read buffers without
-# having to initialise them first. Use only if you are certain that
-# your `AsyncRead` implementation only writes to the given buffer and
-# never reads from it.
-use_unitialised_read_buffer = []
-
 [dependencies]
 bytes = "0.4.12"
 futures = "0.3.1"

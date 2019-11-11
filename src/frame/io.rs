@@ -94,13 +94,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                 Ok(Some(f)) => return Poll::Ready(Some(Ok(f))),
                 Ok(None) => {
                     if self.buffer.remaining_mut() < BLOCKSIZE {
-                        if cfg!(feature = "use_unitialised_read_buffer") {
-                            self.buffer.reserve(BLOCKSIZE)
-                        } else {
-                            let n = self.buffer.len();
-                            self.buffer.resize(n + BLOCKSIZE, 0);
-                            unsafe { self.buffer.set_len(n) }
-                        }
+                        let n = self.buffer.len();
+                        self.buffer.resize(n + BLOCKSIZE, 0);
+                        unsafe { self.buffer.set_len(n) }
                     }
                     unsafe {
                         let this = &mut *self;
