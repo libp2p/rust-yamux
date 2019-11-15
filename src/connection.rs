@@ -106,7 +106,6 @@ use futures::{
     prelude::*,
     stream::{Fuse, FusedStream}
 };
-use futures_codec::Framed;
 use nohash_hasher::IntMap;
 use std::{fmt, sync::Arc, task::{Context, Poll}};
 
@@ -157,7 +156,7 @@ pub struct Connection<T> {
     id: Id,
     mode: Mode,
     config: Arc<Config>,
-    socket: Fuse<Framed<T, frame::Codec>>,
+    socket: Fuse<frame::Io<T>>,
     next_id: u32,
     streams: IntMap<u32, Stream>,
     control_sender: mpsc::Sender<ControlCommand>,
@@ -265,7 +264,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         log::debug!("new connection: {} ({:?})", id, mode);
         let (stream_sender, stream_receiver) = mpsc::channel(MAX_COMMAND_BACKLOG);
         let (control_sender, control_receiver) = mpsc::channel(MAX_COMMAND_BACKLOG);
-        let socket = Framed::new(socket, frame::Codec::new(cfg.max_buffer_size)).fuse();
+        let socket = frame::Io::new(socket, cfg.max_buffer_size).fuse();
         Connection {
             id,
             mode,
@@ -397,9 +396,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
 
             if let Poll::Ready(frame) = inbound_frame {
                 if let Some(stream) = self.on_frame(frame).await? {
+                    self.socket.get_mut().flush().await.or(Err(ConnectionError::Closed))?;
                     return Ok(Some(stream))
                 }
             }
+
+            self.socket.get_mut().flush().await.or(Err(ConnectionError::Closed))?
         }
     }
 
@@ -425,7 +427,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 let id = self.next_stream_id()?;
                 let mut frame = Frame::window_update(id, self.config.receive_window);
                 frame.header_mut().syn();
-                self.socket.send(frame.cast()).await.or(Err(ConnectionError::Closed))?;
+                self.socket.get_mut().send(&frame).await.or(Err(ConnectionError::Closed))?;
                 let stream = {
                     let config = self.config.clone();
                     let sender = self.stream_sender.clone();
@@ -439,8 +441,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                     self.streams.remove(&id.val());
                     let mut header = Header::data(id, 0);
                     header.rst();
-                    let frame = Frame::new(header).cast();
-                    self.socket.send(frame).await.or(Err(ConnectionError::Closed))?
+                    let frame = Frame::new(header);
+                    self.socket.get_mut().send(&frame).await.or(Err(ConnectionError::Closed))?
                 }
             }
             Some(ControlCommand::CloseConnection(reply)) => {
@@ -461,7 +463,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 // No further processing of commands of any kind or incoming frames
                 // will happen.
                 debug_assert!(self.shutdown.is_complete());
-                self.socket.close().await.or(Err(ConnectionError::Closed))?;
+                self.socket.get_mut().close().await.or(Err(ConnectionError::Closed))?;
                 return Err(ConnectionError::Closed)
             }
         }
@@ -473,14 +475,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         match cmd {
             Some(StreamCommand::SendFrame(frame)) => {
                 log::trace!("{}: sending: {}", self.id, frame.header());
-                self.socket.send(frame).await.or(Err(ConnectionError::Closed))?
+                self.socket.get_mut().send(&frame).await.or(Err(ConnectionError::Closed))?
             }
             Some(StreamCommand::CloseStream(id)) => {
                 log::trace!("{}: closing stream {} of {}", self.id, id, self);
                 let mut header = Header::data(id, 0);
                 header.fin();
-                let frame = Frame::new(header).cast();
-                self.socket.send(frame).await.or(Err(ConnectionError::Closed))?
+                let frame = Frame::new(header);
+                self.socket.get_mut().send(&frame).await.or(Err(ConnectionError::Closed))?
             }
             None => {
                 // We only get to this point when `self.stream_receiver`
@@ -490,8 +492,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 // closure.
                 debug_assert!(self.shutdown.is_in_progress());
                 log::debug!("{}: closing {}", self.id, self);
-                let frame = Frame::term().cast();
-                self.socket.send(frame).await.or(Err(ConnectionError::Closed))?;
+                let frame = Frame::term();
+                self.socket.get_mut().send(&frame).await.or(Err(ConnectionError::Closed))?;
                 let shutdown = std::mem::replace(&mut self.shutdown, Shutdown::Complete);
                 if let Shutdown::InProgress(tx) = shutdown {
                     // Inform the `Control` that initiated the shutdown.
@@ -529,19 +531,19 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                     }
                     Action::Update(f) => {
                         log::trace!("{}/{}: sending update", self.id, f.header().stream_id());
-                        self.socket.send(f.cast()).await.or(Err(ConnectionError::Closed))?
+                        self.socket.get_mut().send(&f).await.or(Err(ConnectionError::Closed))?
                     }
                     Action::Ping(f) => {
                         log::trace!("{}/{}: pong", self.id, f.header().stream_id());
-                        self.socket.send(f.cast()).await.or(Err(ConnectionError::Closed))?
+                        self.socket.get_mut().send(&f).await.or(Err(ConnectionError::Closed))?
                     }
                     Action::Reset(f) => {
                         log::trace!("{}/{}: sending reset", self.id, f.header().stream_id());
-                        self.socket.send(f.cast()).await.or(Err(ConnectionError::Closed))?
+                        self.socket.get_mut().send(&f).await.or(Err(ConnectionError::Closed))?
                     }
                     Action::Terminate(f) => {
                         log::trace!("{}: sending term", self.id);
-                        self.socket.send(f.cast()).await.or(Err(ConnectionError::Closed))?
+                        self.socket.get_mut().send(&f).await.or(Err(ConnectionError::Closed))?
                     }
                 }
                 Ok(None)
@@ -771,7 +773,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                     State::Open => {
                         let mut header = Header::data(stream_id, 0);
                         header.rst();
-                        Some(Frame::new(header).cast())
+                        Some(Frame::new(header))
                     }
                     // The stream was dropped without calling `poll_close`.
                     // We have already received a FIN from remote and send one
@@ -779,7 +781,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                     State::RecvClosed => {
                         let mut header = Header::data(stream_id, 0);
                         header.fin();
-                        Some(Frame::new(header).cast())
+                        Some(Frame::new(header))
                     }
                     // The stream was properly closed. We either already have
                     // or will at some later point send our FIN frame.
@@ -792,7 +794,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                             // which we will never send, so reset the stream now.
                             let mut header = Header::data(stream_id, 0);
                             header.rst();
-                            Some(Frame::new(header).cast())
+                            Some(Frame::new(header))
                         } else {
                             // The remote is not blocked as we send window updates
                             // for as long as we know the stream. For unknown streams
@@ -815,7 +817,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 frame
             };
             if let Some(f) = frame {
-                self.socket.send(f).await.or(Err(ConnectionError::Closed))?
+                self.socket.get_mut().send(&f).await.or(Err(ConnectionError::Closed))?
             }
             self.garbage.push(stream_id)
         }

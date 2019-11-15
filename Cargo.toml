@@ -10,8 +10,7 @@ edition = "2018"
 
 [dependencies]
 bytes = "0.4.12"
-futures-preview = "0.3.0-alpha.19"
-futures_codec = "0.3"
+futures = "0.3.1"
 log = "0.4.8"
 nohash-hasher = "0.1.2"
 parking_lot = "0.9"
@@ -20,11 +19,10 @@ thiserror = "1.0"
 
 [dev-dependencies]
 anyhow = "1.0"
-async-std = "0.99"
+async-std = "1.0"
 criterion = "0.3"
-futures-preview = { version = "0.3.0-alpha.19", features = ["async-await"] }
+futures_codec = "0.3.1"
 quickcheck = "0.9"
-tokio = "0.2.0-alpha.6"
 
 [[bench]]
 name = "concurrent"

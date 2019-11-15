@@ -166,7 +166,7 @@ async fn bind() -> io::Result<(TcpListener, SocketAddr)> {
 }
 
 /// For each incoming stream of `c` echo back `n` frames to the sender.
-async fn repeat_echo(c: Connection<TcpStream>, n: u64) -> Result<(), ConnectionError> {
+async fn repeat_echo(c: Connection<TcpStream>, n: usize) -> Result<(), ConnectionError> {
     let c = yamux::into_stream(c);
     c.try_for_each_concurrent(None, |stream| async {
         let (os, is) = Framed::new(stream, BytesCodec {}).split();

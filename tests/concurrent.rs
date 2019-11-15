@@ -15,7 +15,7 @@ use futures_codec::{Framed, LengthCodec};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use yamux::{Config, Connection, Mode};
 
-async fn roundtrip(address: SocketAddr, nstreams: u64, data: Bytes) {
+async fn roundtrip(address: SocketAddr, nstreams: usize, data: Bytes) {
     let listener = TcpListener::bind(&address).await.expect("bind");
     let address = listener.local_addr().expect("local address");
 

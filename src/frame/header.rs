@@ -310,61 +310,43 @@ pub const RST: Flags = Flags(8);
 /// The serialised header size in bytes.
 pub const HEADER_SIZE: usize = 12;
 
-/// An encoder/decoder of [`Header`] values.
-#[derive(Debug)]
-pub struct Codec {
-    max_body_len: usize
+/// Encode a [`Header`] value.
+pub fn encode<T>(hdr: &Header<T>) -> [u8; HEADER_SIZE] {
+    let mut buf = [0; HEADER_SIZE];
+    buf[0] = hdr.version.0;
+    buf[1] = hdr.tag as u8;
+    buf[2 .. 4].copy_from_slice(&hdr.flags.0.to_be_bytes());
+    buf[4 .. 8].copy_from_slice(&hdr.stream_id.0.to_be_bytes());
+    buf[8 .. HEADER_SIZE].copy_from_slice(&hdr.length.0.to_be_bytes());
+    buf
 }
 
-impl Codec {
-    /// Create a new codec which accepts headers up to the given max. body length.
-    pub fn new(max_body_len: usize) -> Self {
-        Codec { max_body_len }
+/// Decode a [`Header`] value.
+pub fn decode<T>(buf: &[u8; HEADER_SIZE]) -> Result<Header<T>, HeaderDecodeError> {
+    if buf[0] != 0 {
+        return Err(HeaderDecodeError::Version(buf[0]))
     }
 
-    pub fn encode<T>(&self, hdr: &Header<T>) -> [u8; HEADER_SIZE] {
-        let mut buf = [0; HEADER_SIZE];
-        buf[0] = hdr.version.0;
-        buf[1] = hdr.tag as u8;
-        buf[2 .. 4].copy_from_slice(&hdr.flags.0.to_be_bytes());
-        buf[4 .. 8].copy_from_slice(&hdr.stream_id.0.to_be_bytes());
-        buf[8 .. HEADER_SIZE].copy_from_slice(&hdr.length.0.to_be_bytes());
-        buf
+    let hdr = Header {
+        version: Version(buf[0]),
+        tag: match buf[1] {
+            0 => Tag::Data,
+            1 => Tag::WindowUpdate,
+            2 => Tag::Ping,
+            3 => Tag::GoAway,
+            t => return Err(HeaderDecodeError::Type(t))
+        },
+        flags: Flags(u16::from_be_bytes([buf[2], buf[3]])),
+        stream_id: StreamId(u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]])),
+        length: Len(u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]])),
+        _marker: std::marker::PhantomData
+    };
+
+    if hdr.flags.0 > MAX_FLAG_VAL {
+        return Err(HeaderDecodeError::Flags(hdr.flags.0))
     }
 
-    pub fn decode<T>(&self, buf: [u8; HEADER_SIZE]) -> Result<Header<T>, HeaderDecodeError> {
-        if buf[0] != 0 {
-            return Err(HeaderDecodeError::Version(buf[0]))
-        }
-
-        let hdr = Header {
-            version: Version(buf[0]),
-            tag: match buf[1] {
-                0 => Tag::Data,
-                1 => Tag::WindowUpdate,
-                2 => Tag::Ping,
-                3 => Tag::GoAway,
-                t => return Err(HeaderDecodeError::Type(t))
-            },
-            flags: Flags(u16::from_be_bytes([buf[2], buf[3]])),
-            stream_id: StreamId(u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]])),
-            length: Len(u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]])),
-            _marker: std::marker::PhantomData
-        };
-
-        if Tag::Data == hdr.tag {
-            let len = crate::u32_as_usize(hdr.length.0);
-            if len > self.max_body_len {
-                return Err(HeaderDecodeError::FrameTooLarge(len))
-            }
-        }
-
-        if hdr.flags.0 > MAX_FLAG_VAL {
-            return Err(HeaderDecodeError::Flags(hdr.flags.0))
-        }
-
-        Ok(hdr)
-    }
+    Ok(hdr)
 }
 
 /// Possible errors while decoding a message frame header.
@@ -381,10 +363,6 @@ pub enum HeaderDecodeError {
     /// Unknown flags.
     #[error("unknown flags type: {:0x}", .0)]
     Flags(u16),
-
-    /// A data frame body length is larger than the configured maximum.
-    #[error("frame body is too large ({0})")]
-    FrameTooLarge(usize),
 
     #[doc(hidden)]
     #[error("__Nonexhaustive")]
@@ -417,11 +395,8 @@ mod tests {
 
     #[test]
     fn encode_decode_identity() {
-        fn property(mut hdr: Header<()>, len: u32) -> bool {
-            let codec = Codec::new(crate::u32_as_usize(len));
-            hdr.length = Len(std::cmp::min(hdr.length.0, len));
-            let bytes = codec.encode(&hdr);
-            match codec.decode(bytes) {
+        fn property(hdr: Header<()>) -> bool {
+            match decode(&encode(&hdr)) {
                 Ok(x) => x == hdr,
                 Err(e) => {
                     eprintln!("decode error: {}", e);
@@ -431,7 +406,7 @@ mod tests {
         }
         QuickCheck::new()
             .tests(10_000)
-            .quickcheck(property as fn(Header<()>, u32) -> bool)
+            .quickcheck(property as fn(Header<()>) -> bool)
     }
 }
 
