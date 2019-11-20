@@ -77,11 +77,10 @@
 //   to be merged into `tokio` and depending on this large crate is not
 //   attractive, especially given the dire situation around cargo's flag
 //   resolution.
-// - Instead of sending data over the I/O resource with `SinkExt::send` a
-//   custom send operation could be used that does not always perform an
-//   implicit flush. This also requires adding a `StreamCommand::Flush` so
-//   that `Stream`s can trigger a flush, which they would have to when they
-//   run out of credit, or else a `SinkExt::send_all` might never finish.
+// - Flushing could be optimised. This would also require adding a
+//   `StreamCommand::Flush` so that `Stream`s can trigger a flush, which
+//   they would have to when they run out of credit, or else a series of
+//   send operations might never finish.
 // - If Rust gets async destructors, the `garbage_collect()` method can be
 //   removed. Instead a `Stream` would send a `StreamCommand::Dropped(..)`
 //   or something similar and the removal logic could happen within regular

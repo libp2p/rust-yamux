@@ -111,7 +111,7 @@ impl Stream {
     }
 
     /// Get this stream's state.
-    pub fn state(&self) -> State {
+    pub(crate) fn state(&self) -> State {
         self.shared().state()
     }
 

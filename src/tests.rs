@@ -8,16 +8,14 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-#![type_length_limit="1162088"]
-
 use async_std::{net::{TcpStream, TcpListener}, task};
 use bytes::Bytes;
+use crate::{Config, Connection, ConnectionError, Mode, Control, State};
 use futures::{future, prelude::*};
 use futures_codec::{BytesCodec, Framed};
 use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};
 use rand::Rng;
 use std::{fmt::Debug, io, net::{Ipv4Addr, SocketAddr, SocketAddrV4}};
-use yamux::{Config, Connection, ConnectionError, Mode, Control, State};
 
 #[test]
 fn prop_send_recv() {
@@ -41,7 +39,7 @@ fn prop_send_recv() {
                 let socket = TcpStream::connect(address).await.expect("connect");
                 let connection = Connection::new(socket, Config::default(), Mode::Client);
                 let control = connection.control();
-                task::spawn(yamux::into_stream(connection).for_each(|_| future::ready(())));
+                task::spawn(crate::into_stream(connection).for_each(|_| future::ready(())));
                 send_recv(control, iter.clone()).await.expect("send_recv")
             };
 
@@ -74,7 +72,7 @@ fn prop_max_streams() {
             let socket = TcpStream::connect(address).await.expect("connect");
             let connection = Connection::new(socket, cfg, Mode::Client);
             let mut control = connection.control();
-            task::spawn(yamux::into_stream(connection).for_each(|_| future::ready(())));
+            task::spawn(crate::into_stream(connection).for_each(|_| future::ready(())));
             let mut v = Vec::new();
             for _ in 0 .. max_streams {
                 v.push(control.open_stream().await.expect("open_stream"))
@@ -103,7 +101,7 @@ fn prop_send_recv_half_closed() {
                 let mut stream = connection.next_stream().await
                     .expect("S: next_stream")
                     .expect("S: some stream");
-                task::spawn(yamux::into_stream(connection).for_each(|_| future::ready(())));
+                task::spawn(crate::into_stream(connection).for_each(|_| future::ready(())));
                 let mut buf = vec![0; msg_len];
                 stream.read_exact(&mut buf).await.expect("S: read_exact");
                 stream.write_all(&buf).await.expect("S: send");
@@ -115,7 +113,7 @@ fn prop_send_recv_half_closed() {
                 let socket = TcpStream::connect(address).await.expect("connect");
                 let connection = Connection::new(socket, Config::default(), Mode::Client);
                 let mut control = connection.control();
-                task::spawn(yamux::into_stream(connection).for_each(|_| future::ready(())));
+                task::spawn(crate::into_stream(connection).for_each(|_| future::ready(())));
                 let mut stream = control.open_stream().await.expect("C: open_stream");
                 stream.write_all(&msg.0).await.expect("C: send");
                 stream.close().await.expect("C: close");
@@ -167,7 +165,7 @@ async fn bind() -> io::Result<(TcpListener, SocketAddr)> {
 
 /// For each incoming stream of `c` echo back `n` frames to the sender.
 async fn repeat_echo(c: Connection<TcpStream>, n: usize) -> Result<(), ConnectionError> {
-    let c = yamux::into_stream(c);
+    let c = crate::into_stream(c);
     c.try_for_each_concurrent(None, |stream| async {
         let (os, is) = Framed::new(stream, BytesCodec {}).split();
         is.take(n).forward(os).await?;
