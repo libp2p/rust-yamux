@@ -103,6 +103,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                         let b = this.buffer.bytes_mut();
                         let n = ready!(Pin::new(this.io.get_mut()).poll_read(cx, b)?);
                         if n == 0 {
+                            if this.header.is_none() && this.buffer.is_empty() {
+                                return Poll::Ready(None)
+                            }
                             let e = FrameDecodeError::Io(io::ErrorKind::UnexpectedEof.into());
                             return Poll::Ready(Some(Err(e)))
                         }
