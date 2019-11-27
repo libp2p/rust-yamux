@@ -11,7 +11,7 @@
 use bytes::{BufMut, BytesMut};
 use crate::u32_as_usize;
 use futures::{io::BufWriter, prelude::*, ready};
-use std::{io, pin::Pin, task::{Context, Poll}};
+use std::{io, mem::MaybeUninit, pin::Pin, task::{Context, Poll}};
 use super::{Frame, header::{self, HeaderDecodeError}};
 use thiserror::Error;
 
@@ -93,7 +93,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
             match self.decode() {
                 Ok(Some(f)) => return Poll::Ready(Some(Ok(f))),
                 Ok(None) => {
-                    if self.buffer.remaining_mut() < BLOCKSIZE {
+                    if self.buffer.capacity() - self.buffer.len() < BLOCKSIZE {
                         let n = self.buffer.len();
                         self.buffer.resize(n + BLOCKSIZE, 0);
                         unsafe { self.buffer.set_len(n) }
@@ -101,6 +101,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                     unsafe {
                         let this = &mut *self;
                         let b = this.buffer.bytes_mut();
+                        let b = &mut *(b as *mut [MaybeUninit<u8>] as *mut [u8]);
                         let n = ready!(Pin::new(this.io.get_mut()).poll_read(cx, b)?);
                         if n == 0 {
                             if this.header.is_none() && this.buffer.is_empty() {
