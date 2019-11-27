@@ -23,7 +23,6 @@
 //! [1]: https://github.com/hashicorp/yamux/blob/master/spec.md
 
 mod chunks;
-mod connection;
 mod error;
 mod frame;
 mod pause;
@@ -31,7 +30,9 @@ mod pause;
 #[cfg(test)]
 mod tests;
 
-pub use crate::connection::{Connection, Mode, Control, State, Stream, into_stream};
+pub(crate) mod connection;
+
+pub use crate::connection::{Connection, Mode, Control, Stream, into_stream};
 pub use crate::error::ConnectionError;
 pub use crate::frame::{FrameDecodeError, header::{HeaderDecodeError, StreamId}};
 
