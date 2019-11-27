@@ -10,7 +10,7 @@
 
 use async_std::{net::{TcpStream, TcpListener}, task};
 use bytes::Bytes;
-use crate::{Config, Connection, ConnectionError, Mode, Control, State};
+use crate::{Config, Connection, ConnectionError, Mode, Control, connection::State};
 use futures::{future, prelude::*};
 use futures_codec::{BytesCodec, Framed};
 use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};
