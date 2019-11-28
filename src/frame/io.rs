@@ -101,7 +101,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                     unsafe {
                         let this = &mut *self;
                         let b = this.buffer.bytes_mut();
-                        let b = &mut *(b as *mut [MaybeUninit<u8>] as *mut [u8]);
+                        let b = std::mem::transmute::<&mut [MaybeUninit<u8>], &mut [u8]>(b);
                         let n = ready!(Pin::new(this.io.get_mut()).poll_read(cx, b)?);
                         if n == 0 {
                             if this.header.is_none() && this.buffer.is_empty() {
