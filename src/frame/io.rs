@@ -8,7 +8,6 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-use bytes::{BufMut, BytesMut};
 use crate::u32_as_usize;
 use futures::{io::BufWriter, prelude::*, ready};
 use std::{io, pin::Pin, task::{Context, Poll}};
@@ -23,7 +22,7 @@ const BLOCKSIZE: usize = 8 * 1024;
 #[derive(Debug)]
 pub struct Io<T> {
     io: BufWriter<T>,
-    buffer: BytesMut,
+    buffer: buf::Buffer,
     header: Option<header::Header<()>>,
     max_body_len: usize
 }
@@ -32,7 +31,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Io<T> {
     pub fn new(io: T, max_frame_body_len: usize) -> Self {
         Io {
             io: BufWriter::with_capacity(BLOCKSIZE, io),
-            buffer: BytesMut::with_capacity(BLOCKSIZE),
+            buffer: buf::Buffer::new(),
             header: None,
             max_body_len: max_frame_body_len
         }
@@ -62,7 +61,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Io<T> {
                 return Ok(None)
             }
             let mut b = [0u8; header::HEADER_SIZE];
-            b.copy_from_slice(&self.buffer.split_to(header::HEADER_SIZE));
+            b.copy_from_slice(self.buffer.split_to(header::HEADER_SIZE).as_ref());
             let header = header::decode(&b)?;
             if header.tag() != header::Tag::Data {
                 return Ok(Some(Frame::new(header)))
@@ -76,7 +75,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Io<T> {
         if let Some(header) = self.header.take() {
             let n = u32_as_usize(header.len().val());
             if n <= self.buffer.len() {
-                return Ok(Some(Frame { header, body: self.buffer.split_to(n).freeze() }))
+                let bytes = self.buffer.split_to(n).into_bytes();
+                return Ok(Some(Frame { header, body: bytes.freeze() }))
             }
             self.header = Some(header)
         }
@@ -94,26 +94,104 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                 Ok(Some(f)) => return Poll::Ready(Some(Ok(f))),
                 Ok(None) => {
                     if self.buffer.remaining_mut() < BLOCKSIZE {
-                        let n = self.buffer.len();
-                        self.buffer.resize(n + BLOCKSIZE, 0);
-                        unsafe { self.buffer.set_len(n) }
+                        self.buffer.reserve(BLOCKSIZE)
                     }
-                    unsafe {
-                        let this = &mut *self;
-                        let b = this.buffer.bytes_mut();
-                        let n = ready!(Pin::new(this.io.get_mut()).poll_read(cx, b)?);
-                        if n == 0 {
+                    let this = &mut *self;
+                    let write_buffer = this.buffer.bytes_mut();
+                    match ready!(Pin::new(this.io.get_mut()).poll_read(cx, write_buffer)?) {
+                        0 => {
                             if this.header.is_none() && this.buffer.is_empty() {
                                 return Poll::Ready(None)
                             }
                             let e = FrameDecodeError::Io(io::ErrorKind::UnexpectedEof.into());
                             return Poll::Ready(Some(Err(e)))
                         }
-                        this.buffer.advance_mut(n)
+                        n => this.buffer.advance_mut(n)
                     }
                 }
                 Err(e) => return Poll::Ready(Some(Err(e)))
             }
+        }
+    }
+}
+
+mod buf {
+    use bytes::{BufMut, BytesMut};
+    use std::{mem::{self, MaybeUninit}, ptr};
+
+    /// Wrapper around `BytesMut` with a safe API.
+    #[derive(Debug)]
+    pub struct Buffer(BytesMut);
+
+    impl Buffer {
+        /// Create a fresh empty buffer.
+        pub fn new() -> Self {
+            Buffer(BytesMut::new())
+        }
+
+        /// Is this buffer empty?
+        pub fn is_empty(&self) -> bool {
+            self.0.is_empty()
+        }
+
+        /// Buffer length in bytes.
+        pub fn len(&self) -> usize {
+            self.0.len()
+        }
+
+        /// The remaining write capacity of this buffer.
+        pub fn remaining_mut(&self) -> usize {
+            self.0.capacity() - self.0.len()
+        }
+
+        /// Set `self` to `self[n ..]` and return `self[.. n]`.
+        pub fn split_to(&mut self, n: usize) -> Self {
+            Buffer(self.0.split_to(n))
+        }
+
+        /// Extract the underlying storage bytes.
+        pub fn into_bytes(self) -> BytesMut {
+            self.0
+        }
+
+        /// Reserve and initialise more capacity.
+        pub fn reserve(&mut self, additional: usize) {
+            let old = self.0.capacity();
+            self.0.reserve(additional);
+            let new = self.0.capacity();
+            if new > old {
+                let b = self.0.bytes_mut();
+                unsafe {
+                    // Safe because we never read from `b` and stay within
+                    // the boundaries of `b` when writing.
+                    ptr::write_bytes(b.as_mut_ptr(), 0, b.len())
+                }
+            }
+        }
+
+        /// Get a mutable handle to the remaining write capacity.
+        pub fn bytes_mut(&mut self) -> &mut [u8] {
+            let b = self.0.bytes_mut();
+            unsafe {
+                // Safe because `reserve` always initialises memory.
+                mem::transmute::<&mut [MaybeUninit<u8>], &mut [u8]>(b)
+            }
+        }
+
+        /// Increment the buffer length by `n` bytes.
+        pub fn advance_mut(&mut self, n: usize) {
+            assert!(n <= self.remaining_mut(), "{} > {}", n, self.remaining_mut());
+            unsafe {
+                // Safe because we have established that `n` does not exceed
+                // the remaining capacity.
+                self.0.advance_mut(n)
+            }
+        }
+    }
+
+    impl AsRef<[u8]> for Buffer {
+        fn as_ref(&self) -> &[u8] {
+            self.0.as_ref()
         }
     }
 }

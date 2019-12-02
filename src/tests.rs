@@ -9,10 +9,8 @@
 // at https://opensource.org/licenses/MIT.
 
 use async_std::{net::{TcpStream, TcpListener}, task};
-use bytes::Bytes;
 use crate::{Config, Connection, ConnectionError, Mode, Control, connection::State};
 use futures::{future, prelude::*};
-use futures_codec::{BytesCodec, Framed};
 use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};
 use rand::Rng;
 use std::{fmt::Debug, io, net::{Ipv4Addr, SocketAddr, SocketAddrV4}};
@@ -25,14 +23,14 @@ fn prop_send_recv() {
         }
         task::block_on(async move {
             let num_requests = msgs.len();
-            let iter = msgs.into_iter().map(Bytes::from);
+            let iter = msgs.into_iter().map(|m| m.0);
 
             let (listener, address) = bind().await.expect("bind");
 
             let server = async {
                 let socket = listener.accept().await.expect("accept").0;
                 let connection = Connection::new(socket, Config::default(), Mode::Server);
-                repeat_echo(connection, 1).await.expect("repeat_echo")
+                repeat_echo(connection).await.expect("repeat_echo")
             };
 
             let client = async {
@@ -64,7 +62,7 @@ fn prop_max_streams() {
             let server = async move {
                 let socket = listener.accept().await.expect("accept").0;
                 let connection = Connection::new(socket, cfg_s, Mode::Server);
-                repeat_echo(connection, 1).await
+                repeat_echo(connection).await
             };
 
             task::spawn(server);
@@ -134,18 +132,6 @@ fn prop_send_recv_half_closed() {
 #[derive(Clone, Debug)]
 struct Msg(Vec<u8>);
 
-impl From<Msg> for Bytes {
-    fn from(m: Msg) -> Bytes {
-        m.0.into()
-    }
-}
-
-impl AsRef<[u8]> for Msg {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
 impl Arbitrary for Msg {
     fn arbitrary<G: Gen>(g: &mut G) -> Msg {
         let n: usize = g.gen_range(1, g.size() + 1);
@@ -163,36 +149,39 @@ async fn bind() -> io::Result<(TcpListener, SocketAddr)> {
     Ok((l, a))
 }
 
-/// For each incoming stream of `c` echo back `n` frames to the sender.
-async fn repeat_echo(c: Connection<TcpStream>, n: usize) -> Result<(), ConnectionError> {
+/// For each incoming stream of `c` echo back to the sender.
+async fn repeat_echo(c: Connection<TcpStream>) -> Result<(), ConnectionError> {
     let c = crate::into_stream(c);
-    c.try_for_each_concurrent(None, |stream| async {
-        let (os, is) = Framed::new(stream, BytesCodec {}).split();
-        is.take(n).forward(os).await?;
+    c.try_for_each_concurrent(None, |mut stream| async move {
+        {
+            let (mut r, mut w) = (&mut stream).split();
+            futures::io::copy(&mut r, &mut w).await?;
+        }
+        stream.close().await?;
         Ok(())
     })
-    .await?;
-    Ok(())
+    .await
 }
 
 /// For each message in `iter`, open a new stream, send the message and
 /// collect the response. The sequence of responses will be returned.
-async fn send_recv<I>(mut control: Control, iter: I) -> Result<Vec<Bytes>, ConnectionError>
+async fn send_recv<I>(mut control: Control, iter: I) -> Result<Vec<Vec<u8>>, ConnectionError>
 where
-    I: Iterator<Item = Bytes>
+    I: Iterator<Item = Vec<u8>>
 {
     let mut result = Vec::new();
     for msg in iter {
-        let stream = control.open_stream().await?;
+        let mut stream = control.open_stream().await?;
         log::debug!("C: new stream: {}", stream);
         let id = stream.id();
         let len = msg.len();
-        let mut codec = Framed::new(stream, BytesCodec {});
-        codec.send(msg).await?;
+        stream.write_all(&msg).await?;
         log::debug!("C: {}: sent {} bytes", id, len);
-        let data: Vec<Bytes> = codec.try_collect().await?;
-        log::debug!("C: received {} bytes", data.len());
-        result.extend(data)
+        stream.close().await?;
+        let mut data = Vec::new();
+        stream.read_to_end(&mut data).await?;
+        log::debug!("C: {}: received {} bytes", id, data.len());
+        result.push(data)
     }
     log::debug!("C: closing connection");
     control.close().await?;

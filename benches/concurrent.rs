@@ -12,8 +12,7 @@ use async_std::task;
 use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, Criterion};
 use futures::{channel::mpsc, future, prelude::*, ready};
-use futures_codec::{Framed, LengthCodec};
-use std::{fmt, io, iter, pin::Pin, task::{Context, Poll}};
+use std::{fmt, io, pin::Pin, task::{Context, Poll}};
 use yamux::{Config, Connection, Mode};
 
 criterion_group!(benches, concurrent);
@@ -68,9 +67,12 @@ async fn roundtrip(nstreams: usize, nmessages: usize, data: Bytes, send_all: boo
 
     let server = async move {
         yamux::into_stream(Connection::new(server, Config::default(), Mode::Server))
-            .try_for_each_concurrent(None, |stream| async {
-                let (os, is) = Framed::new(stream, LengthCodec).split();
-                is.forward(os).await?;
+            .try_for_each_concurrent(None, |mut stream| async move {
+                {
+                    let (mut r, mut w) = (&mut stream).split();
+                    futures::io::copy(&mut r, &mut w).await?;
+                }
+                stream.close().await?;
                 Ok(())
             })
             .await
@@ -89,32 +91,34 @@ async fn roundtrip(nstreams: usize, nmessages: usize, data: Bytes, send_all: boo
         let tx = tx.clone();
         let mut ctrl = ctrl.clone();
         task::spawn(async move {
-            let stream = ctrl.open_stream().await.expect("open stream");
-            let (mut os, mut is) = Framed::new(stream, LengthCodec).split();
+            let mut stream = ctrl.open_stream().await?;
             if send_all {
                 // Send `nmessages` messages and receive `nmessages` messages.
-                os.send_all(&mut stream::repeat(data).map(Ok).take(nmessages))
-                    .await
-                    .expect("send_all");
-                os.close().await.expect("close");
-                let n = is.try_fold(0, |n, d| future::ready(Ok(n + d.len())))
-                    .await
-                    .expect("try_fold");
+                for _ in 0 .. nmessages {
+                    stream.write_all(&data).await?
+                }
+                stream.close().await?;
+                let mut n = 0;
+                let mut b = vec![0; data.len()];
+                loop {
+                    let k = stream.read(&mut b).await?;
+                    if k == 0 { break }
+                    n += k
+                }
                 tx.unbounded_send(n).expect("unbounded_send")
             } else {
                 // Send and receive `nmessages` messages.
                 let mut n = 0;
-                for m in iter::repeat(data).take(nmessages) {
-                    os.send(m).await.expect("send");
-                    if let Some(d) = is.try_next().await.expect("receive") {
-                        n += d.len()
-                    } else {
-                        break
-                    }
+                let mut b = vec![0; data.len()];
+                for _ in 0 .. nmessages {
+                    stream.write_all(&data).await?;
+                    stream.read_exact(&mut b[..]).await?;
+                    n += b.len()
                 }
-                os.close().await.expect("close");
+                stream.close().await?;
                 tx.unbounded_send(n).expect("unbounded_send");
             }
+            Ok::<(), yamux::ConnectionError>(())
         });
     }
 
@@ -158,7 +162,7 @@ impl AsyncWrite for Endpoint {
             return Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into()))
         }
         let n = buf.len();
-        if Pin::new(&mut self.outgoing).start_send(Bytes::from(buf)).is_err() {
+        if Pin::new(&mut self.outgoing).start_send(Bytes::copy_from_slice(buf)).is_err() {
             return Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into()))
         }
         Poll::Ready(Ok(n))

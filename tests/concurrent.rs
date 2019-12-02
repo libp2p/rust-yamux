@@ -11,7 +11,6 @@
 use async_std::{net::{TcpStream, TcpListener}, task};
 use bytes::Bytes;
 use futures::{channel::mpsc, prelude::*};
-use futures_codec::{Framed, LengthCodec};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use yamux::{Config, Connection, Mode};
 
@@ -22,10 +21,14 @@ async fn roundtrip(address: SocketAddr, nstreams: usize, data: Bytes) {
     let server = async move {
         let socket = listener.accept().await.expect("accept").0;
         yamux::into_stream(Connection::new(socket, Config::default(), Mode::Server))
-            .try_for_each_concurrent(None, |stream| async {
+            .try_for_each_concurrent(None, |mut stream| async move {
                 log::debug!("S: accepted new stream");
-                let (os, is) = Framed::new(stream, LengthCodec).split();
-                is.forward(os).await?;
+                let mut len = [0; 4];
+                stream.read_exact(&mut len).await?;
+                let mut buf = vec![0; u32::from_be_bytes(len) as usize];
+                stream.read_exact(&mut buf).await?;
+                stream.write_all(&buf).await?;
+                stream.close().await?;
                 Ok(())
             })
             .await
@@ -44,14 +47,18 @@ async fn roundtrip(address: SocketAddr, nstreams: usize, data: Bytes) {
         let tx = tx.clone();
         let mut ctrl = ctrl.clone();
         task::spawn(async move {
-            let stream = ctrl.open_stream().await.expect("open stream");
-            log::debug!("C: opened new stream");
-            let (mut os, is) = Framed::new(stream, LengthCodec).split();
-            os.send(data.clone()).await.expect("send");
-            os.close().await.expect("close");
-            let frame = is.try_concat().await.expect("try_concat");
-            assert_eq!(data, frame);
-            tx.unbounded_send(1).expect("mpsc send")
+            let mut stream = ctrl.open_stream().await?;
+            log::debug!("C: opened new stream {}", stream.id());
+            stream.write_all(&(data.len() as u32).to_be_bytes()[..]).await?;
+            stream.write_all(&data).await?;
+            stream.close().await?;
+            log::debug!("C: {}: wrote {} bytes", stream.id(), data.len());
+            let mut frame = vec![0; data.len()];
+            stream.read_exact(&mut frame).await?;
+            log::debug!("C: {}: read {} bytes", stream.id(), frame.len());
+            assert_eq!(data, &frame[..]);
+            tx.unbounded_send(1).expect("unbounded_send");
+            Ok::<(), yamux::ConnectionError>(())
         });
     }
     let n = rx.take(nstreams).fold(0, |acc, n| future::ready(acc + n)).await;
