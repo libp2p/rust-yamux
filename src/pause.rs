@@ -74,3 +74,23 @@ impl<S: FusedStream + Unpin> FusedStream for Pausable<S> {
         self.stream.is_terminated()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use futures::prelude::*;
+    use super::Pausable;
+
+    #[test]
+    fn pause_unpause() {
+        // The stream produced by `futures::stream::iter` is always ready.
+        let mut stream = Pausable::new(futures::stream::iter(&[1, 2, 3, 4]));
+        assert_eq!(Some(Some(&1)), stream.next().now_or_never());
+        assert_eq!(Some(Some(&2)), stream.next().now_or_never());
+        stream.pause();
+        assert_eq!(None, stream.next().now_or_never());
+        stream.unpause();
+        assert_eq!(Some(Some(&3)), stream.next().now_or_never());
+        assert_eq!(Some(Some(&4)), stream.next().now_or_never());
+        assert_eq!(Some(None), stream.next().now_or_never()) // end of stream
+    }
+}
