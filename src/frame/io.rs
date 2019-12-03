@@ -69,6 +69,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Io<T> {
             if u32_as_usize(header.len().val()) > self.max_body_len {
                 return Err(FrameDecodeError::FrameTooLarge(u32_as_usize(header.len().val())))
             }
+            self.buffer.reserve(u32_as_usize(header.len().val()));
             self.header = Some(header)
         }
 
