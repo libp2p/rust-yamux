@@ -109,7 +109,7 @@ use nohash_hasher::IntMap;
 use std::{fmt, sync::Arc, task::{Context, Poll}};
 
 pub use control::Control;
-pub use stream::{State, Stream};
+pub use stream::{Packet, State, Stream};
 
 /// Arbitrary limit of our internal command channels.
 ///

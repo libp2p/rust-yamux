@@ -69,7 +69,7 @@ async fn roundtrip(nstreams: usize, nmessages: usize, data: Bytes, send_all: boo
         yamux::into_stream(Connection::new(server, Config::default(), Mode::Server))
             .try_for_each_concurrent(None, |mut stream| async move {
                 {
-                    let (mut r, mut w) = (&mut stream).split();
+                    let (mut r, mut w) = futures::io::AsyncReadExt::split(&mut stream);
                     futures::io::copy(&mut r, &mut w).await?;
                 }
                 stream.close().await?;
