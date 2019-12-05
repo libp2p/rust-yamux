@@ -154,7 +154,7 @@ async fn repeat_echo(c: Connection<TcpStream>) -> Result<(), ConnectionError> {
     let c = crate::into_stream(c);
     c.try_for_each_concurrent(None, |mut stream| async move {
         {
-            let (mut r, mut w) = (&mut stream).split();
+            let (mut r, mut w) = futures::io::AsyncReadExt::split(&mut stream);
             futures::io::copy(&mut r, &mut w).await?;
         }
         stream.close().await?;

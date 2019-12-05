@@ -60,6 +60,9 @@ impl State {
 ///
 /// Streams are created either outbound via [`crate::Control::open_stream`]
 /// or inbound via [`crate::Connection::next_stream`].
+///
+/// `Stream` implements [`AsyncRead`] and [`AsyncWrite`] and also
+/// [`futures::stream::Stream`].
 pub struct Stream {
     id: StreamId,
     conn: connection::Id,
@@ -140,6 +143,76 @@ impl Stream {
     }
 }
 
+/// Byte data produced by the [`futures::stream::Stream`] impl of [`Stream`].
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Packet(Bytes);
+
+impl AsRef<[u8]> for Packet {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+}
+
+impl futures::stream::Stream for Stream {
+    type Item = io::Result<Packet>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        if !self.config.read_after_close && self.sender.is_closed() {
+            return Poll::Ready(None)
+        }
+
+        // Try to deliver any pending window updates first.
+        if self.pending.is_some() {
+            ready!(self.sender.poll_ready(cx).map_err(|_| self.write_zero_err())?);
+            let frm = self.pending.take().expect("pending.is_some()");
+            let cmd = StreamCommand::SendFrame(frm.cast());
+            self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?
+        }
+
+        // We need to limit the `shared` `MutexGuard` scope, or else we run into
+        // borrow check troubles further down.
+        {
+            let mut shared = self.shared();
+
+            if let Some(bytes) = shared.buffer.pop() {
+                return Poll::Ready(Some(Ok(Packet(bytes))))
+            }
+
+            // Buffer is empty, let's check if we can expect to read more data.
+            if !shared.state().can_read() {
+                log::debug!("{}/{}: eof", self.conn, self.id);
+                return Poll::Ready(None) // stream has been reset
+            }
+
+            // Since we have no more data at this point, we want to be woken up
+            // by the connection when more becomes available for us.
+            shared.reader = Some(cx.waker().clone());
+
+            // Finally, let's see if we need to send a window update to the remote.
+            if self.config.window_update_mode != WindowUpdateMode::OnRead || shared.window > 0 {
+                // No, time to go.
+                return Poll::Pending
+            }
+
+            shared.window = self.config.receive_window
+        }
+
+        // At this point we know we have to send a window update to the remote.
+        let frame = Frame::window_update(self.id, self.config.receive_window);
+        match self.sender.poll_ready(cx).map_err(|_| self.write_zero_err())? {
+            Poll::Ready(()) => {
+                let cmd = StreamCommand::SendFrame(frame.cast());
+                self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?
+            }
+            Poll::Pending => self.pending = Some(frame)
+        }
+
+        Poll::Pending
+    }
+}
+
+// Like the `futures::stream::Stream` impl above, but copies bytes into the
+// provided mutable slice.
 impl AsyncRead for Stream {
     fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context, buf: &mut [u8]) -> Poll<io::Result<usize>> {
         if !self.config.read_after_close && self.sender.is_closed() {
