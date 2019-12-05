@@ -1,3 +1,30 @@
+# 0.3.0
+
+Update to use and work with async/await:
+
+- `Config::set_max_pending_frames` has been removed. Internal back-pressure
+  made the setting unnecessary. As another consequence the error
+  `ConnectionError::TooManyPendingFrames` has been removed.
+- `Connection` no longer has methods to open a new stream or to close the
+  connection. Instead a separate handle type `Control` has been added which
+  allows these operations concurrently to the connection itself.
+- In Yamux 0.2.x every `StreamHandle` I/O operation would drive the
+  `Connection`. Now, the only way the `Connection` makes progress is through
+  its `next_stream` method which must be called continuously. For convenience
+  a function `into_stream` has been added which turns the `Connection` into
+  a `futures::stream::Stream` impl, invoking `next_stream` in its `poll_next`
+  method.
+- `StreamHandle` has been renamed to `Stream` and its methods `credit` and
+  `state` have been removed.
+- `Stream` also implements `futures::stream::Stream` and produces `Packet`s.
+- `ConnectionError::StreamNotFound` has been removed. Incoming frames for
+  unknown streams are answered with a RESET frame, unless they finish the
+  stream.
+- `DecodeError` has been renamed to `FrameDecodeError` and `DecodeError::Type`
+  corresponds to `FramedDecodeError::Header` which handles not just unknown
+  frame type errors, but more. Hence a new error `HeaderDecodeError` has been
+  added for those error cases.
+
 # 0.2.2
 
 - Updated dependencies (#56).

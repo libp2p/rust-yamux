@@ -4,6 +4,8 @@ version = "0.3.0"
 authors = ["Parity Technologies <admin@parity.io>"]
 license = "Apache-2.0 OR MIT"
 description = "Multiplexer over reliable, ordered connections"
+keywords = ["network", "protocol"]
+categories = ["network-programming"]
 repository = "https://github.com/paritytech/yamux"
 readme = "README.md"
 edition = "2018"
@@ -15,10 +17,10 @@ log = "0.4.8"
 nohash-hasher = "0.1.2"
 parking_lot = "0.9"
 rand = "0.7.2"
-thiserror = "1.0"
+thiserror = "1"
 
 [dev-dependencies]
-anyhow = "1.0"
+anyhow = "1"
 async-std = "1"
 criterion = "0.3"
 quickcheck = "0.9"
