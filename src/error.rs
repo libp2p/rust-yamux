@@ -12,6 +12,7 @@ use crate::frame::FrameDecodeError;
 use thiserror::Error;
 
 /// The various error cases a connection may encounter.
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum ConnectionError {
     /// An underlying I/O error occured.
@@ -32,11 +33,7 @@ pub enum ConnectionError {
 
     /// Too many streams are open, so no further ones can be opened at this time.
     #[error("maximum number of streams reached")]
-    TooManyStreams,
-
-    #[doc(hidden)]
-    #[error("__Nonexhaustive")]
-    __Nonexhaustive
+    TooManyStreams
 }
 
 impl From<futures::channel::mpsc::SendError> for ConnectionError {
