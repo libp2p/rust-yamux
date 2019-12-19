@@ -350,6 +350,7 @@ pub fn decode<T>(buf: &[u8; HEADER_SIZE]) -> Result<Header<T>, HeaderDecodeError
 }
 
 /// Possible errors while decoding a message frame header.
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum HeaderDecodeError {
     /// Unknown version.
@@ -362,11 +363,7 @@ pub enum HeaderDecodeError {
 
     /// Unknown flags.
     #[error("unknown flags type: {:0x}", .0)]
-    Flags(u16),
-
-    #[doc(hidden)]
-    #[error("__Nonexhaustive")]
-    __Nonexhaustive
+    Flags(u16)
 }
 
 #[cfg(test)]

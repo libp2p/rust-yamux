@@ -198,6 +198,7 @@ mod buf {
 }
 
 /// Possible errors while decoding a message frame.
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum FrameDecodeError {
     /// An I/O error.
@@ -210,11 +211,7 @@ pub enum FrameDecodeError {
 
     /// A data frame body length is larger than the configured maximum.
     #[error("frame body is too large ({0})")]
-    FrameTooLarge(usize),
-
-    #[doc(hidden)]
-    #[error("__Nonexhaustive")]
-    __Nonexhaustive
+    FrameTooLarge(usize)
 }
 
 #[cfg(test)]
