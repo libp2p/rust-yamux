@@ -1,4 +1,4 @@
-// Copyright 2018 Parity Technologies (UK) Ltd.
+// Copyright (c) 2018-2019 Parity Technologies (UK) Ltd.
 //
 // Licensed under the Apache License, Version 2.0 or MIT license, at your option.
 //
@@ -8,59 +8,42 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-use crate::stream;
-use quick_error::quick_error;
-use std::io;
+use crate::frame::FrameDecodeError;
+use thiserror::Error;
 
-quick_error! {
-    #[derive(Debug)]
-    pub enum DecodeError {
-        Io(e: io::Error) {
-            display("i/o error: {}", e)
-            cause(e)
-            from()
-        }
-        Type(t: u8) {
-            display("unkown type: {}", t)
-        }
-        FrameTooLarge(n: usize) {
-            display("frame body is too large ({})", n)
-        }
-        #[doc(hidden)]
-        __Nonexhaustive
+/// The various error cases a connection may encounter.
+#[non_exhaustive]
+#[derive(Debug, Error)]
+pub enum ConnectionError {
+    /// An underlying I/O error occured.
+    #[error("i/o error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// Decoding a Yamux message frame failed.
+    #[error("decode error: {0}")]
+    Decode(#[from] FrameDecodeError),
+
+    /// The whole range of stream IDs has been used up.
+    #[error("number of stream ids has been exhausted")]
+    NoMoreStreamIds,
+
+    /// An operation fails because the connection is closed.
+    #[error("connection is closed")]
+    Closed,
+
+    /// Too many streams are open, so no further ones can be opened at this time.
+    #[error("maximum number of streams reached")]
+    TooManyStreams
+}
+
+impl From<futures::channel::mpsc::SendError> for ConnectionError {
+    fn from(_: futures::channel::mpsc::SendError) -> Self {
+        ConnectionError::Closed
     }
 }
 
-quick_error! {
-    #[derive(Debug)]
-    pub enum ConnectionError {
-        Io(e: io::Error) {
-            display("i/o error: {}", e)
-            cause(e)
-            from()
-        }
-        Decode(e: DecodeError) {
-            display("decode error: {}", e)
-            cause(e)
-            from()
-        }
-        NoMoreStreamIds {
-            display("number of stream ids has been exhausted")
-        }
-        Closed {
-            display("connection is closed")
-        }
-        StreamNotFound(id: stream::Id) {
-            display("stream {} not found", id)
-        }
-        TooManyStreams {
-            display("maximum number of streams exhausted")
-        }
-        TooManyPendingFrames {
-            display("maximum number of pending frames reached")
-        }
-        #[doc(hidden)]
-        __Nonexhaustive
+impl From<futures::channel::oneshot::Canceled> for ConnectionError {
+    fn from(_: futures::channel::oneshot::Canceled) -> Self {
+        ConnectionError::Closed
     }
 }
-
