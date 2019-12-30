@@ -1,3 +1,7 @@
+# 0.4.0
+
+- Hide `StreamId::new` and update dependencies.
+
 # 0.3.0
 
 Update to use and work with async/await:

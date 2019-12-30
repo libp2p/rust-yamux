@@ -252,7 +252,7 @@ pub const CONNECTION_ID: StreamId = StreamId(0);
 pub struct StreamId(u32);
 
 impl StreamId {
-    pub fn new(val: u32) -> Self {
+    pub(crate) fn new(val: u32) -> Self {
         StreamId(val)
     }
 
