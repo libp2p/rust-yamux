@@ -551,6 +551,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 log::debug!("{}: socket eof", self.id);
                 Err(ConnectionError::Closed)
             }
+            Err(e) if e.io_kind() == Some(std::io::ErrorKind::ConnectionReset) => {
+                log::debug!("{}: connection reset", self.id);
+                Err(ConnectionError::Closed)
+            }
             Err(e) => {
                 log::error!("{}: socket error: {}", self.id, e);
                 Err(e)
