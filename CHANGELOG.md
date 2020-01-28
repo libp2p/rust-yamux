@@ -1,3 +1,7 @@
+# 0.4.1
+
+- Log connection reset errors on debug level (#72).
+
 # 0.4.0
 
 - Hide `StreamId::new` and update dependencies.
