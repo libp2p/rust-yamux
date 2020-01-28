@@ -36,6 +36,17 @@ pub enum ConnectionError {
     TooManyStreams
 }
 
+impl ConnectionError {
+    /// Return the `ErrorKind` of this `ConnectionError` if it holds an I/O error.
+    pub(crate) fn io_kind(&self) -> Option<std::io::ErrorKind> {
+        match self {
+            ConnectionError::Io(e) => Some(e.kind()),
+            ConnectionError::Decode(FrameDecodeError::Io(e)) => Some(e.kind()),
+            _ => None
+        }
+    }
+}
+
 impl From<futures::channel::mpsc::SendError> for ConnectionError {
     fn from(_: futures::channel::mpsc::SendError) -> Self {
         ConnectionError::Closed
