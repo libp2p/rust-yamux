@@ -165,7 +165,7 @@ impl futures::stream::Stream for Stream {
         if self.pending.is_some() {
             ready!(self.sender.poll_ready(cx).map_err(|_| self.write_zero_err())?);
             let frm = self.pending.take().expect("pending.is_some()");
-            let cmd = StreamCommand::SendFrame(frm.cast());
+            let cmd = StreamCommand::SendFrame(frm.right());
             self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?
         }
 
@@ -201,7 +201,7 @@ impl futures::stream::Stream for Stream {
         let frame = Frame::window_update(self.id, self.config.receive_window);
         match self.sender.poll_ready(cx).map_err(|_| self.write_zero_err())? {
             Poll::Ready(()) => {
-                let cmd = StreamCommand::SendFrame(frame.cast());
+                let cmd = StreamCommand::SendFrame(frame.right());
                 self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?
             }
             Poll::Pending => self.pending = Some(frame)
@@ -223,7 +223,7 @@ impl AsyncRead for Stream {
         if self.pending.is_some() {
             ready!(self.sender.poll_ready(cx).map_err(|_| self.write_zero_err())?);
             let frm = self.pending.take().expect("pending.is_some()");
-            let cmd = StreamCommand::SendFrame(frm.cast());
+            let cmd = StreamCommand::SendFrame(frm.right());
             self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?
         }
 
@@ -275,7 +275,7 @@ impl AsyncRead for Stream {
         let frame = Frame::window_update(self.id, self.config.receive_window);
         match self.sender.poll_ready(cx).map_err(|_| self.write_zero_err())? {
             Poll::Ready(()) => {
-                let cmd = StreamCommand::SendFrame(frame.cast());
+                let cmd = StreamCommand::SendFrame(frame.right());
                 self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?
             }
             Poll::Pending => self.pending = Some(frame)
@@ -306,7 +306,7 @@ impl AsyncWrite for Stream {
         let n = body.len();
         let frame = Frame::data(self.id, body).expect("body <= u32::MAX");
         log::trace!("{}/{}: write {} bytes", self.conn, self.id, n);
-        let cmd = StreamCommand::SendFrame(frame.cast());
+        let cmd = StreamCommand::SendFrame(frame.left());
         self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?;
         Poll::Ready(Ok(n))
     }
