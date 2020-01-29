@@ -146,12 +146,22 @@ impl fmt::Display for Id {
     }
 }
 
+/// Indicate if a flag still needs to be set on an outbound header.
+enum Flag {
+    /// No flag needs to be set.
+    None,
+    /// The stream was opened lazily, so set the initial SYN flag.
+    Syn,
+    /// The stream still needs acknowledgement, so set the ACK flag.
+    Ack
+}
+
 /// Map entry holding a `Stream` plus metadata.
 struct StreamEntry {
     /// The actual stream.
     stream: Stream,
-    /// A flag to indicate if we need to set the ACK flag in an outbound frame.
-    needs_ack: bool
+    /// Do we need to set a flag on an outbound header?
+    flag: Flag
 }
 
 /// A Yamux connection object.
@@ -432,25 +442,35 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 }
                 log::trace!("{}: creating new outbound stream", self.id);
                 let id = self.next_stream_id()?;
-                let mut frame = Frame::window_update(id, self.config.receive_window);
-                frame.header_mut().syn();
-                self.socket.get_mut().send(&frame).await.or(Err(ConnectionError::Closed))?;
+                if !self.config.lazy_open {
+                    let mut frame = Frame::window_update(id, self.config.receive_window);
+                    frame.header_mut().syn();
+                    self.socket.get_mut().send(&frame).await.or(Err(ConnectionError::Closed))?
+                }
                 let stream = {
                     let config = self.config.clone();
                     let sender = self.stream_sender.clone();
                     let window = self.config.receive_window;
                     Stream::new(id, self.id, config, window, DEFAULT_CREDIT, sender)
                 };
-                let entry = StreamEntry { stream: stream.clone(), needs_ack: false };
-                self.streams.insert(id.val(), entry);
-                log::debug!("{}: new outbound {} of {}", self.id, stream, self);
-                if reply.send(Ok(stream)).is_err() {
+                if reply.send(Ok(stream.clone())).is_ok() {
+                    log::debug!("{}: new outbound {} of {}", self.id, stream, self);
+                    let entry = StreamEntry { stream,
+                        flag: if self.config.lazy_open {
+                            Flag::Syn
+                        } else {
+                            Flag::None
+                        }
+                    };
+                    self.streams.insert(id.val(), entry);
+                } else {
                     log::debug!("{}: open stream {} has been cancelled", self.id, id);
-                    self.streams.remove(&id.val());
-                    let mut header = Header::data(id, 0);
-                    header.rst();
-                    let frame = Frame::new(header);
-                    self.socket.get_mut().send(&frame).await.or(Err(ConnectionError::Closed))?
+                    if !self.config.lazy_open {
+                        let mut header = Header::data(id, 0);
+                        header.rst();
+                        let frame = Frame::new(header);
+                        self.socket.get_mut().send(&frame).await.or(Err(ConnectionError::Closed))?
+                    }
                 }
             }
             Some(ControlCommand::CloseConnection(reply)) => {
@@ -482,9 +502,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     async fn on_stream_command(&mut self, cmd: Option<StreamCommand>) -> Result<()> {
         match cmd {
             Some(StreamCommand::SendFrame(mut frame)) => {
-                if self.ack(frame.header().stream_id()) {
-                    frame.header_mut().ack();
-                }
+                self.set_flag(frame.header_mut());
                 log::trace!("{}: sending: {}", self.id, frame.header());
                 self.socket.get_mut().send(&frame).await.or(Err(ConnectionError::Closed))?
             }
@@ -492,9 +510,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 log::trace!("{}: closing stream {} of {}", self.id, id, self);
                 let mut header = Header::data(id, 0);
                 header.fin();
-                if self.ack(id) {
-                    header.ack()
-                }
+                let mut header = header.left();
+                self.set_flag(&mut header);
                 let frame = Frame::new(header);
                 self.socket.get_mut().send(&frame).await.or(Err(ConnectionError::Closed))?
             }
@@ -532,9 +549,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             Ok(Some(frame)) => {
                 log::trace!("{}: received: {}", self.id, frame.header());
                 let action = match frame.header().tag() {
-                    Tag::Data => self.on_data(frame.as_data()),
-                    Tag::WindowUpdate => self.on_window_update(&frame.as_window_update()),
-                    Tag::Ping => self.on_ping(&frame.as_ping()),
+                    Tag::Data => self.on_data(frame.into_data()),
+                    Tag::WindowUpdate => self.on_window_update(&frame.into_window_update()),
+                    Tag::Ping => self.on_ping(&frame.into_ping()),
                     Tag::GoAway => return Err(ConnectionError::Closed)
                 };
                 match action {
@@ -626,7 +643,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 shared.window = shared.window.saturating_sub(frame.body_len());
                 shared.buffer.push(frame.into_body());
             }
-            let entry = StreamEntry { stream: stream.clone(), needs_ack: true };
+            let entry = StreamEntry { stream: stream.clone(), flag: Flag::Ack };
             self.streams.insert(stream_id.val(), entry);
             return Action::New(stream)
         }
@@ -711,7 +728,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             if is_finish {
                 stream.shared().update_state(self.id, stream_id, State::RecvClosed);
             }
-            let entry = StreamEntry { stream: stream.clone(), needs_ack: true };
+            let entry = StreamEntry { stream: stream.clone(), flag: Flag::Ack };
             self.streams.insert(stream_id.val(), entry);
             return Action::New(stream)
         }
@@ -847,17 +864,27 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         Ok(())
     }
 
-    /// Set `StreamEntry::needs_ack` to false and return the previous value.
+    /// Set ACK or SYN flag if necessary.
     ///
-    /// Used to determine if an ACK flag needs to be set in an outbound frame.
-    fn ack(&mut self, id: StreamId) -> bool {
-        if let Some(entry) = self.streams.get_mut(&id.val()) {
-            if entry.needs_ack {
-                entry.needs_ack = false;
-                return true
+    /// We check if the stream was opened lazily in which case we need to
+    /// set the initial SYN flag.
+    ///
+    /// We also check if the stream still requires acknowledgement and
+    /// set the ACK flag if true.
+    fn set_flag(&mut self, header: &mut Header<Either<Data, WindowUpdate>>) {
+        if let Some(entry) = self.streams.get_mut(&header.stream_id().val()) {
+            match entry.flag {
+                Flag::None => (),
+                Flag::Syn => {
+                    header.syn();
+                    entry.flag = Flag::None
+                }
+                Flag::Ack => {
+                    header.ack();
+                    entry.flag = Flag::None
+                }
             }
         }
-        false
     }
 }
 

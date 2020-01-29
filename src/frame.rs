@@ -50,16 +50,16 @@ impl<T> Frame<T> {
 }
 
 impl Frame<()> {
-    pub(crate) fn as_data(self) -> Frame<Data> {
-        Frame { header: self.header.as_data(), body: self.body }
+    pub(crate) fn into_data(self) -> Frame<Data> {
+        Frame { header: self.header.into_data(), body: self.body }
     }
 
-    pub(crate) fn as_window_update(self) -> Frame<WindowUpdate> {
-        Frame { header: self.header.as_window_update(), body: self.body }
+    pub(crate) fn into_window_update(self) -> Frame<WindowUpdate> {
+        Frame { header: self.header.into_window_update(), body: self.body }
     }
 
-    pub(crate) fn as_ping(self) -> Frame<Ping> {
-        Frame { header: self.header.as_ping(), body: self.body }
+    pub(crate) fn into_ping(self) -> Frame<Ping> {
+        Frame { header: self.header.into_ping(), body: self.body }
     }
 }
 

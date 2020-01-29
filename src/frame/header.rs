@@ -79,17 +79,17 @@ impl<T> Header<T> {
 }
 
 impl Header<()> {
-    pub(crate) fn as_data(self) -> Header<Data> {
+    pub(crate) fn into_data(self) -> Header<Data> {
         debug_assert_eq!(self.tag, Tag::Data);
         self.cast()
     }
 
-    pub(crate) fn as_window_update(self) -> Header<WindowUpdate> {
+    pub(crate) fn into_window_update(self) -> Header<WindowUpdate> {
         debug_assert_eq!(self.tag, Tag::WindowUpdate);
         self.cast()
     }
 
-    pub(crate) fn as_ping(self) -> Header<Ping> {
+    pub(crate) fn into_ping(self) -> Header<Ping> {
         debug_assert_eq!(self.tag, Tag::Ping);
         self.cast()
     }
