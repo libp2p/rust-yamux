@@ -181,7 +181,7 @@ pub(crate) enum StreamCommand {
     /// A new frame should be sent to the remote.
     SendFrame(Frame<Either<Data, WindowUpdate>>),
     /// Close a stream.
-    CloseStream(StreamId, bool) // `true` => an ACK flag needs to be set
+    CloseStream { id: StreamId, ack: bool }
 }
 
 /// Possible actions as a result of incoming frame handling.
@@ -484,7 +484,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 log::trace!("{}: sending: {}", self.id, frame.header());
                 self.socket.get_mut().send(&frame).await.or(Err(ConnectionError::Closed))?
             }
-            Some(StreamCommand::CloseStream(id, ack)) => {
+            Some(StreamCommand::CloseStream { id, ack }) => {
                 log::trace!("{}: closing stream {} of {}", self.id, id, self);
                 let mut header = Header::data(id, 0);
                 header.fin();

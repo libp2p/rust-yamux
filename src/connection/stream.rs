@@ -368,7 +368,7 @@ impl AsyncWrite for Stream {
         } else {
             false
         };
-        let cmd = StreamCommand::CloseStream(self.id, ack);
+        let cmd = StreamCommand::CloseStream { id: self.id, ack };
         self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?;
         self.shared().update_state(self.conn, self.id, State::SendClosed);
         Poll::Ready(Ok(()))
