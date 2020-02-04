@@ -8,6 +8,7 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
+use futures::future::Either;
 use std::fmt;
 use thiserror::Error;
 
@@ -54,7 +55,8 @@ impl<T> Header<T> {
         self.length = Len(len)
     }
 
-    pub(crate) fn cast<U>(self) -> Header<U> {
+    /// Arbitrary type cast, use with caution.
+    fn cast<U>(self) -> Header<U> {
         Header {
             version: self.version,
             tag: self.tag,
@@ -63,6 +65,33 @@ impl<T> Header<T> {
             length: self.length,
             _marker: std::marker::PhantomData
         }
+    }
+
+    /// Introduce this header to the right of a binary header type.
+    pub(crate) fn right<U>(self) -> Header<Either<U, T>> {
+        self.cast()
+    }
+
+    /// Introduce this header to the left of a binary header type.
+    pub(crate) fn left<U>(self) -> Header<Either<T, U>> {
+        self.cast()
+    }
+}
+
+impl Header<()> {
+    pub(crate) fn into_data(self) -> Header<Data> {
+        debug_assert_eq!(self.tag, Tag::Data);
+        self.cast()
+    }
+
+    pub(crate) fn into_window_update(self) -> Header<WindowUpdate> {
+        debug_assert_eq!(self.tag, Tag::WindowUpdate);
+        self.cast()
+    }
+
+    pub(crate) fn into_ping(self) -> Header<Ping> {
+        debug_assert_eq!(self.tag, Tag::Ping);
+        self.cast()
     }
 }
 
@@ -195,12 +224,14 @@ pub trait HasSyn: private::Sealed {}
 impl HasSyn for Data {}
 impl HasSyn for WindowUpdate {}
 impl HasSyn for Ping {}
+impl<A: HasSyn, B: HasSyn> HasSyn for Either<A, B> {}
 
 /// Types which have an `ack` method.
 pub trait HasAck: private::Sealed {}
 impl HasAck for Data {}
 impl HasAck for WindowUpdate {}
 impl HasAck for Ping {}
+impl<A: HasAck, B: HasAck> HasAck for Either<A, B> {}
 
 /// Types which have a `fin` method.
 pub trait HasFin: private::Sealed {}
@@ -218,6 +249,7 @@ mod private {
     impl Sealed for super::Data {}
     impl Sealed for super::WindowUpdate {}
     impl Sealed for super::Ping {}
+    impl<A: Sealed, B: Sealed> Sealed for super::Either<A, B> {}
 }
 
 /// A tag is the runtime representation of a message type.
@@ -322,7 +354,7 @@ pub fn encode<T>(hdr: &Header<T>) -> [u8; HEADER_SIZE] {
 }
 
 /// Decode a [`Header`] value.
-pub fn decode<T>(buf: &[u8; HEADER_SIZE]) -> Result<Header<T>, HeaderDecodeError> {
+pub fn decode(buf: &[u8; HEADER_SIZE]) -> Result<Header<()>, HeaderDecodeError> {
     if buf[0] != 0 {
         return Err(HeaderDecodeError::Version(buf[0]))
     }
@@ -406,4 +438,3 @@ mod tests {
             .quickcheck(property as fn(Header<()>) -> bool)
     }
 }
-

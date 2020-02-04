@@ -12,7 +12,8 @@ pub mod header;
 mod io;
 
 use bytes::Bytes;
-use header::{Header, StreamId, Data, WindowUpdate, GoAway};
+use futures::future::Either;
+use header::{Header, StreamId, Data, WindowUpdate, GoAway, Ping};
 use std::{convert::TryInto, num::TryFromIntError};
 
 pub use io::{Io, FrameDecodeError};
@@ -37,11 +38,28 @@ impl<T> Frame<T> {
         &mut self.header
     }
 
-    pub(crate) fn cast<U>(self) -> Frame<U> {
-        Frame {
-            header: self.header.cast(),
-            body: self.body
-        }
+    /// Introduce this frame to the right of a binary frame type.
+    pub(crate) fn right<U>(self) -> Frame<Either<U, T>> {
+        Frame { header: self.header.right(), body: self.body }
+    }
+
+    /// Introduce this frame to the left of a binary frame type.
+    pub(crate) fn left<U>(self) -> Frame<Either<T, U>> {
+        Frame { header: self.header.left(), body: self.body }
+    }
+}
+
+impl Frame<()> {
+    pub(crate) fn into_data(self) -> Frame<Data> {
+        Frame { header: self.header.into_data(), body: self.body }
+    }
+
+    pub(crate) fn into_window_update(self) -> Frame<WindowUpdate> {
+        Frame { header: self.header.into_window_update(), body: self.body }
+    }
+
+    pub(crate) fn into_ping(self) -> Frame<Ping> {
+        Frame { header: self.header.into_ping(), body: self.body }
     }
 }
 
