@@ -427,6 +427,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 if !self.config.lazy_open {
                     let mut frame = Frame::window_update(id, self.config.receive_window);
                     frame.header_mut().syn();
+                    log::trace!("{}: sending initial {}", self.id, frame.header());
                     self.socket.get_mut().send(&frame).await.or(Err(ConnectionError::Closed))?
                 }
                 let stream = {
