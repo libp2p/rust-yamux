@@ -67,12 +67,12 @@ impl<T> Header<T> {
         }
     }
 
-    /// Introduce this header to the left of a binary header type.
+    /// Introduce this header to the right of a binary header type.
     pub(crate) fn right<U>(self) -> Header<Either<U, T>> {
         self.cast()
     }
 
-    /// Introduce this header to the right of a binary header type.
+    /// Introduce this header to the left of a binary header type.
     pub(crate) fn left<U>(self) -> Header<Either<T, U>> {
         self.cast()
     }
@@ -438,4 +438,3 @@ mod tests {
             .quickcheck(property as fn(Header<()>) -> bool)
     }
 }
-
