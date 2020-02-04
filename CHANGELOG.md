@@ -1,3 +1,11 @@
+# 0.4.2
+
+- A new configuration option `lazy_open` (off by default) has been added and
+  inbound streams are now acknowledged (#73). If `lazy_open` is set to `true`
+  we will not immediately send an initial `WindowUpdate` frame but instead
+  just set the `SYN` flag on the first outbound `Data` frame.
+  See `Configuration::set_lazy_open` for details.
+
 # 0.4.1
 
 - Log connection reset errors on debug level (#72).
