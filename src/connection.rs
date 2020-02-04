@@ -179,9 +179,9 @@ pub(crate) enum ControlCommand {
 #[derive(Debug)]
 pub(crate) enum StreamCommand {
     /// A new frame should be sent to the remote.
-    SendFrame(Frame<()>),
+    SendFrame(Frame<Either<Data, WindowUpdate>>),
     /// Close a stream.
-    CloseStream(StreamId)
+    CloseStream { id: StreamId, ack: bool }
 }
 
 /// Possible actions as a result of incoming frame handling.
@@ -424,24 +424,32 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 }
                 log::trace!("{}: creating new outbound stream", self.id);
                 let id = self.next_stream_id()?;
-                let mut frame = Frame::window_update(id, self.config.receive_window);
-                frame.header_mut().syn();
-                self.socket.get_mut().send(&frame).await.or(Err(ConnectionError::Closed))?;
+                if !self.config.lazy_open {
+                    let mut frame = Frame::window_update(id, self.config.receive_window);
+                    frame.header_mut().syn();
+                    self.socket.get_mut().send(&frame).await.or(Err(ConnectionError::Closed))?
+                }
                 let stream = {
                     let config = self.config.clone();
                     let sender = self.stream_sender.clone();
                     let window = self.config.receive_window;
-                    Stream::new(id, self.id, config, window, DEFAULT_CREDIT, sender)
+                    let mut stream = Stream::new(id, self.id, config, window, DEFAULT_CREDIT, sender);
+                    if self.config.lazy_open {
+                        stream.set_flag(stream::Flag::Syn)
+                    }
+                    stream
                 };
-                self.streams.insert(id.val(), stream.clone());
-                log::debug!("{}: new outbound {} of {}", self.id, stream, self);
-                if reply.send(Ok(stream)).is_err() {
+                if reply.send(Ok(stream.clone())).is_ok() {
+                    log::debug!("{}: new outbound {} of {}", self.id, stream, self);
+                    self.streams.insert(id.val(), stream);
+                } else {
                     log::debug!("{}: open stream {} has been cancelled", self.id, id);
-                    self.streams.remove(&id.val());
-                    let mut header = Header::data(id, 0);
-                    header.rst();
-                    let frame = Frame::new(header);
-                    self.socket.get_mut().send(&frame).await.or(Err(ConnectionError::Closed))?
+                    if !self.config.lazy_open {
+                        let mut header = Header::data(id, 0);
+                        header.rst();
+                        let frame = Frame::new(header);
+                        self.socket.get_mut().send(&frame).await.or(Err(ConnectionError::Closed))?
+                    }
                 }
             }
             Some(ControlCommand::CloseConnection(reply)) => {
@@ -476,10 +484,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 log::trace!("{}: sending: {}", self.id, frame.header());
                 self.socket.get_mut().send(&frame).await.or(Err(ConnectionError::Closed))?
             }
-            Some(StreamCommand::CloseStream(id)) => {
+            Some(StreamCommand::CloseStream { id, ack }) => {
                 log::trace!("{}: closing stream {} of {}", self.id, id, self);
                 let mut header = Header::data(id, 0);
                 header.fin();
+                if ack { header.ack() }
                 let frame = Frame::new(header);
                 self.socket.get_mut().send(&frame).await.or(Err(ConnectionError::Closed))?
             }
@@ -517,9 +526,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             Ok(Some(frame)) => {
                 log::trace!("{}: received: {}", self.id, frame.header());
                 let action = match frame.header().tag() {
-                    Tag::Data => self.on_data(frame.cast()),
-                    Tag::WindowUpdate => self.on_window_update(&frame.cast()),
-                    Tag::Ping => self.on_ping(&frame.cast()),
+                    Tag::Data => self.on_data(frame.into_data()),
+                    Tag::WindowUpdate => self.on_window_update(&frame.into_window_update()),
+                    Tag::Ping => self.on_ping(&frame.into_ping()),
                     Tag::GoAway => return Err(ConnectionError::Closed)
                 };
                 match action {
@@ -600,8 +609,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             }
             let stream = {
                 let config = self.config.clone();
+                let credit = DEFAULT_CREDIT;
                 let sender = self.stream_sender.clone();
-                Stream::new(stream_id, self.id, config, DEFAULT_CREDIT, DEFAULT_CREDIT, sender)
+                let mut stream = Stream::new(stream_id, self.id, config, credit, credit, sender);
+                stream.set_flag(stream::Flag::Ack);
+                stream
             };
             {
                 let mut shared = stream.shared();
@@ -690,7 +702,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 let credit = frame.header().credit();
                 let config = self.config.clone();
                 let sender = self.stream_sender.clone();
-                Stream::new(stream_id, self.id, config, DEFAULT_CREDIT, credit, sender)
+                let mut stream = Stream::new(stream_id, self.id, config, DEFAULT_CREDIT, credit, sender);
+                stream.set_flag(stream::Flag::Ack);
+                stream
             };
             if is_finish {
                 stream.shared().update_state(self.id, stream_id, State::RecvClosed);

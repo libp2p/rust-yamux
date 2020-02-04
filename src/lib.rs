@@ -74,13 +74,15 @@ pub enum WindowUpdateMode {
 /// - max. number of streams = 8192
 /// - window update mode = on receive
 /// - read after close = true
+/// - lazy open = false
 #[derive(Debug, Clone)]
 pub struct Config {
     receive_window: u32,
     max_buffer_size: usize,
     max_num_streams: usize,
     window_update_mode: WindowUpdateMode,
-    read_after_close: bool
+    read_after_close: bool,
+    lazy_open: bool
 }
 
 impl Default for Config {
@@ -90,7 +92,8 @@ impl Default for Config {
             max_buffer_size: 1024 * 1024,
             max_num_streams: 8192,
             window_update_mode: WindowUpdateMode::OnReceive,
-            read_after_close: true
+            read_after_close: true,
+            lazy_open: false
         }
     }
 }
@@ -129,6 +132,22 @@ impl Config {
     /// the connection has been closed.
     pub fn set_read_after_close(&mut self, b: bool) -> &mut Self {
         self.read_after_close = b;
+        self
+    }
+
+    /// Enable or disable deferred sending of an initial control frame
+    /// when opening outbound streams.
+    ///
+    /// When enabled, opening a new outbound stream will not result in an
+    /// immediate send of a control frame, but the information will be put
+    /// into the first data frame that is being delivered to the remote.
+    ///
+    /// When disabled (the current default), opening a new outbound
+    /// stream will result in a window update being sent to the remote.
+    /// This allows opening a stream with a custom receive window size (cf.
+    /// `set_receive_window`) which the remote can immediately make use of.
+    pub fn set_lazy_open(&mut self, b: bool) -> &mut Self {
+        self.lazy_open = b;
         self
     }
 }

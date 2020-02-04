@@ -16,10 +16,10 @@ use crate::{
     connection::{self, StreamCommand},
     frame::{
         Frame,
-        header::{StreamId, WindowUpdate}
+        header::{Header, StreamId, Data, WindowUpdate}
     }
 };
-use futures::{ready, channel::mpsc, io::{AsyncRead, AsyncWrite}};
+use futures::{future::Either, ready, channel::mpsc, io::{AsyncRead, AsyncWrite}};
 use parking_lot::{Mutex, MutexGuard};
 use std::{fmt, io, pin::Pin, sync::Arc, task::{Context, Poll, Waker}};
 
@@ -56,6 +56,17 @@ impl State {
     }
 }
 
+/// Indicate if a flag still needs to be set on an outbound header.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Flag {
+    /// No flag needs to be set.
+    None,
+    /// The stream was opened lazily, so set the initial SYN flag.
+    Syn,
+    /// The stream still needs acknowledgement, so set the ACK flag.
+    Ack
+}
+
 /// A multiplexed Yamux stream.
 ///
 /// Streams are created either outbound via [`crate::Control::open_stream`]
@@ -69,6 +80,7 @@ pub struct Stream {
     config: Arc<Config>,
     sender: mpsc::Sender<StreamCommand>,
     pending: Option<Frame<WindowUpdate>>,
+    flag: Flag,
     shared: Arc<Mutex<Shared>>
 }
 
@@ -104,6 +116,7 @@ impl Stream {
             config,
             sender,
             pending: None,
+            flag: Flag::None,
             shared: Arc::new(Mutex::new(Shared::new(window, credit))),
         }
     }
@@ -111,6 +124,11 @@ impl Stream {
     /// Get this stream's identifier.
     pub fn id(&self) -> StreamId {
         self.id
+    }
+
+    /// Set the flag that should be set on the next outbound frame header.
+    pub(crate) fn set_flag(&mut self, flag: Flag) {
+        self.flag = flag
     }
 
     /// Get this stream's state.
@@ -133,6 +151,7 @@ impl Stream {
             config: self.config.clone(),
             sender: self.sender.clone(),
             pending: None,
+            flag: self.flag,
             shared: self.shared.clone()
         }
     }
@@ -140,6 +159,21 @@ impl Stream {
     fn write_zero_err(&self) -> io::Error {
         let msg = format!("{}/{}: connection is closed", self.conn, self.id);
         io::Error::new(io::ErrorKind::WriteZero, msg)
+    }
+
+    /// Set ACK or SYN flag if necessary.
+    fn add_flag(&mut self, header: &mut Header<Either<Data, WindowUpdate>>) {
+        match self.flag {
+            Flag::None => (),
+            Flag::Syn => {
+                header.syn();
+                self.flag = Flag::None
+            }
+            Flag::Ack => {
+                header.ack();
+                self.flag = Flag::None
+            }
+        }
     }
 }
 
@@ -164,8 +198,9 @@ impl futures::stream::Stream for Stream {
         // Try to deliver any pending window updates first.
         if self.pending.is_some() {
             ready!(self.sender.poll_ready(cx).map_err(|_| self.write_zero_err())?);
-            let frm = self.pending.take().expect("pending.is_some()");
-            let cmd = StreamCommand::SendFrame(frm.cast());
+            let mut frame = self.pending.take().expect("pending.is_some()").right();
+            self.add_flag(frame.header_mut());
+            let cmd = StreamCommand::SendFrame(frame);
             self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?
         }
 
@@ -201,7 +236,9 @@ impl futures::stream::Stream for Stream {
         let frame = Frame::window_update(self.id, self.config.receive_window);
         match self.sender.poll_ready(cx).map_err(|_| self.write_zero_err())? {
             Poll::Ready(()) => {
-                let cmd = StreamCommand::SendFrame(frame.cast());
+                let mut frame = frame.right();
+                self.add_flag(frame.header_mut());
+                let cmd = StreamCommand::SendFrame(frame);
                 self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?
             }
             Poll::Pending => self.pending = Some(frame)
@@ -222,8 +259,9 @@ impl AsyncRead for Stream {
         // Try to deliver any pending window updates first.
         if self.pending.is_some() {
             ready!(self.sender.poll_ready(cx).map_err(|_| self.write_zero_err())?);
-            let frm = self.pending.take().expect("pending.is_some()");
-            let cmd = StreamCommand::SendFrame(frm.cast());
+            let mut frame = self.pending.take().expect("pending.is_some()").right();
+            self.add_flag(frame.header_mut());
+            let cmd = StreamCommand::SendFrame(frame);
             self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?
         }
 
@@ -275,7 +313,9 @@ impl AsyncRead for Stream {
         let frame = Frame::window_update(self.id, self.config.receive_window);
         match self.sender.poll_ready(cx).map_err(|_| self.write_zero_err())? {
             Poll::Ready(()) => {
-                let cmd = StreamCommand::SendFrame(frame.cast());
+                let mut frame = frame.right();
+                self.add_flag(frame.header_mut());
+                let cmd = StreamCommand::SendFrame(frame);
                 self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?
             }
             Poll::Pending => self.pending = Some(frame)
@@ -304,9 +344,10 @@ impl AsyncWrite for Stream {
             Bytes::copy_from_slice(&buf[.. k])
         };
         let n = body.len();
-        let frame = Frame::data(self.id, body).expect("body <= u32::MAX");
+        let mut frame = Frame::data(self.id, body).expect("body <= u32::MAX").left();
+        self.add_flag(frame.header_mut());
         log::trace!("{}/{}: write {} bytes", self.conn, self.id, n);
-        let cmd = StreamCommand::SendFrame(frame.cast());
+        let cmd = StreamCommand::SendFrame(frame);
         self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?;
         Poll::Ready(Ok(n))
     }
@@ -321,7 +362,13 @@ impl AsyncWrite for Stream {
         }
         log::trace!("{}/{}: close", self.conn, self.id);
         ready!(self.sender.poll_ready(cx).map_err(|_| self.write_zero_err())?);
-        let cmd = StreamCommand::CloseStream(self.id);
+        let ack = if self.flag == Flag::Ack {
+            self.flag = Flag::None;
+            true
+        } else {
+            false
+        };
+        let cmd = StreamCommand::CloseStream { id: self.id, ack };
         self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?;
         self.shared().update_state(self.conn, self.id, State::SendClosed);
         Poll::Ready(Ok(()))
