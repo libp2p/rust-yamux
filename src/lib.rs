@@ -135,17 +135,18 @@ impl Config {
         self
     }
 
-    /// Enable or disable deferred sending of an initial control frame
+    /// Enable or disable the sending of an initial window update frame
     /// when opening outbound streams.
     ///
     /// When enabled, opening a new outbound stream will not result in an
-    /// immediate send of a control frame, but the information will be put
-    /// into the first data frame that is being delivered to the remote.
+    /// immediate send of a frame, instead the first outbound data frame
+    /// will be marked as opening a stream.
     ///
     /// When disabled (the current default), opening a new outbound
-    /// stream will result in a window update being sent to the remote.
-    /// This allows opening a stream with a custom receive window size (cf.
-    /// `set_receive_window`) which the remote can immediately make use of.
+    /// stream will result in a window update frame being sent immediately
+    /// to the remote. This allows opening a stream with a custom receive
+    /// window size (cf. [`Config::set_receive_window`]) which the remote
+    /// can directly make use of.
     pub fn set_lazy_open(&mut self, b: bool) -> &mut Self {
         self.lazy_open = b;
         self
