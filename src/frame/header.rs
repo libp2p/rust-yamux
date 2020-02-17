@@ -280,7 +280,7 @@ pub const CONNECTION_ID: StreamId = StreamId(0);
 /// The ID of a stream.
 ///
 /// The value 0 denotes no particular stream but the whole session.
-#[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct StreamId(u32);
 
 impl StreamId {
@@ -310,6 +310,14 @@ impl fmt::Display for StreamId {
         write!(f, "{}", self.0)
     }
 }
+
+impl std::hash::Hash for StreamId {
+    fn hash<H: std::hash::Hasher>(&self, hasher: &mut H) {
+        hasher.write_u32(self.0)
+    }
+}
+
+impl nohash_hasher::IsEnabled for StreamId {}
 
 /// Possible flags set on a message.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
