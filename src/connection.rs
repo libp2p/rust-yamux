@@ -157,7 +157,7 @@ pub struct Connection<T> {
     config: Arc<Config>,
     socket: Fuse<frame::Io<T>>,
     next_id: u32,
-    streams: IntMap<u32, Stream>,
+    streams: IntMap<StreamId, Stream>,
     control_sender: mpsc::Sender<ControlCommand>,
     control_receiver: Pausable<mpsc::Receiver<ControlCommand>>,
     stream_sender: mpsc::Sender<StreamCommand>,
@@ -442,7 +442,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 };
                 if reply.send(Ok(stream.clone())).is_ok() {
                     log::debug!("{}: new outbound {} of {}", self.id, stream, self);
-                    self.streams.insert(id.val(), stream);
+                    self.streams.insert(id, stream);
                 } else {
                     log::debug!("{}: open stream {} has been cancelled", self.id, id);
                     if !self.config.lazy_open {
@@ -576,7 +576,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         let stream_id = frame.header().stream_id();
 
         if frame.header().flags().contains(header::RST) { // stream reset
-            if let Some(s) = self.streams.get_mut(&stream_id.val()) {
+            if let Some(s) = self.streams.get_mut(&stream_id) {
                 let mut shared = s.shared();
                 shared.update_state(self.id, stream_id, State::Closed);
                 if let Some(w) = shared.reader.take() {
@@ -600,7 +600,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 log::error!("{}/{}: 1st body of stream exceeds default credit", self.id, stream_id);
                 return Action::Terminate(Frame::protocol_error())
             }
-            if self.streams.contains_key(&stream_id.val()) {
+            if self.streams.contains_key(&stream_id) {
                 log::error!("{}/{}: stream already exists", self.id, stream_id);
                 return Action::Terminate(Frame::protocol_error())
             }
@@ -624,11 +624,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 shared.window = shared.window.saturating_sub(frame.body_len());
                 shared.buffer.push(frame.into_body());
             }
-            self.streams.insert(stream_id.val(), stream.clone());
+            self.streams.insert(stream_id, stream.clone());
             return Action::New(stream)
         }
 
-        if let Some(stream) = self.streams.get_mut(&stream_id.val()) {
+        if let Some(stream) = self.streams.get_mut(&stream_id) {
             let mut shared = stream.shared();
             if frame.body().len() > crate::u32_as_usize(shared.window) {
                 log::error!("{}/{}: frame body larger than window of stream", self.id, stream_id);
@@ -671,7 +671,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         let stream_id = frame.header().stream_id();
 
         if frame.header().flags().contains(header::RST) { // stream reset
-            if let Some(s) = self.streams.get_mut(&stream_id.val()) {
+            if let Some(s) = self.streams.get_mut(&stream_id) {
                 let mut shared = s.shared();
                 shared.update_state(self.id, stream_id, State::Closed);
                 if let Some(w) = shared.reader.take() {
@@ -691,7 +691,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 log::error!("{}: invalid stream id {}", self.id, stream_id);
                 return Action::Terminate(Frame::protocol_error())
             }
-            if self.streams.contains_key(&stream_id.val()) {
+            if self.streams.contains_key(&stream_id) {
                 log::error!("{}/{}: stream already exists", self.id, stream_id);
                 return Action::Terminate(Frame::protocol_error())
             }
@@ -710,11 +710,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             if is_finish {
                 stream.shared().update_state(self.id, stream_id, State::RecvClosed);
             }
-            self.streams.insert(stream_id.val(), stream.clone());
+            self.streams.insert(stream_id, stream.clone());
             return Action::New(stream)
         }
 
-        if let Some(stream) = self.streams.get_mut(&stream_id.val()) {
+        if let Some(stream) = self.streams.get_mut(&stream_id) {
             let mut shared = stream.shared();
             shared.credit += frame.header().credit();
             if is_finish {
@@ -738,7 +738,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         if frame.header().flags().contains(header::ACK) { // pong
             return Action::None
         }
-        if stream_id == CONNECTION_ID || self.streams.contains_key(&stream_id.val()) {
+        if stream_id == CONNECTION_ID || self.streams.contains_key(&stream_id) {
             let mut hdr = Header::ping(frame.header().nonce());
             hdr.ack();
             return Action::Ping(Frame::new(hdr))
@@ -840,7 +840,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             self.garbage.push(stream_id)
         }
         for id in self.garbage.drain(..) {
-            self.streams.remove(&id.val());
+            self.streams.remove(&id);
         }
         Ok(())
     }
@@ -851,7 +851,7 @@ impl<T> Connection<T> {
     fn drop_all_streams(&mut self) {
         for (id, s) in self.streams.drain() {
             let mut shared = s.shared();
-            shared.update_state(self.id, StreamId::new(id), State::Closed);
+            shared.update_state(self.id, id, State::Closed);
             if let Some(w) = shared.reader.take() {
                 w.wake()
             }
