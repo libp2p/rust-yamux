@@ -1,3 +1,7 @@
+# 0.4.3
+
+- Updates nohash-hasher dependency to v0.2.0.
+
 # 0.4.2
 
 - A new configuration option `lazy_open` (off by default) has been added and
