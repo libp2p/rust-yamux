@@ -1,6 +1,6 @@
 [package]
 name = "yamux"
-version = "0.4.2"
+version = "0.4.3"
 authors = ["Parity Technologies <admin@parity.io>"]
 license = "Apache-2.0 OR MIT"
 description = "Multiplexer over reliable, ordered connections"
@@ -14,7 +14,7 @@ edition = "2018"
 bytes = "0.5"
 futures = "0.3.1"
 log = "0.4.8"
-nohash-hasher = "0.1.2"
+nohash-hasher = "0.2"
 parking_lot = "0.10"
 rand = "0.7.2"
 thiserror = "1"
