@@ -1,3 +1,11 @@
+# 0.4.4
+
+- Control and stream command channels are now closed and drained immediately
+  on error. This is done to prevent client code from submitting further close
+  or other commands which will never be acted upon since the API contract of
+  `Connection::next_stream` is that after `None` or an `Err(_)` is returned
+  it must not be called again.
+
 # 0.4.3
 
 - Updates nohash-hasher dependency to v0.2.0.
