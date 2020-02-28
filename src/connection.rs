@@ -307,10 +307,35 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         }
 
         // At this point we are either at EOF or encountered an error.
-        // We close all streams and wake up the associated tasks before
-        // closing the socket. The connection is then considered closed.
+        // We close all streams and wake up the associated tasks. We also
+        // close and drain all receivers so no more commands can be
+        // submitted. The connection is then considered closed.
+
+        // Close and drain the control command receiver.
+        if !self.control_receiver.stream().is_terminated() {
+            self.control_receiver.stream().close();
+            self.control_receiver.unpause();
+            while let Some(cmd) = self.control_receiver.next().await {
+                match cmd {
+                    ControlCommand::OpenStream(reply) => {
+                        let _ = reply.send(Err(ConnectionError::Closed));
+                    }
+                    ControlCommand::CloseConnection(reply) => {
+                        let _ = reply.send(());
+                    }
+                }
+            }
+        }
 
         self.drop_all_streams();
+
+        // Close and drain the stream command receiver.
+        if !self.stream_receiver.is_terminated() {
+            self.stream_receiver.close();
+            while let Some(_cmd) = self.stream_receiver.next().await {
+                // drop it
+            }
+        }
 
         if let Err(ConnectionError::Closed) = result {
             return Ok(None)
@@ -337,9 +362,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             // This guarantees that if the remaining futures are pending
             // we properly wait until woken up because we actually can make
             // progress.
-            //
-            // While it should never happen that all futures are terminated
-            // we nevertheless count them and return early if they are.
 
             let mut num_terminated = 0;
 
@@ -368,7 +390,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 };
 
             if num_terminated == 3 {
-                log::error!("{}: all futures are terminated", self.id);
+                log::debug!("{}: socket and channels are terminated", self.id);
                 return Err(ConnectionError::Closed)
             }
 

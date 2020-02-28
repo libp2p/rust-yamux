@@ -63,7 +63,10 @@ impl Control {
     /// Close the connection.
     pub async fn close(&mut self) -> Result<()> {
         let (tx, rx) = oneshot::channel();
-        self.sender.send(ControlCommand::CloseConnection(tx)).await?;
+        if self.sender.send(ControlCommand::CloseConnection(tx)).await.is_err() {
+            // The receiver is closed which means the connection is already closed.
+            return Ok(())
+        }
         // A dropped `oneshot::Sender` means the `Connection` is gone,
         // so we do not treat receive errors differently here.
         let _ = rx.await;
@@ -103,9 +106,19 @@ impl Control {
         loop {
             match self.pending_close.take() {
                 None => {
-                    ready!(self.sender.poll_ready(cx)?);
+                    if ready!(self.sender.poll_ready(cx)).is_err() {
+                        // The receiver is closed which means the connection is already closed.
+                        return Poll::Ready(Ok(()))
+                    }
                     let (tx, rx) = oneshot::channel();
-                    self.sender.start_send(ControlCommand::CloseConnection(tx))?;
+                    if let Err(e) = self.sender.start_send(ControlCommand::CloseConnection(tx)) {
+                        if e.is_full() {
+                            continue
+                        }
+                        debug_assert!(e.is_disconnected());
+                        // The receiver is closed which means the connection is already closed.
+                        return Poll::Ready(Ok(()))
+                    }
                     self.pending_close = Some(rx)
                 }
                 Some(mut rx) => match rx.poll_unpin(cx) {
