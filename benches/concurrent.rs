@@ -9,10 +9,9 @@
 // at https://opensource.org/licenses/MIT.
 
 use async_std::task;
-use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, Criterion};
 use futures::{channel::mpsc, future, prelude::*, ready};
-use std::{fmt, io, pin::Pin, task::{Context, Poll}};
+use std::{fmt, io, pin::Pin, sync::Arc, task::{Context, Poll}};
 use yamux::{Config, Connection, Mode};
 
 criterion_group!(benches, concurrent);
@@ -27,6 +26,15 @@ impl fmt::Debug for Params {
     }
 }
 
+#[derive(Debug, Clone)]
+struct Bytes(Arc<Vec<u8>>);
+
+impl AsRef<[u8]> for Bytes {
+    fn as_ref(&self) -> &[u8] {
+        &self.0[..]
+    }
+}
+
 fn concurrent(c: &mut Criterion) {
     let params = &[
         Params { streams:   1, messages:   1 },
@@ -38,7 +46,7 @@ fn concurrent(c: &mut Criterion) {
         Params { streams: 100, messages:  10 }
     ];
 
-    let data0 = Bytes::from(vec![0x42; 4096]);
+    let data0 = Bytes(Arc::new(vec![0x42; 4096]));
     let data1 = data0.clone();
     let data2 = data0.clone();
 
@@ -60,7 +68,7 @@ fn concurrent(c: &mut Criterion) {
 }
 
 async fn roundtrip(nstreams: usize, nmessages: usize, data: Bytes, send_all: bool) {
-    let msg_len = data.len();
+    let msg_len = data.0.len();
     let (server, client) = Endpoint::new();
     let server = server.into_async_read();
     let client = client.into_async_read();
@@ -95,11 +103,11 @@ async fn roundtrip(nstreams: usize, nmessages: usize, data: Bytes, send_all: boo
             if send_all {
                 // Send `nmessages` messages and receive `nmessages` messages.
                 for _ in 0 .. nmessages {
-                    stream.write_all(&data).await?
+                    stream.write_all(data.as_ref()).await?
                 }
                 stream.close().await?;
                 let mut n = 0;
-                let mut b = vec![0; data.len()];
+                let mut b = vec![0; data.0.len()];
                 loop {
                     let k = stream.read(&mut b).await?;
                     if k == 0 { break }
@@ -109,9 +117,9 @@ async fn roundtrip(nstreams: usize, nmessages: usize, data: Bytes, send_all: boo
             } else {
                 // Send and receive `nmessages` messages.
                 let mut n = 0;
-                let mut b = vec![0; data.len()];
+                let mut b = vec![0; data.0.len()];
                 for _ in 0 .. nmessages {
-                    stream.write_all(&data).await?;
+                    stream.write_all(data.as_ref()).await?;
                     stream.read_exact(&mut b[..]).await?;
                     n += b.len()
                 }
@@ -129,8 +137,8 @@ async fn roundtrip(nstreams: usize, nmessages: usize, data: Bytes, send_all: boo
 
 #[derive(Debug)]
 struct Endpoint {
-    incoming: mpsc::UnboundedReceiver<Bytes>,
-    outgoing: mpsc::UnboundedSender<Bytes>
+    incoming: mpsc::UnboundedReceiver<Vec<u8>>,
+    outgoing: mpsc::UnboundedSender<Vec<u8>>
 }
 
 impl Endpoint {
@@ -146,7 +154,7 @@ impl Endpoint {
 }
 
 impl Stream for Endpoint {
-    type Item = Result<Bytes, io::Error>;
+    type Item = Result<Vec<u8>, io::Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         if let Some(b) = ready!(Pin::new(&mut self.incoming).poll_next(cx)) {
@@ -162,7 +170,7 @@ impl AsyncWrite for Endpoint {
             return Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into()))
         }
         let n = buf.len();
-        if Pin::new(&mut self.outgoing).start_send(Bytes::copy_from_slice(buf)).is_err() {
+        if Pin::new(&mut self.outgoing).start_send(Vec::from(buf)).is_err() {
             return Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into()))
         }
         Poll::Ready(Ok(n))

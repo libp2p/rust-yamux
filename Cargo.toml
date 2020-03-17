@@ -11,12 +11,12 @@ readme = "README.md"
 edition = "2018"
 
 [dependencies]
-bytes = "0.5"
 futures = "0.3.1"
 log = "0.4.8"
 nohash-hasher = "0.2"
 parking_lot = "0.10"
 rand = "0.7.2"
+static_assertions = "1"
 thiserror = "1"
 
 [dev-dependencies]
