@@ -48,6 +48,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Io<T> {
     }
 }
 
+/// The stages of reading a new `Frame`.
 enum ReadState {
     /// Initial reading state.
     Init,

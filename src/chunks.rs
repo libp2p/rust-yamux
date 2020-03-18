@@ -13,7 +13,7 @@ use std::{collections::VecDeque, io};
 /// A sequence of [`Chunk`] values.
 ///
 /// [`Chunks::len`] considers all [`Chunk`] elements and computes the total
-/// result, e.g. the length of all bytes by summing up the lengths of all
+/// result, i.e. the length of all bytes, by summing up the lengths of all
 /// [`Chunk`] elements.
 #[derive(Debug)]
 pub(crate) struct Chunks {
@@ -83,8 +83,8 @@ impl Chunk {
 
     /// Move the cursor position by `amount` bytes.
     ///
-    /// The `AsRef<[u8]>` impl of `Chunk` gives a byte-slice from the
-    /// current position to the end.
+    /// The `AsRef<[u8]>` impl of `Chunk` provides a byte-slice view
+    /// from the current position to the end.
     pub(crate) fn advance(&mut self, amount: usize) {
         assert!({ // the new position must not exceed the vector's length
             let pos = self.offset().checked_add(amount);
@@ -95,7 +95,7 @@ impl Chunk {
         self.cursor.set_position(self.cursor.position() + amount as u64);
     }
 
-    /// Cunsume self and return the inner vector.
+    /// Consume `self` and return the inner vector.
     pub(crate) fn into_vec(self) -> Vec<u8> {
         self.cursor.into_inner()
     }
