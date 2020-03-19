@@ -22,6 +22,8 @@
 //!
 //! [1]: https://github.com/hashicorp/yamux/blob/master/spec.md
 
+#![forbid(unsafe_code)]
+
 mod chunks;
 mod error;
 mod frame;
@@ -153,8 +155,13 @@ impl Config {
     }
 }
 
-#[cfg(any(target_pointer_width = "32", target_pointer_width = "64"))]
-const fn u32_as_usize(a: u32) -> usize {
-    a as usize
+// Check that we can safely cast a `usize` to a `u64`.
+static_assertions::const_assert! {
+    std::mem::size_of::<usize>() <= std::mem::size_of::<u64>()
+}
+
+// Check that we can safely cast a `u32` to a `usize`.
+static_assertions::const_assert! {
+    std::mem::size_of::<u32>() <= std::mem::size_of::<usize>()
 }
 
