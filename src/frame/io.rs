@@ -12,7 +12,6 @@ use crate::connection::Id;
 use futures::{prelude::*, ready};
 use std::{fmt, io, pin::Pin, task::{Context, Poll}};
 use super::{Frame, header::{self, HeaderDecodeError}};
-use thiserror::Error;
 
 /// A [`Stream`] and writer of [`Frame`] values.
 #[derive(Debug)]
@@ -166,19 +165,46 @@ impl fmt::Debug for ReadState {
 
 /// Possible errors while decoding a message frame.
 #[non_exhaustive]
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum FrameDecodeError {
     /// An I/O error.
-    #[error("i/o error: {0}")]
-    Io(#[from] io::Error),
-
+    Io(io::Error),
     /// Decoding the frame header failed.
-    #[error("decode error: {0}")]
-    Header(#[from] HeaderDecodeError),
-
+    Header(HeaderDecodeError),
     /// A data frame body length is larger than the configured maximum.
-    #[error("frame body is too large ({0})")]
     FrameTooLarge(usize)
+}
+
+impl std::fmt::Display for FrameDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            FrameDecodeError::Io(e) => write!(f, "i/o error: {}", e),
+            FrameDecodeError::Header(e) => write!(f, "decode error: {}", e),
+            FrameDecodeError::FrameTooLarge(n) => write!(f, "frame body is too large ({})", n)
+        }
+    }
+}
+
+impl std::error::Error for FrameDecodeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            FrameDecodeError::Io(e) => Some(e),
+            FrameDecodeError::Header(e) => Some(e),
+            FrameDecodeError::FrameTooLarge(_) => None
+        }
+    }
+}
+
+impl From<std::io::Error> for FrameDecodeError {
+    fn from(e: std::io::Error) -> Self {
+        FrameDecodeError::Io(e)
+    }
+}
+
+impl From<HeaderDecodeError> for FrameDecodeError {
+    fn from(e: HeaderDecodeError) -> Self {
+        FrameDecodeError::Header(e)
+    }
 }
 
 #[cfg(test)]
