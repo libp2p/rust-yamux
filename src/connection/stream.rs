@@ -8,7 +8,6 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-use bytes::{Buf, Bytes};
 use crate::{
     Config,
     WindowUpdateMode,
@@ -179,7 +178,7 @@ impl Stream {
 
 /// Byte data produced by the [`futures::stream::Stream`] impl of [`Stream`].
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Packet(Bytes);
+pub struct Packet(Vec<u8>);
 
 impl AsRef<[u8]> for Packet {
     fn as_ref(&self) -> &[u8] {
@@ -210,7 +209,17 @@ impl futures::stream::Stream for Stream {
             let mut shared = self.shared();
 
             if let Some(bytes) = shared.buffer.pop() {
-                return Poll::Ready(Some(Ok(Packet(bytes))))
+                let off = bytes.offset();
+                let mut vec = bytes.into_vec();
+                if off != 0 {
+                    // This should generally not happen when the stream is used only as
+                    // a `futures::stream::Stream` since the whole point of this impl is
+                    // to consume chunks atomically. It may perhaps happen when mixing
+                    // this impl and the `AsyncRead` one.
+                    log::debug!("{}/{}: chunk has been partially consumed", self.conn, self.id);
+                    vec = vec.split_off(off)
+                }
+                return Poll::Ready(Some(Ok(Packet(vec))))
             }
 
             // Buffer is empty, let's check if we can expect to read more data.
@@ -277,7 +286,7 @@ impl AsyncRead for Stream {
                     continue
                 }
                 let k = std::cmp::min(chunk.len(), buf.len() - n);
-                (&mut buf[n .. n + k]).copy_from_slice(&chunk[.. k]);
+                (&mut buf[n .. n + k]).copy_from_slice(&chunk.as_ref()[.. k]);
                 n += k;
                 chunk.advance(k);
                 if n == buf.len() {
@@ -339,9 +348,9 @@ impl AsyncWrite for Stream {
                 shared.writer = Some(cx.waker().clone());
                 return Poll::Pending
             }
-            let k = std::cmp::min(crate::u32_as_usize(shared.credit), buf.len());
+            let k = std::cmp::min(shared.credit as usize, buf.len());
             shared.credit = shared.credit.saturating_sub(k as u32);
-            Bytes::copy_from_slice(&buf[.. k])
+            Vec::from(&buf[.. k])
         };
         let n = body.len();
         let mut frame = Frame::data(self.id, body).expect("body <= u32::MAX").left();

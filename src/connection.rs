@@ -134,6 +134,13 @@ pub enum Mode {
 #[derive(Clone, Copy)]
 pub(crate) struct Id(u32);
 
+impl Id {
+    /// Create a random connection ID.
+    pub(crate) fn random() -> Self {
+        Id(rand::random())
+    }
+}
+
 impl fmt::Debug for Id {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{:08x}", self.0)
@@ -163,7 +170,8 @@ pub struct Connection<T> {
     stream_sender: mpsc::Sender<StreamCommand>,
     stream_receiver: mpsc::Receiver<StreamCommand>,
     garbage: Vec<StreamId>, // see `Connection::garbage_collect()`
-    shutdown: Shutdown
+    shutdown: Shutdown,
+    is_closed: bool
 }
 
 /// `Control` to `Connection` commands.
@@ -246,6 +254,7 @@ impl<T> fmt::Debug for Connection<T> {
             .field("mode", &self.mode)
             .field("streams", &self.streams.len())
             .field("next_id", &self.next_id)
+            .field("is_closed", &self.is_closed)
             .finish()
     }
 }
@@ -259,11 +268,11 @@ impl<T> fmt::Display for Connection<T> {
 impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     /// Create a new `Connection` from the given I/O resource.
     pub fn new(socket: T, cfg: Config, mode: Mode) -> Self {
-        let id = Id(rand::random());
+        let id = Id::random();
         log::debug!("new connection: {} ({:?})", id, mode);
         let (stream_sender, stream_receiver) = mpsc::channel(MAX_COMMAND_BACKLOG);
         let (control_sender, control_receiver) = mpsc::channel(MAX_COMMAND_BACKLOG);
-        let socket = frame::Io::new(socket, cfg.max_buffer_size).fuse();
+        let socket = frame::Io::new(id, socket, cfg.max_buffer_size).fuse();
         Connection {
             id,
             mode,
@@ -279,7 +288,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 Mode::Server => 2
             },
             garbage: Vec::new(),
-            shutdown: Shutdown::NotStarted
+            shutdown: Shutdown::NotStarted,
+            is_closed: false
         }
     }
 
@@ -300,11 +310,18 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     /// Please note that if you poll the returned [`Future`] it *must
     /// not be cancelled* but polled until [`Poll::Ready`] is returned.
     pub async fn next_stream(&mut self) -> Result<Option<Stream>> {
+        if self.is_closed {
+            log::debug!("{}: connection is closed", self.id);
+            return Ok(None)
+        }
+
         let result = self.next().await;
 
         if let Ok(Some(_)) = result {
             return result
         }
+
+        self.is_closed = true;
 
         // At this point we are either at EOF or encountered an error.
         // We close all streams and wake up the associated tasks. We also
@@ -618,7 +635,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 log::error!("{}: invalid stream id {}", self.id, stream_id);
                 return Action::Terminate(Frame::protocol_error())
             }
-            if frame.body().len() > crate::u32_as_usize(DEFAULT_CREDIT) {
+            if frame.body().len() > DEFAULT_CREDIT as usize {
                 log::error!("{}/{}: 1st body of stream exceeds default credit", self.id, stream_id);
                 return Action::Terminate(Frame::protocol_error())
             }
@@ -652,7 +669,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
 
         if let Some(stream) = self.streams.get_mut(&stream_id) {
             let mut shared = stream.shared();
-            if frame.body().len() > crate::u32_as_usize(shared.window) {
+            if frame.body().len() > shared.window as usize {
                 log::error!("{}/{}: frame body larger than window of stream", self.id, stream_id);
                 return Action::Terminate(Frame::protocol_error())
             }

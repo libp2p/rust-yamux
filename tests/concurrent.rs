@@ -9,12 +9,11 @@
 // at https://opensource.org/licenses/MIT.
 
 use async_std::{net::{TcpStream, TcpListener}, task};
-use bytes::Bytes;
 use futures::{channel::mpsc, prelude::*};
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::{net::{Ipv4Addr, SocketAddr, SocketAddrV4}, sync::Arc};
 use yamux::{Config, Connection, Mode};
 
-async fn roundtrip(address: SocketAddr, nstreams: usize, data: Bytes) {
+async fn roundtrip(address: SocketAddr, nstreams: usize, data: Arc<Vec<u8>>) {
     let listener = TcpListener::bind(&address).await.expect("bind");
     let address = listener.local_addr().expect("local address");
 
@@ -56,7 +55,7 @@ async fn roundtrip(address: SocketAddr, nstreams: usize, data: Bytes) {
             let mut frame = vec![0; data.len()];
             stream.read_exact(&mut frame).await?;
             log::debug!("C: {}: read {} bytes", stream.id(), frame.len());
-            assert_eq!(data, &frame[..]);
+            assert_eq!(&data[..], &frame[..]);
             tx.unbounded_send(1).expect("unbounded_send");
             Ok::<(), yamux::ConnectionError>(())
         });
@@ -68,7 +67,7 @@ async fn roundtrip(address: SocketAddr, nstreams: usize, data: Bytes) {
 
 #[test]
 fn concurrent_streams() {
-    let data = Bytes::from(vec![0x42; 100 * 1024]);
+    let data = Arc::new(vec![0x42; 100 * 1024]);
     let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
     task::block_on(roundtrip(addr, 1000, data))
 }

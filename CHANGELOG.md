@@ -1,3 +1,13 @@
+# 0.4.5
+
+- Removed `bytes` (#77) and `thiserror` (#78) dependencies.
+- Removed implicit `BufWriter` creation (#77). Client code that depends on
+  this (undocumented) behaviour needs to wrap the socket in a `BufWriter`
+  before passing it to `Connection::new`.
+- Added `Connection::is_closed` flag (#80) to immediately return `Ok(None)`
+  from `Connection::next_stream` after `Err(_)` or `Ok(None)` have been
+  returned previously.
+
 # 0.4.4
 
 - Control and stream command channels are now closed and drained immediately

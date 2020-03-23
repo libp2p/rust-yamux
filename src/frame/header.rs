@@ -10,7 +10,6 @@
 
 use futures::future::Either;
 use std::fmt;
-use thiserror::Error;
 
 /// The message frame header.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -391,20 +390,27 @@ pub fn decode(buf: &[u8; HEADER_SIZE]) -> Result<Header<()>, HeaderDecodeError> 
 
 /// Possible errors while decoding a message frame header.
 #[non_exhaustive]
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum HeaderDecodeError {
     /// Unknown version.
-    #[error("unknown version: {0}")]
     Version(u8),
-
     /// An unknown frame type.
-    #[error("unknown frame type: {0}")]
     Type(u8),
-
     /// Unknown flags.
-    #[error("unknown flags type: {:0x}", .0)]
     Flags(u16)
 }
+
+impl std::fmt::Display for HeaderDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            HeaderDecodeError::Version(v) => write!(f, "unknown version: {}", v),
+            HeaderDecodeError::Type(t) => write!(f, "unknown frame type: {}", t),
+            HeaderDecodeError::Flags(x) => write!(f, "unknown flags type: {}", x)
+        }
+    }
+}
+
+impl std::error::Error for HeaderDecodeError {}
 
 #[cfg(test)]
 mod tests {
