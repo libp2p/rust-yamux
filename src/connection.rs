@@ -170,7 +170,8 @@ pub struct Connection<T> {
     stream_sender: mpsc::Sender<StreamCommand>,
     stream_receiver: mpsc::Receiver<StreamCommand>,
     garbage: Vec<StreamId>, // see `Connection::garbage_collect()`
-    shutdown: Shutdown
+    shutdown: Shutdown,
+    is_closed: bool
 }
 
 /// `Control` to `Connection` commands.
@@ -253,6 +254,7 @@ impl<T> fmt::Debug for Connection<T> {
             .field("mode", &self.mode)
             .field("streams", &self.streams.len())
             .field("next_id", &self.next_id)
+            .field("is_closed", &self.is_closed)
             .finish()
     }
 }
@@ -286,7 +288,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 Mode::Server => 2
             },
             garbage: Vec::new(),
-            shutdown: Shutdown::NotStarted
+            shutdown: Shutdown::NotStarted,
+            is_closed: false
         }
     }
 
@@ -307,11 +310,18 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     /// Please note that if you poll the returned [`Future`] it *must
     /// not be cancelled* but polled until [`Poll::Ready`] is returned.
     pub async fn next_stream(&mut self) -> Result<Option<Stream>> {
+        if self.is_closed {
+            log::debug!("{}: connection is closed", self.id);
+            return Ok(None)
+        }
+
         let result = self.next().await;
 
         if let Ok(Some(_)) = result {
             return result
         }
+
+        self.is_closed = true;
 
         // At this point we are either at EOF or encountered an error.
         // We close all streams and wake up the associated tasks. We also
