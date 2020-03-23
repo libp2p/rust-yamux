@@ -9,30 +9,20 @@
 // at https://opensource.org/licenses/MIT.
 
 use crate::frame::FrameDecodeError;
-use thiserror::Error;
 
 /// The various error cases a connection may encounter.
 #[non_exhaustive]
-#[derive(Debug, Error)]
+#[derive(Debug)]
 pub enum ConnectionError {
     /// An underlying I/O error occured.
-    #[error("i/o error: {0}")]
-    Io(#[from] std::io::Error),
-
+    Io(std::io::Error),
     /// Decoding a Yamux message frame failed.
-    #[error("decode error: {0}")]
-    Decode(#[from] FrameDecodeError),
-
+    Decode(FrameDecodeError),
     /// The whole range of stream IDs has been used up.
-    #[error("number of stream ids has been exhausted")]
     NoMoreStreamIds,
-
     /// An operation fails because the connection is closed.
-    #[error("connection is closed")]
     Closed,
-
     /// Too many streams are open, so no further ones can be opened at this time.
-    #[error("maximum number of streams reached")]
     TooManyStreams
 }
 
@@ -44,6 +34,43 @@ impl ConnectionError {
             ConnectionError::Decode(FrameDecodeError::Io(e)) => Some(e.kind()),
             _ => None
         }
+    }
+}
+
+impl std::fmt::Display for ConnectionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            ConnectionError::Io(e) => write!(f, "i/o error: {}", e),
+            ConnectionError::Decode(e) => write!(f, "decode error: {}", e),
+            ConnectionError::NoMoreStreamIds => f.write_str("number of stream ids has been exhausted"),
+            ConnectionError::Closed => f.write_str("connection is closed"),
+            ConnectionError::TooManyStreams => f.write_str("maximum number of streams reached")
+        }
+    }
+}
+
+impl std::error::Error for ConnectionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            ConnectionError::Io(e) => Some(e),
+            ConnectionError::Decode(e) => Some(e),
+            ConnectionError::NoMoreStreamIds
+            | ConnectionError::Closed
+            | ConnectionError::TooManyStreams
+            => None
+        }
+    }
+}
+
+impl From<std::io::Error> for ConnectionError {
+    fn from(e: std::io::Error) -> Self {
+        ConnectionError::Io(e)
+    }
+}
+
+impl From<FrameDecodeError> for ConnectionError {
+    fn from(e: FrameDecodeError) -> Self {
+        ConnectionError::Decode(e)
     }
 }
 
