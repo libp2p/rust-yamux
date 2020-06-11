@@ -830,7 +830,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                     State::Open => {
                         let mut header = Header::data(stream_id, 0);
                         header.rst();
-                        Some(Frame::new(header))
+                        Some(Frame::new(header).left())
                     }
                     // The stream was dropped without calling `poll_close`.
                     // We have already received a FIN from remote and send one
@@ -838,7 +838,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                     State::RecvClosed => {
                         let mut header = Header::data(stream_id, 0);
                         header.fin();
-                        Some(Frame::new(header))
+                        Some(Frame::new(header).left())
                     }
                     // The stream was properly closed. We either already have
                     // or will at some later point send our FIN frame.
@@ -851,7 +851,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                             // which we will never send, so reset the stream now.
                             let mut header = Header::data(stream_id, 0);
                             header.rst();
-                            Some(Frame::new(header))
+                            Some(Frame::new(header).left())
                         } else {
                             // The remote is not blocked as we send window updates
                             // for as long as we know the stream. For unknown streams
@@ -874,7 +874,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 frame
             };
             if let Some(f) = frame {
-                self.socket.get_mut().send(&f).await.or(Err(ConnectionError::Closed))?
+                let cmd = StreamCommand::SendFrame(f);
+                self.stream_sender.send(cmd).await.or(Err(ConnectionError::Closed))?;
             }
             self.garbage.push(stream_id)
         }
