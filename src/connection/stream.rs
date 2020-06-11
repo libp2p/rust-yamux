@@ -190,8 +190,11 @@ impl futures::stream::Stream for Stream {
     type Item = io::Result<Packet>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        if !self.config.read_after_close && self.sender.is_closed() {
-            return Poll::Ready(None)
+        if !self.config.read_after_close {
+            if !self.shared().state.can_write() {
+                log::debug!("{}/{}: eof", self.conn, self.id);
+                return Poll::Ready(None)
+            }
         }
 
         // Try to deliver any pending window updates first.
@@ -261,8 +264,11 @@ impl futures::stream::Stream for Stream {
 // provided mutable slice.
 impl AsyncRead for Stream {
     fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context, buf: &mut [u8]) -> Poll<io::Result<usize>> {
-        if !self.config.read_after_close && self.sender.is_closed() {
-            return Poll::Ready(Ok(0))
+        if !self.config.read_after_close {
+            if !self.shared().state.can_write() {
+                log::debug!("{}/{}: eof", self.conn, self.id);
+                return Poll::Ready(Ok(0))
+            }
         }
 
         // Try to deliver any pending window updates first.
