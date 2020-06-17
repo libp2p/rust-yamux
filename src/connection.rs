@@ -845,19 +845,19 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                     // The remote may be out of credit though and blocked on
                     // writing more data. We may need to reset the stream.
                     State::SendClosed =>
-                        if win_update_mode == WindowUpdateMode::OnRead && !shared.buffer.is_empty() {
-                            // The stream has unconsumed data left when closed.
+                        if win_update_mode == WindowUpdateMode::OnRead && shared.window == 0 {
                             // The remote may be waiting for a window update
                             // which we will never send, so reset the stream now.
                             let mut header = Header::data(stream_id, 0);
                             header.rst();
                             Some(Frame::new(header))
                         } else {
-                            // The remote is not blocked as we send window updates
-                            // for as long as we know the stream. For unknown streams
-                            // we send a RST in `Connection::on_data`.
-                            // For `OnRead` and empty stream buffers we have or will
-                            // send another window update too.
+                            // The remote has either still credit or will be given more
+                            // (due to an enqueued window update or because the update
+                            // mode is `OnReceive`) or we already have inbound frames in
+                            // the socket buffer which will be processed later. In any
+                            // case we will reply with an RST in `Connection::on_data`
+                            // because the stream will no longer be known.
                             None
                         }
                     // The stream was properly closed. We either already have
@@ -874,6 +874,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 frame
             };
             if let Some(f) = frame {
+                log::trace!("{}: sending: {}", self.id, f.header());
                 self.socket.get_mut().send(&f).await.or(Err(ConnectionError::Closed))?
             }
             self.garbage.push(stream_id)

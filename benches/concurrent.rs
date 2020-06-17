@@ -8,10 +8,10 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-use async_std::task;
 use criterion::{criterion_group, criterion_main, Criterion};
 use futures::{channel::mpsc, future, prelude::*, ready};
 use std::{fmt, io, pin::Pin, sync::Arc, task::{Context, Poll}};
+use tokio::{runtime::Runtime, task};
 use yamux::{Config, Connection, Mode};
 
 criterion_group!(benches, concurrent);
@@ -52,16 +52,18 @@ fn concurrent(c: &mut Criterion) {
 
     c.bench_function_over_inputs("one by one", move |b, &&params| {
             let data = data1.clone();
+            let mut rt = Runtime::new().unwrap();
             b.iter(move || {
-                task::block_on(roundtrip(params.streams, params.messages, data.clone(), false))
+                rt.block_on(roundtrip(params.streams, params.messages, data.clone(), false))
             })
         },
         params);
 
     c.bench_function_over_inputs("all at once", move |b, &&params| {
             let data = data2.clone();
+            let mut rt = Runtime::new().unwrap();
             b.iter(move || {
-                task::block_on(roundtrip(params.streams, params.messages, data.clone(), true))
+                rt.block_on(roundtrip(params.streams, params.messages, data.clone(), true))
             })
         },
         params);

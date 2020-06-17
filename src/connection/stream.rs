@@ -174,6 +174,19 @@ impl Stream {
             }
         }
     }
+
+    /// Try to deliver a pending window update.
+    fn send_pending(&mut self, cx: &mut Context) -> Poll<io::Result<()>> {
+        if self.pending.is_some() {
+            ready!(self.sender.poll_ready(cx).map_err(|_| self.write_zero_err())?);
+            let mut frame = self.pending.take().expect("pending.is_some()").right();
+            self.add_flag(frame.header_mut());
+            let cmd = StreamCommand::SendFrame(frame);
+            self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?;
+            self.shared().window = self.config.receive_window
+        }
+        Poll::Ready(Ok(()))
+    }
 }
 
 /// Byte data produced by the [`futures::stream::Stream`] impl of [`Stream`].
@@ -194,14 +207,8 @@ impl futures::stream::Stream for Stream {
             return Poll::Ready(None)
         }
 
-        // Try to deliver any pending window updates first.
-        if self.pending.is_some() {
-            ready!(self.sender.poll_ready(cx).map_err(|_| self.write_zero_err())?);
-            let mut frame = self.pending.take().expect("pending.is_some()").right();
-            self.add_flag(frame.header_mut());
-            let cmd = StreamCommand::SendFrame(frame);
-            self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?
-        }
+        // Try to deliver any pending window update first.
+        ready!(self.send_pending(cx))?;
 
         // We need to limit the `shared` `MutexGuard` scope, or else we run into
         // borrow check troubles further down.
@@ -237,8 +244,6 @@ impl futures::stream::Stream for Stream {
                 // No, time to go.
                 return Poll::Pending
             }
-
-            shared.window = self.config.receive_window
         }
 
         // At this point we know we have to send a window update to the remote.
@@ -265,14 +270,8 @@ impl AsyncRead for Stream {
             return Poll::Ready(Ok(0))
         }
 
-        // Try to deliver any pending window updates first.
-        if self.pending.is_some() {
-            ready!(self.sender.poll_ready(cx).map_err(|_| self.write_zero_err())?);
-            let mut frame = self.pending.take().expect("pending.is_some()").right();
-            self.add_flag(frame.header_mut());
-            let cmd = StreamCommand::SendFrame(frame);
-            self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?
-        }
+        // Try to deliver any pending window update first.
+        ready!(self.send_pending(cx))?;
 
         // We need to limit the `shared` `MutexGuard` scope, or else we run into
         // borrow check troubles further down.
@@ -314,8 +313,6 @@ impl AsyncRead for Stream {
                 // No, time to go.
                 return Poll::Pending
             }
-
-            shared.window = self.config.receive_window
         }
 
         // At this point we know we have to send a window update to the remote.
@@ -369,7 +366,6 @@ impl AsyncWrite for Stream {
         if self.state() == State::Closed {
             return Poll::Ready(Ok(()))
         }
-        log::trace!("{}/{}: close", self.conn, self.id);
         ready!(self.sender.poll_ready(cx).map_err(|_| self.write_zero_err())?);
         let ack = if self.flag == Flag::Ack {
             self.flag = Flag::None;
@@ -377,6 +373,7 @@ impl AsyncWrite for Stream {
         } else {
             false
         };
+        log::trace!("{}/{}: close", self.conn, self.id);
         let cmd = StreamCommand::CloseStream { id: self.id, ack };
         self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?;
         self.shared().update_state(self.conn, self.id, State::SendClosed);

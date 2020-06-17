@@ -8,12 +8,13 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-use async_std::{net::{TcpStream, TcpListener}, task};
 use crate::{Config, Connection, ConnectionError, Mode, Control, connection::State};
 use futures::{future, prelude::*};
 use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};
 use rand::Rng;
 use std::{fmt::Debug, io, net::{Ipv4Addr, SocketAddr, SocketAddrV4}};
+use tokio::{net::{TcpStream, TcpListener}, runtime::Runtime, task};
+use tokio_util::compat::{Compat, Tokio02AsyncReadCompatExt};
 
 #[test]
 fn prop_send_recv() {
@@ -21,20 +22,21 @@ fn prop_send_recv() {
         if msgs.is_empty() {
             return TestResult::discard()
         }
-        task::block_on(async move {
+        let mut rt = Runtime::new().unwrap();
+        rt.block_on(async move {
             let num_requests = msgs.len();
             let iter = msgs.into_iter().map(|m| m.0);
 
-            let (listener, address) = bind().await.expect("bind");
+            let (mut listener, address) = bind().await.expect("bind");
 
             let server = async {
-                let socket = listener.accept().await.expect("accept").0;
+                let socket = listener.accept().await.expect("accept").0.compat();
                 let connection = Connection::new(socket, Config::default(), Mode::Server);
                 repeat_echo(connection).await.expect("repeat_echo")
             };
 
             let client = async {
-                let socket = TcpStream::connect(address).await.expect("connect");
+                let socket = TcpStream::connect(address).await.expect("connect").compat();
                 let connection = Connection::new(socket, Config::default(), Mode::Client);
                 let control = connection.control();
                 task::spawn(crate::into_stream(connection).for_each(|_| future::ready(())));
@@ -55,19 +57,20 @@ fn prop_max_streams() {
         let mut cfg = Config::default();
         cfg.set_max_num_streams(max_streams);
 
-        task::block_on(async move {
-            let (listener, address) = bind().await.expect("bind");
+        let mut rt = Runtime::new().unwrap();
+        rt.block_on(async move {
+            let (mut listener, address) = bind().await.expect("bind");
 
             let cfg_s = cfg.clone();
             let server = async move {
-                let socket = listener.accept().await.expect("accept").0;
+                let socket = listener.accept().await.expect("accept").0.compat();
                 let connection = Connection::new(socket, cfg_s, Mode::Server);
                 repeat_echo(connection).await
             };
 
             task::spawn(server);
 
-            let socket = TcpStream::connect(address).await.expect("connect");
+            let socket = TcpStream::connect(address).await.expect("connect").compat();
             let connection = Connection::new(socket, cfg, Mode::Client);
             let mut control = connection.control();
             task::spawn(crate::into_stream(connection).for_each(|_| future::ready(())));
@@ -89,12 +92,13 @@ fn prop_max_streams() {
 fn prop_send_recv_half_closed() {
     fn prop(msg: Msg) {
         let msg_len = msg.0.len();
-        task::block_on(async move {
-            let (listener, address) = bind().await.expect("bind");
+        let mut rt = Runtime::new().unwrap();
+        rt.block_on(async move {
+            let (mut listener, address) = bind().await.expect("bind");
 
             // Server should be able to write on a stream shutdown by the client.
             let server = async {
-                let socket = listener.accept().await.expect("accept").0;
+                let socket = listener.accept().await.expect("accept").0.compat();
                 let mut connection = Connection::new(socket, Config::default(), Mode::Server);
                 let mut stream = connection.next_stream().await
                     .expect("S: next_stream")
@@ -108,7 +112,7 @@ fn prop_send_recv_half_closed() {
 
             // Client should be able to read after shutting down the stream.
             let client = async {
-                let socket = TcpStream::connect(address).await.expect("connect");
+                let socket = TcpStream::connect(address).await.expect("connect").compat();
                 let connection = Connection::new(socket, Config::default(), Mode::Client);
                 let mut control = connection.control();
                 task::spawn(crate::into_stream(connection).for_each(|_| future::ready(())));
@@ -150,7 +154,7 @@ async fn bind() -> io::Result<(TcpListener, SocketAddr)> {
 }
 
 /// For each incoming stream of `c` echo back to the sender.
-async fn repeat_echo(c: Connection<TcpStream>) -> Result<(), ConnectionError> {
+async fn repeat_echo(c: Connection<Compat<TcpStream>>) -> Result<(), ConnectionError> {
     let c = crate::into_stream(c);
     c.try_for_each_concurrent(None, |mut stream| async move {
         {

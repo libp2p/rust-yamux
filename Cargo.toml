@@ -1,6 +1,6 @@
 [package]
 name = "yamux"
-version = "0.4.5"
+version = "0.4.6"
 authors = ["Parity Technologies <admin@parity.io>"]
 license = "Apache-2.0 OR MIT"
 description = "Multiplexer over reliable, ordered connections"
@@ -20,10 +20,11 @@ static_assertions = "1"
 
 [dev-dependencies]
 anyhow = "1"
-async-std = "1"
 criterion = "0.3"
 futures = "0.3.4"
 quickcheck = "0.9"
+tokio = { version = "0.2", features = ["tcp", "rt-threaded", "macros"] }
+tokio-util = { version = "0.3", features = ["compat"] }
 
 [[bench]]
 name = "concurrent"
