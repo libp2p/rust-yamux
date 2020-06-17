@@ -26,11 +26,6 @@ impl Chunks {
         Chunks { seq: VecDeque::new() }
     }
 
-    /// Does this chunk list contain any bytes?
-    pub(crate) fn is_empty(&self) -> bool {
-        self.seq.iter().all(|x| x.is_empty())
-    }
-
     /// The total length of bytes contained in all `Chunk`s.
     pub(crate) fn len(&self) -> Option<usize> {
         self.seq.iter().fold(Some(0), |total, x| {
