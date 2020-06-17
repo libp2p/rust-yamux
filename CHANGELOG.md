@@ -1,3 +1,8 @@
+# 0.4.6
+
+- Send RST frame if the window of a dropped stream is 0 and it is in state
+  `SendClosed` (#84).
+
 # 0.4.5
 
 - Removed `bytes` (#77) and `thiserror` (#78) dependencies.
