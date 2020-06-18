@@ -247,16 +247,9 @@ impl futures::stream::Stream for Stream {
         }
 
         // At this point we know we have to send a window update to the remote.
-        let frame = Frame::window_update(self.id, self.config.receive_window);
-        match self.sender.poll_ready(cx).map_err(|_| self.write_zero_err())? {
-            Poll::Ready(()) => {
-                let mut frame = frame.right();
-                self.add_flag(frame.header_mut());
-                let cmd = StreamCommand::SendFrame(frame);
-                self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?
-            }
-            Poll::Pending => self.pending = Some(frame)
-        }
+        debug_assert!(self.pending.is_none());
+        self.pending = Some(Frame::window_update(self.id, self.config.receive_window));
+        ready!(self.send_pending(cx))?;
 
         Poll::Pending
     }
@@ -316,16 +309,9 @@ impl AsyncRead for Stream {
         }
 
         // At this point we know we have to send a window update to the remote.
-        let frame = Frame::window_update(self.id, self.config.receive_window);
-        match self.sender.poll_ready(cx).map_err(|_| self.write_zero_err())? {
-            Poll::Ready(()) => {
-                let mut frame = frame.right();
-                self.add_flag(frame.header_mut());
-                let cmd = StreamCommand::SendFrame(frame);
-                self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?
-            }
-            Poll::Pending => self.pending = Some(frame)
-        }
+        debug_assert!(self.pending.is_none());
+        self.pending = Some(Frame::window_update(self.id, self.config.receive_window));
+        ready!(self.send_pending(cx))?;
 
         Poll::Pending
     }
