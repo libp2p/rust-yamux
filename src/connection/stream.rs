@@ -78,7 +78,7 @@ pub struct Stream {
     conn: connection::Id,
     config: Arc<Config>,
     sender: mpsc::Sender<StreamCommand>,
-    pending: Option<Frame<WindowUpdate>>,
+    window_update: Option<Frame<WindowUpdate>>,
     flag: Flag,
     shared: Arc<Mutex<Shared>>
 }
@@ -88,7 +88,7 @@ impl fmt::Debug for Stream {
         f.debug_struct("Stream")
             .field("id", &self.id.val())
             .field("connection", &self.conn)
-            .field("pending", &self.pending.is_some())
+            .field("window_update", &self.window_update.is_some())
             .finish()
     }
 }
@@ -114,7 +114,7 @@ impl Stream {
             conn,
             config,
             sender,
-            pending: None,
+            window_update: None,
             flag: Flag::None,
             shared: Arc::new(Mutex::new(Shared::new(window, credit))),
         }
@@ -149,7 +149,7 @@ impl Stream {
             conn: self.conn,
             config: self.config.clone(),
             sender: self.sender.clone(),
-            pending: None,
+            window_update: None,
             flag: self.flag,
             shared: self.shared.clone()
         }
@@ -176,10 +176,10 @@ impl Stream {
     }
 
     /// Try to deliver a pending window update.
-    fn send_pending(&mut self, cx: &mut Context) -> Poll<io::Result<()>> {
-        if self.pending.is_some() {
+    fn send_pending_window_update(&mut self, cx: &mut Context) -> Poll<io::Result<()>> {
+        if self.window_update.is_some() {
             ready!(self.sender.poll_ready(cx).map_err(|_| self.write_zero_err())?);
-            let mut frame = self.pending.take().expect("pending.is_some()").right();
+            let mut frame = self.window_update.take().expect("window_update.is_some()").right();
             self.add_flag(frame.header_mut());
             let cmd = StreamCommand::SendFrame(frame);
             self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?;
@@ -207,8 +207,7 @@ impl futures::stream::Stream for Stream {
             return Poll::Ready(None)
         }
 
-        // Try to deliver any pending window update first.
-        ready!(self.send_pending(cx))?;
+        ready!(self.send_pending_window_update(cx))?;
 
         // We need to limit the `shared` `MutexGuard` scope, or else we run into
         // borrow check troubles further down.
@@ -247,16 +246,9 @@ impl futures::stream::Stream for Stream {
         }
 
         // At this point we know we have to send a window update to the remote.
-        let frame = Frame::window_update(self.id, self.config.receive_window);
-        match self.sender.poll_ready(cx).map_err(|_| self.write_zero_err())? {
-            Poll::Ready(()) => {
-                let mut frame = frame.right();
-                self.add_flag(frame.header_mut());
-                let cmd = StreamCommand::SendFrame(frame);
-                self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?
-            }
-            Poll::Pending => self.pending = Some(frame)
-        }
+        debug_assert!(self.window_update.is_none());
+        self.window_update = Some(Frame::window_update(self.id, self.config.receive_window));
+        ready!(self.send_pending_window_update(cx))?;
 
         Poll::Pending
     }
@@ -270,8 +262,7 @@ impl AsyncRead for Stream {
             return Poll::Ready(Ok(0))
         }
 
-        // Try to deliver any pending window update first.
-        ready!(self.send_pending(cx))?;
+        ready!(self.send_pending_window_update(cx))?;
 
         // We need to limit the `shared` `MutexGuard` scope, or else we run into
         // borrow check troubles further down.
@@ -316,16 +307,9 @@ impl AsyncRead for Stream {
         }
 
         // At this point we know we have to send a window update to the remote.
-        let frame = Frame::window_update(self.id, self.config.receive_window);
-        match self.sender.poll_ready(cx).map_err(|_| self.write_zero_err())? {
-            Poll::Ready(()) => {
-                let mut frame = frame.right();
-                self.add_flag(frame.header_mut());
-                let cmd = StreamCommand::SendFrame(frame);
-                self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?
-            }
-            Poll::Pending => self.pending = Some(frame)
-        }
+        debug_assert!(self.window_update.is_none());
+        self.window_update = Some(Frame::window_update(self.id, self.config.receive_window));
+        ready!(self.send_pending_window_update(cx))?;
 
         Poll::Pending
     }

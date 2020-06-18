@@ -1,3 +1,7 @@
+# 0.4.7
+
+- Bugfix release (#85).
+
 # 0.4.6
 
 - Send RST frame if the window of a dropped stream is 0 and it is in state
