@@ -99,10 +99,8 @@ fn prop_send_recv_half_closed() {
             // Server should be able to write on a stream shutdown by the client.
             let server = async {
                 let socket = listener.accept().await.expect("accept").0.compat();
-                let mut connection = Connection::new(socket, Config::default(), Mode::Server);
-                let mut stream = connection.next_stream().await
-                    .expect("S: next_stream")
-                    .expect("S: some stream");
+                let connection = Connection::new(socket, Config::default(), Mode::Server);
+                let (mut stream, connection) = connection.next_stream().await.expect("S: next_stream");
                 task::spawn(crate::into_stream(connection).for_each(|_| future::ready(())));
                 let mut buf = vec![0; msg_len];
                 stream.read_exact(&mut buf).await.expect("S: read_exact");
@@ -155,7 +153,7 @@ async fn bind() -> io::Result<(TcpListener, SocketAddr)> {
 
 /// For each incoming stream of `c` echo back to the sender.
 async fn repeat_echo(c: Connection<Compat<TcpStream>>) -> Result<(), ConnectionError> {
-    let c = crate::into_stream(c);
+    let c = crate::into_stream(c).map(Ok);
     c.try_for_each_concurrent(None, |mut stream| async move {
         {
             let (mut r, mut w) = futures::io::AsyncReadExt::split(&mut stream);

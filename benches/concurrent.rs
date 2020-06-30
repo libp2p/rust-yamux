@@ -12,7 +12,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use futures::{channel::mpsc, future, prelude::*, ready};
 use std::{fmt, io, pin::Pin, sync::Arc, task::{Context, Poll}};
 use tokio::{runtime::Runtime, task};
-use yamux::{Config, Connection, Mode};
+use yamux::{Config, Connection, ConnectionError, Mode};
 
 criterion_group!(benches, concurrent);
 criterion_main!(benches);
@@ -76,7 +76,8 @@ async fn roundtrip(nstreams: usize, nmessages: usize, data: Bytes, send_all: boo
     let client = client.into_async_read();
 
     let server = async move {
-        yamux::into_stream(Connection::new(server, Config::default(), Mode::Server))
+        let connection = Connection::new(server, Config::default(), Mode::Server);
+        yamux::into_stream(connection).map(Ok::<_, ConnectionError>)
             .try_for_each_concurrent(None, |mut stream| async move {
                 {
                     let (mut r, mut w) = futures::io::AsyncReadExt::split(&mut stream);
@@ -92,9 +93,9 @@ async fn roundtrip(nstreams: usize, nmessages: usize, data: Bytes, send_all: boo
     task::spawn(server);
 
     let (tx, rx) = mpsc::unbounded();
-    let conn = Connection::new(client, Config::default(), Mode::Client);
-    let mut ctrl = conn.control();
-    task::spawn(yamux::into_stream(conn).for_each(|_| future::ready(())));
+    let connection = Connection::new(client, Config::default(), Mode::Client);
+    let mut ctrl = connection.control();
+    task::spawn(yamux::into_stream(connection).for_each(|_| future::ready(())));
 
     for _ in 0 .. nstreams {
         let data = data.clone();

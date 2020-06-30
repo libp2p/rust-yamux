@@ -30,3 +30,6 @@ tokio-util = { version = "0.3", features = ["compat"] }
 name = "concurrent"
 harness = false
 
+[profile.bench]
+lto = true
+codegen-units = 1

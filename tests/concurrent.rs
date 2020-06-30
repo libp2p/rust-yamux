@@ -12,7 +12,7 @@ use futures::{channel::mpsc, prelude::*};
 use std::{net::{Ipv4Addr, SocketAddr, SocketAddrV4}, sync::Arc};
 use tokio::{net::{TcpStream, TcpListener}, task};
 use tokio_util::compat::Tokio02AsyncReadCompatExt;
-use yamux::{Config, Connection, Mode};
+use yamux::{Config, Connection, ConnectionError, Mode};
 
 async fn roundtrip(address: SocketAddr, nstreams: usize, data: Arc<Vec<u8>>) {
     let mut listener = TcpListener::bind(&address).await.expect("bind");
@@ -20,7 +20,8 @@ async fn roundtrip(address: SocketAddr, nstreams: usize, data: Arc<Vec<u8>>) {
 
     let server = async move {
         let socket = listener.accept().await.expect("accept").0.compat();
-        yamux::into_stream(Connection::new(socket, Config::default(), Mode::Server))
+        let connection = Connection::new(socket, Config::default(), Mode::Server);
+        yamux::into_stream(connection).map(Ok::<_, ConnectionError>)
             .try_for_each_concurrent(None, |mut stream| async move {
                 log::debug!("S: accepted new stream");
                 let mut len = [0; 4];
@@ -39,9 +40,9 @@ async fn roundtrip(address: SocketAddr, nstreams: usize, data: Arc<Vec<u8>>) {
 
     let socket = TcpStream::connect(&address).await.expect("connect").compat();
     let (tx, rx) = mpsc::unbounded();
-    let conn = Connection::new(socket, Config::default(), Mode::Client);
-    let mut ctrl = conn.control();
-    task::spawn(yamux::into_stream(conn).for_each(|_| future::ready(())));
+    let connection = Connection::new(socket, Config::default(), Mode::Client);
+    let mut ctrl = connection.control();
+    task::spawn(yamux::into_stream(connection).for_each(|_| future::ready(())));
     for _ in 0 .. nstreams {
         let data = data.clone();
         let tx = tx.clone();

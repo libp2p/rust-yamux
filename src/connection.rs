@@ -301,24 +301,19 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     /// Get the next incoming stream, opened by the remote.
     ///
     /// This must be called repeatedly in order to make progress.
-    /// Once `Ok(None)` or `Err(_)` is returned the connection is
-    /// considered closed and no further invocation of this method
-    /// must be attempted.
-    ///
-    /// # Cancellation
-    ///
-    /// Please note that if you poll the returned [`Future`] it *must
-    /// not be cancelled* but polled until [`Poll::Ready`] is returned.
-    pub async fn next_stream(&mut self) -> Result<Option<Stream>> {
+    /// Once an `Err(_)` is returned the connection is considered
+    /// closed and no further invocation of this method is possible.
+    pub async fn next_stream(mut self) -> Result<(Stream, Self)> {
+
         if self.is_closed {
             log::debug!("{}: connection is closed", self.id);
-            return Ok(None)
+            return Err(ConnectionError::Closed)
         }
 
         let result = self.next().await;
 
-        if let Ok(Some(_)) = result {
-            return result
+        if let Ok(s) = result {
+            return Ok((s, self))
         }
 
         self.is_closed = true;
@@ -354,11 +349,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             }
         }
 
-        if let Err(ConnectionError::Closed) = result {
-            return Ok(None)
-        }
-
-        result
+        result.map(move |stream| (stream, self))
     }
 
     /// Get the next inbound `Stream` and make progress along the way.
@@ -366,7 +357,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     /// This is called from `Connection::next_stream` instead of being a
     /// public method itself in order to guarantee proper closing in
     /// case of an error or at EOF.
-    async fn next(&mut self) -> Result<Option<Stream>> {
+    async fn next(&mut self) -> Result<Stream> {
         loop {
             self.garbage_collect().await?;
 
@@ -435,7 +426,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             if let Poll::Ready(frame) = inbound_frame {
                 if let Some(stream) = self.on_frame(frame).await? {
                     self.socket.get_mut().flush().await.or(Err(ConnectionError::Closed))?;
-                    return Ok(Some(stream))
+                    return Ok(stream)
                 }
             }
 
@@ -909,15 +900,19 @@ impl<T> Drop for Connection<T> {
 }
 
 /// Turn a Yamux [`Connection`] into a [`futures::Stream`].
-pub fn into_stream<T>(c: Connection<T>) -> impl futures::stream::Stream<Item = Result<Stream>>
+pub fn into_stream<T>(c: Connection<T>) -> impl futures::stream::Stream<Item = Stream>
 where
     T: AsyncRead + AsyncWrite + Unpin
 {
-    futures::stream::unfold(c, |mut c| async {
+    futures::stream::unfold(c, |c| async {
+        let id = c.id;
         match c.next_stream().await {
-            Ok(None) => None,
-            Ok(Some(stream)) => Some((Ok(stream), c)),
-            Err(e) => Some((Err(e), c))
+            Ok((stream, c)) => Some((stream, c)),
+            Err(ConnectionError::Closed) => None,
+            Err(e) => {
+                log::error!("{}: {}", id, e);
+                None
+            }
         }
     })
 }
