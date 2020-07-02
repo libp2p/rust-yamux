@@ -304,52 +304,48 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     /// Once an `Err(_)` is returned the connection is considered
     /// closed and no further invocation of this method is possible.
     pub async fn next_stream(mut self) -> Result<(Stream, Self)> {
-
         if self.is_closed {
             log::debug!("{}: connection is closed", self.id);
             return Err(ConnectionError::Closed)
         }
+        match self.next().await {
+            Ok(s) => Ok((s, self)),
+            Err(e) => {
+                // At this point we are either at EOF or encountered an error.
+                // We close all streams and wake up the associated tasks. We also
+                // close and drain all receivers so no more commands can be
+                // submitted. The connection is then considered closed.
+                self.is_closed = true;
 
-        let result = self.next().await;
-
-        if let Ok(s) = result {
-            return Ok((s, self))
-        }
-
-        self.is_closed = true;
-
-        // At this point we are either at EOF or encountered an error.
-        // We close all streams and wake up the associated tasks. We also
-        // close and drain all receivers so no more commands can be
-        // submitted. The connection is then considered closed.
-
-        // Close and drain the control command receiver.
-        if !self.control_receiver.stream().is_terminated() {
-            self.control_receiver.stream().close();
-            self.control_receiver.unpause();
-            while let Some(cmd) = self.control_receiver.next().await {
-                match cmd {
-                    ControlCommand::OpenStream(reply) => {
-                        let _ = reply.send(Err(ConnectionError::Closed));
-                    }
-                    ControlCommand::CloseConnection(reply) => {
-                        let _ = reply.send(());
+                // Close and drain the control command receiver.
+                if !self.control_receiver.stream().is_terminated() {
+                    self.control_receiver.stream().close();
+                    self.control_receiver.unpause();
+                    while let Some(cmd) = self.control_receiver.next().await {
+                        match cmd {
+                            ControlCommand::OpenStream(reply) => {
+                                let _ = reply.send(Err(ConnectionError::Closed));
+                            }
+                            ControlCommand::CloseConnection(reply) => {
+                                let _ = reply.send(());
+                            }
+                        }
                     }
                 }
+
+                self.drop_all_streams();
+
+                // Close and drain the stream command receiver.
+                if !self.stream_receiver.is_terminated() {
+                    self.stream_receiver.close();
+                    while let Some(_cmd) = self.stream_receiver.next().await {
+                        // drop it
+                    }
+                }
+
+                Err(e)
             }
         }
-
-        self.drop_all_streams();
-
-        // Close and drain the stream command receiver.
-        if !self.stream_receiver.is_terminated() {
-            self.stream_receiver.close();
-            while let Some(_cmd) = self.stream_receiver.next().await {
-                // drop it
-            }
-        }
-
-        result.map(move |stream| (stream, self))
     }
 
     /// Get the next inbound `Stream` and make progress along the way.
