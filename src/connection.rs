@@ -170,8 +170,7 @@ pub struct Connection<T> {
     stream_sender: mpsc::Sender<StreamCommand>,
     stream_receiver: mpsc::Receiver<StreamCommand>,
     garbage: Vec<StreamId>, // see `Connection::garbage_collect()`
-    shutdown: Shutdown,
-    is_closed: bool
+    shutdown: Shutdown
 }
 
 /// `Control` to `Connection` commands.
@@ -254,7 +253,6 @@ impl<T> fmt::Debug for Connection<T> {
             .field("mode", &self.mode)
             .field("streams", &self.streams.len())
             .field("next_id", &self.next_id)
-            .field("is_closed", &self.is_closed)
             .finish()
     }
 }
@@ -288,8 +286,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 Mode::Server => 2
             },
             garbage: Vec::new(),
-            shutdown: Shutdown::NotStarted,
-            is_closed: false
+            shutdown: Shutdown::NotStarted
         }
     }
 
@@ -304,10 +301,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     /// Once an `Err(_)` is returned the connection is considered
     /// closed and no further invocation of this method is possible.
     pub async fn next_stream(mut self) -> Result<(Stream, Self)> {
-        if self.is_closed {
-            log::debug!("{}: connection is closed", self.id);
-            return Err(ConnectionError::Closed)
-        }
         match self.next().await {
             Ok(s) => Ok((s, self)),
             Err(e) => {
@@ -315,7 +308,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 // We close all streams and wake up the associated tasks. We also
                 // close and drain all receivers so no more commands can be
                 // submitted. The connection is then considered closed.
-                self.is_closed = true;
 
                 // Close and drain the control command receiver.
                 if !self.control_receiver.stream().is_terminated() {
