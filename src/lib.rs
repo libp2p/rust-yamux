@@ -101,7 +101,7 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Set the receive window (must be >= 256 KiB).
+    /// Set the receive window per stream (must be >= 256 KiB).
     ///
     /// # Panics
     ///
