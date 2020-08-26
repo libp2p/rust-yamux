@@ -1,3 +1,8 @@
+# 0.4.8
+
+- Bugfixes (#91).
+- Improve documentation (#88).
+
 # 0.4.7
 
 - Bugfix release (#85).
