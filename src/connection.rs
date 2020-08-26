@@ -651,13 +651,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 log::error!("{}: maximum number of streams reached", self.id);
                 return Action::Terminate(Frame::internal_error())
             }
-            let stream = {
+            let mut stream = {
                 let config = self.config.clone();
                 let credit = DEFAULT_CREDIT;
                 let sender = self.stream_sender.clone();
-                let mut stream = Stream::new(stream_id, self.id, config, credit, credit, sender);
-                stream.set_flag(stream::Flag::Ack);
-                stream
+                Stream::new(stream_id, self.id, config, credit, credit, sender)
             };
             let window_update;
             {
@@ -672,11 +670,15 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                     && self.config.window_update_mode == WindowUpdateMode::OnReceive
                 {
                     shared.window = self.config.receive_window;
-                    let frame = Frame::window_update(stream_id, self.config.receive_window);
+                    let mut frame = Frame::window_update(stream_id, self.config.receive_window);
+                    frame.header_mut().ack();
                     window_update = Some(frame)
                 } else {
                     window_update = None
                 }
+            }
+            if window_update.is_none() {
+                stream.set_flag(stream::Flag::Ack)
             }
             self.streams.insert(stream_id, stream.clone());
             return Action::New(stream, window_update)
