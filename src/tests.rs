@@ -9,12 +9,77 @@
 // at https://opensource.org/licenses/MIT.
 
 use crate::{Config, Connection, ConnectionError, Mode, Control, connection::State};
+use crate::WindowUpdateMode;
 use futures::{future, prelude::*};
 use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};
 use rand::Rng;
 use std::{fmt::Debug, io, net::{Ipv4Addr, SocketAddr, SocketAddrV4}};
 use tokio::{net::{TcpStream, TcpListener}, runtime::Runtime, task};
 use tokio_util::compat::{Compat, Tokio02AsyncReadCompatExt};
+
+#[test]
+fn prop_config_send_recv_single() {
+    fn prop(mut msgs: Vec<Msg>, cfg1: TestConfig, cfg2: TestConfig) -> TestResult {
+        let mut rt = Runtime::new().unwrap();
+        msgs.insert(0, Msg(vec![1u8; crate::DEFAULT_CREDIT as usize]));
+        rt.block_on(async move {
+            let num_requests = msgs.len();
+            let iter = msgs.into_iter().map(|m| m.0);
+
+            let (mut listener, address) = bind().await.expect("bind");
+
+            let server = async {
+                let socket = listener.accept().await.expect("accept").0.compat();
+                let connection = Connection::new(socket, cfg1.0, Mode::Server);
+                repeat_echo(connection).await.expect("repeat_echo")
+            };
+
+            let client = async {
+                let socket = TcpStream::connect(address).await.expect("connect").compat();
+                let connection = Connection::new(socket, cfg2.0, Mode::Client);
+                let control = connection.control();
+                task::spawn(crate::into_stream(connection).for_each(|_| future::ready(())));
+                send_recv_single(control, iter.clone()).await.expect("send_recv")
+            };
+
+            let result = futures::join!(server, client).1;
+            TestResult::from_bool(result.len() == num_requests && result.into_iter().eq(iter))
+        })
+    }
+    QuickCheck::new().quickcheck(prop as fn(_, _, _) -> _)
+}
+
+#[test]
+fn prop_config_send_recv_multi() {
+    fn prop(mut msgs: Vec<Msg>, cfg1: TestConfig, cfg2: TestConfig) -> TestResult {
+        let mut rt = Runtime::new().unwrap();
+        msgs.insert(0, Msg(vec![1u8; crate::DEFAULT_CREDIT as usize]));
+        rt.block_on(async move {
+            let num_requests = msgs.len();
+            let iter = msgs.into_iter().map(|m| m.0);
+
+            let (mut listener, address) = bind().await.expect("bind");
+
+            let server = async {
+                let socket = listener.accept().await.expect("accept").0.compat();
+                let connection = Connection::new(socket, cfg1.0, Mode::Server);
+                repeat_echo(connection).await.expect("repeat_echo")
+            };
+
+            let client = async {
+                let socket = TcpStream::connect(address).await.expect("connect").compat();
+                let connection = Connection::new(socket, cfg2.0, Mode::Client);
+                let control = connection.control();
+                task::spawn(crate::into_stream(connection).for_each(|_| future::ready(())));
+                send_recv(control, iter.clone()).await.expect("send_recv")
+            };
+
+            let result = futures::join!(server, client).1;
+            TestResult::from_bool(result.len() == num_requests && result.into_iter().eq(iter))
+        })
+    }
+    QuickCheck::new().quickcheck(prop as fn(_, _, _) -> _)
+}
 
 #[test]
 fn prop_send_recv() {
@@ -145,6 +210,23 @@ impl Arbitrary for Msg {
     }
 }
 
+#[derive(Clone, Debug)]
+struct TestConfig(Config);
+
+impl Arbitrary for TestConfig {
+    fn arbitrary<G: Gen>(g: &mut G) -> Self {
+        let mut c = Config::default();
+        c.set_window_update_mode(if g.gen() {
+            WindowUpdateMode::OnRead
+        } else {
+            WindowUpdateMode::OnReceive
+        });
+        c.set_lazy_open(g.gen());
+        c.set_read_after_close(g.gen());
+        TestConfig(c)
+    }
+}
+
 async fn bind() -> io::Result<(TcpListener, SocketAddr)> {
     let i = Ipv4Addr::new(127, 0, 0, 1);
     let s = SocketAddr::V4(SocketAddrV4::new(i, 0));
@@ -187,6 +269,30 @@ where
         log::debug!("C: {}: received {} bytes", id, data.len());
         result.push(data)
     }
+    log::debug!("C: closing connection");
+    control.close().await?;
+    Ok(result)
+}
+
+/// Open a stream, send all messages and collect the responses.
+async fn send_recv_single<I>(mut control: Control, iter: I) -> Result<Vec<Vec<u8>>, ConnectionError>
+where
+    I: Iterator<Item = Vec<u8>>
+{
+    let mut stream = control.open_stream().await?;
+    log::debug!("C: new stream: {}", stream);
+    let mut result = Vec::new();
+    for msg in iter {
+        let id = stream.id();
+        let len = msg.len();
+        stream.write_all(&msg).await?;
+        log::debug!("C: {}: sent {} bytes", id, len);
+        let mut data = vec![0; msg.len()];
+        stream.read_exact(&mut data).await?;
+        log::debug!("C: {}: received {} bytes", id, data.len());
+        result.push(data)
+    }
+    stream.close().await?;
     log::debug!("C: closing connection");
     control.close().await?;
     Ok(result)

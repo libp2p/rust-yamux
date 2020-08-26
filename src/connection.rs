@@ -198,7 +198,7 @@ enum Action {
     /// Nothing to be done.
     None,
     /// A new stream has been opened by the remote.
-    New(Stream),
+    New(Stream, Option<Frame<WindowUpdate>>),
     /// A window update should be sent to the remote.
     Update(Frame<WindowUpdate>),
     /// A ping should be answered.
@@ -573,8 +573,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 };
                 match action {
                     Action::None => {}
-                    Action::New(stream) => {
+                    Action::New(stream, update) => {
                         log::trace!("{}: new inbound {} of {}", self.id, stream, self);
+                        if let Some(f) = update {
+                            log::trace!("{}/{}: sending update", self.id, f.header().stream_id());
+                            self.socket.get_mut().send(&f).await.or(Err(ConnectionError::Closed))?
+                        }
                         return Ok(Some(stream))
                     }
                     Action::Update(f) => {
@@ -647,14 +651,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 log::error!("{}: maximum number of streams reached", self.id);
                 return Action::Terminate(Frame::internal_error())
             }
-            let stream = {
+            let mut stream = {
                 let config = self.config.clone();
                 let credit = DEFAULT_CREDIT;
                 let sender = self.stream_sender.clone();
-                let mut stream = Stream::new(stream_id, self.id, config, credit, credit, sender);
-                stream.set_flag(stream::Flag::Ack);
-                stream
+                Stream::new(stream_id, self.id, config, credit, credit, sender)
             };
+            let window_update;
             {
                 let mut shared = stream.shared();
                 if is_finish {
@@ -662,9 +665,23 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 }
                 shared.window = shared.window.saturating_sub(frame.body_len());
                 shared.buffer.push(frame.into_body());
+                if !is_finish
+                    && shared.window == 0
+                    && self.config.window_update_mode == WindowUpdateMode::OnReceive
+                {
+                    shared.window = self.config.receive_window;
+                    let mut frame = Frame::window_update(stream_id, self.config.receive_window);
+                    frame.header_mut().ack();
+                    window_update = Some(frame)
+                } else {
+                    window_update = None
+                }
+            }
+            if window_update.is_none() {
+                stream.set_flag(stream::Flag::Ack)
             }
             self.streams.insert(stream_id, stream.clone());
-            return Action::New(stream)
+            return Action::New(stream, window_update)
         }
 
         if let Some(stream) = self.streams.get_mut(&stream_id) {
@@ -750,7 +767,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 stream.shared().update_state(self.id, stream_id, State::RecvClosed);
             }
             self.streams.insert(stream_id, stream.clone());
-            return Action::New(stream)
+            return Action::New(stream, None)
         }
 
         if let Some(stream) = self.streams.get_mut(&stream_id) {
