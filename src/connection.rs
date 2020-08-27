@@ -472,7 +472,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 let stream = {
                     let config = self.config.clone();
                     let sender = self.stream_sender.clone();
-                    let window = self.config.receive_window;
+                    let window =
+                        if self.config.lazy_open {
+                            DEFAULT_CREDIT
+                        } else {
+                            self.config.receive_window
+                        };
                     let mut stream = Stream::new(id, self.id, config, window, DEFAULT_CREDIT, sender);
                     if self.config.lazy_open {
                         stream.set_flag(stream::Flag::Syn)
