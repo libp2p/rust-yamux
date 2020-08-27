@@ -332,8 +332,6 @@ impl Flags {
     }
 }
 
-const MAX_FLAG_VAL: u16 = 8;
-
 /// Indicates the start of a new stream.
 pub const SYN: Flags = Flags(1);
 
@@ -345,6 +343,10 @@ pub const FIN: Flags = Flags(4);
 
 /// Indicates an immediate stream reset.
 pub const RST: Flags = Flags(8);
+
+/// Temporary flag indicating that the initial window update is additive.
+/// (See https://github.com/paritytech/yamux/issues/92)
+pub const ADD: Flags = Flags(0x8000);
 
 /// The serialised header size in bytes.
 pub const HEADER_SIZE: usize = 12;
@@ -381,10 +383,6 @@ pub fn decode(buf: &[u8; HEADER_SIZE]) -> Result<Header<()>, HeaderDecodeError> 
         _marker: std::marker::PhantomData
     };
 
-    if hdr.flags.0 > MAX_FLAG_VAL {
-        return Err(HeaderDecodeError::Flags(hdr.flags.0))
-    }
-
     Ok(hdr)
 }
 
@@ -395,17 +393,14 @@ pub enum HeaderDecodeError {
     /// Unknown version.
     Version(u8),
     /// An unknown frame type.
-    Type(u8),
-    /// Unknown flags.
-    Flags(u16)
+    Type(u8)
 }
 
 impl std::fmt::Display for HeaderDecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             HeaderDecodeError::Version(v) => write!(f, "unknown version: {}", v),
-            HeaderDecodeError::Type(t) => write!(f, "unknown frame type: {}", t),
-            HeaderDecodeError::Flags(x) => write!(f, "unknown flags type: {}", x)
+            HeaderDecodeError::Type(t) => write!(f, "unknown frame type: {}", t)
         }
     }
 }
@@ -428,7 +423,7 @@ mod tests {
             Header {
                 version: Version(0),
                 tag,
-                flags: Flags(std::cmp::min(g.gen(), MAX_FLAG_VAL)),
+                flags: Flags(g.gen()),
                 stream_id: StreamId(g.gen()),
                 length: Len(g.gen()),
                 _marker: std::marker::PhantomData
