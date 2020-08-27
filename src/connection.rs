@@ -743,7 +743,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         }
 
         let is_finish = frame.header().flags().contains(header::FIN); // half-close
-        let is_additive = frame.header().flags().contains(header::ADD); // additive window update
 
         if frame.header().flags().contains(header::SYN) { // new stream
             if !self.is_valid_remote_id(stream_id, Tag::WindowUpdate) {
@@ -759,7 +758,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 return Action::Terminate(Frame::protocol_error())
             }
             let stream = {
-                let credit = frame.header().credit() + if is_additive { DEFAULT_CREDIT } else { 0 };
+                let credit = frame.header().credit() + DEFAULT_CREDIT;
                 let config = self.config.clone();
                 let sender = self.stream_sender.clone();
                 let mut stream = Stream::new(stream_id, self.id, config, DEFAULT_CREDIT, credit, sender);
