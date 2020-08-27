@@ -76,15 +76,13 @@ pub enum WindowUpdateMode {
 /// - max. number of streams = 8192
 /// - window update mode = on receive
 /// - read after close = true
-/// - lazy open = false
 #[derive(Debug, Clone)]
 pub struct Config {
     receive_window: u32,
     max_buffer_size: usize,
     max_num_streams: usize,
     window_update_mode: WindowUpdateMode,
-    read_after_close: bool,
-    lazy_open: bool
+    read_after_close: bool
 }
 
 impl Default for Config {
@@ -94,8 +92,7 @@ impl Default for Config {
             max_buffer_size: 1024 * 1024,
             max_num_streams: 8192,
             window_update_mode: WindowUpdateMode::OnReceive,
-            read_after_close: true,
-            lazy_open: false
+            read_after_close: true
         }
     }
 }
@@ -149,8 +146,8 @@ impl Config {
     /// to the remote. This allows opening a stream with a custom receive
     /// window size (cf. [`Config::set_receive_window`]) which the remote
     /// can directly make use of.
-    pub fn set_lazy_open(&mut self, b: bool) -> &mut Self {
-        self.lazy_open = b;
+    #[deprecated(since = "0.6.0")]
+    pub fn set_lazy_open(&mut self, _: bool) -> &mut Self {
         self
     }
 }
