@@ -99,11 +99,6 @@ impl<T: HasSyn> Header<T> {
     pub fn syn(&mut self) {
         self.flags.0 |= SYN.0
     }
-
-    /// Set the [`ADD`] flag.
-    pub fn additive(&mut self) {
-        self.flags.0 |= ADD.0
-    }
 }
 
 impl<T: HasAck> Header<T> {
@@ -348,10 +343,6 @@ pub const FIN: Flags = Flags(4);
 
 /// Indicates an immediate stream reset.
 pub const RST: Flags = Flags(8);
-
-/// Temporary flag indicating that the initial window update is additive.
-/// (See https://github.com/paritytech/yamux/issues/92)
-pub const ADD: Flags = Flags(0x8000);
 
 /// The serialised header size in bytes.
 pub const HEADER_SIZE: usize = 12;
