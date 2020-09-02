@@ -133,23 +133,6 @@ impl Config {
         self.read_after_close = b;
         self
     }
-
-    /// Enable or disable the sending of an initial window update frame
-    /// when opening outbound streams.
-    ///
-    /// When enabled, opening a new outbound stream will not result in an
-    /// immediate send of a frame, instead the first outbound data frame
-    /// will be marked as opening a stream.
-    ///
-    /// When disabled (the current default), opening a new outbound
-    /// stream will result in a window update frame being sent immediately
-    /// to the remote. This allows opening a stream with a custom receive
-    /// window size (cf. [`Config::set_receive_window`]) which the remote
-    /// can directly make use of.
-    #[deprecated(since = "0.6.0")]
-    pub fn set_lazy_open(&mut self, _: bool) -> &mut Self {
-        self
-    }
 }
 
 // Check that we can safely cast a `usize` to a `u64`.

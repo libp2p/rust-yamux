@@ -467,7 +467,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 if extra_credit > 0 {
                     let mut frame = Frame::window_update(id, extra_credit);
                     frame.header_mut().syn();
-                    frame.header_mut().additive();
                     log::trace!("{}: sending initial {}", self.id, frame.header());
                     self.socket.get_mut().send(&frame).await.or(Err(ConnectionError::Closed))?
                 }
