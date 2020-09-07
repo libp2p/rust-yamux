@@ -1,3 +1,8 @@
+# 0.6.0
+
+Upgrade step 2 of 4. This version sets the non-standard flag, version 0.5.0
+already recognises.
+
 # 0.5.0
 
 This version begins the upgrade process spawning multiple versions that
