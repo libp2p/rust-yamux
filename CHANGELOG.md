@@ -1,3 +1,20 @@
+# 0.5.0
+
+This version begins the upgrade process spawning multiple versions that
+changes the meaning of the initial window update from *"This is the total
+size of the receive window."* to *"This is the size of the receive window
+in addition to the default size."* This is necessary for compatibility
+with other yamux implementations. See issue #92 for details.
+
+As a first step, version 0.5.0 interprets a non-standard flag to imply the
+new meaning. Future versions will set this flag and eventually the new
+meaning will always be assumed. Upgrading from the current implemention to
+the new semantics requires deployment of every intermediate version, each of
+which is only compatible with its immediate predecessor. Alternatively, if
+the default configuration together with `lazy_open` set to `true` is
+deployed on all communicating endpoints, one can skip directly to the end
+of the transition.
+
 # 0.4.9
 
 - Bugfixes (#93).
