@@ -463,23 +463,20 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 }
                 log::trace!("{}: creating new outbound stream", self.id);
                 let id = self.next_stream_id()?;
-                if !self.config.lazy_open {
-                    let mut frame = Frame::window_update(id, self.config.receive_window);
+                let extra_credit = self.config.receive_window - DEFAULT_CREDIT;
+                if extra_credit > 0 {
+                    let mut frame = Frame::window_update(id, extra_credit);
                     frame.header_mut().syn();
+                    frame.header_mut().additive();
                     log::trace!("{}: sending initial {}", self.id, frame.header());
                     self.socket.get_mut().send(&frame).await.or(Err(ConnectionError::Closed))?
                 }
                 let stream = {
                     let config = self.config.clone();
                     let sender = self.stream_sender.clone();
-                    let window =
-                        if self.config.lazy_open {
-                            DEFAULT_CREDIT
-                        } else {
-                            self.config.receive_window
-                        };
+                    let window = self.config.receive_window;
                     let mut stream = Stream::new(id, self.id, config, window, DEFAULT_CREDIT, sender);
-                    if self.config.lazy_open {
+                    if extra_credit == 0 {
                         stream.set_flag(stream::Flag::Syn)
                     }
                     stream
@@ -489,7 +486,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                     self.streams.insert(id, stream);
                 } else {
                     log::debug!("{}: open stream {} has been cancelled", self.id, id);
-                    if !self.config.lazy_open {
+                    if extra_credit > 0 {
                         let mut header = Header::data(id, 0);
                         header.rst();
                         let frame = Frame::new(header);

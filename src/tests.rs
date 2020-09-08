@@ -221,7 +221,6 @@ impl Arbitrary for TestConfig {
         } else {
             WindowUpdateMode::OnReceive
         });
-        c.set_lazy_open(g.gen());
         c.set_read_after_close(g.gen());
         c.set_receive_window(g.gen_range(256 * 1024, 1024 * 1024));
         TestConfig(c)

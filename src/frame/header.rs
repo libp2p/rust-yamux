@@ -99,6 +99,11 @@ impl<T: HasSyn> Header<T> {
     pub fn syn(&mut self) {
         self.flags.0 |= SYN.0
     }
+
+    /// Set the [`ADD`] flag.
+    pub fn additive(&mut self) {
+        self.flags.0 |= ADD.0
+    }
 }
 
 impl<T: HasAck> Header<T> {
