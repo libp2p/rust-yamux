@@ -1,3 +1,11 @@
+# 0.8.0
+
+- Upgrade step 4 of 4. This version always assumes the new semantics and
+  no longer sets the non-standard flag in intial window updates.
+- The configuration option `lazy_open` is removed. Initial window updates
+  are sent automatically if the receive window is configured to be larger
+  than the default.
+
 # 0.7.0
 
 Upgrade step 3 of 4. This version sets the non-standard flag, but
