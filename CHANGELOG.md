@@ -1,6 +1,6 @@
 # 0.7.0
 
-Upgrade step 3 of 4. This versions sets the non-standard flag, but
+Upgrade step 3 of 4. This version sets the non-standard flag, but
 irrespective of whether it is present or not, always assumes the new
 additive semantics of the intial window update.
 
