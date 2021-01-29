@@ -47,7 +47,7 @@ fn prop_config_send_recv_single() {
             TestResult::from_bool(result.len() == num_requests && result.into_iter().eq(iter))
         })
     }
-    QuickCheck::new().quickcheck(prop as fn(_, _, _) -> _)
+    QuickCheck::new().tests(10).quickcheck(prop as fn(_, _, _) -> _)
 }
 
 #[test]
@@ -79,7 +79,7 @@ fn prop_config_send_recv_multi() {
             TestResult::from_bool(result.len() == num_requests && result.into_iter().eq(iter))
         })
     }
-    QuickCheck::new().quickcheck(prop as fn(_, _, _) -> _)
+    QuickCheck::new().tests(10).quickcheck(prop as fn(_, _, _) -> _)
 }
 
 #[test]
