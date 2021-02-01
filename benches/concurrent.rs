@@ -8,8 +8,8 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-use criterion::{criterion_group, criterion_main, Criterion};
-use futures::{channel::mpsc, future, prelude::*, ready};
+use criterion::{BenchmarkId, criterion_group, criterion_main, Criterion, Throughput};
+use futures::{channel::mpsc, future, prelude::*, ready, io::AsyncReadExt};
 use std::{fmt, io, pin::Pin, sync::Arc, task::{Context, Poll}};
 use tokio::{runtime::Runtime, task};
 use yamux::{Config, Connection, Mode};
@@ -20,9 +20,9 @@ criterion_main!(benches);
 #[derive(Copy, Clone)]
 struct Params { streams: usize, messages: usize }
 
-impl fmt::Debug for Params {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "((streams {}) (messages {}))", self.streams, self.messages)
+impl fmt::Display for Params {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(streams {}, messages {})", self.streams, self.messages)
     }
 }
 
@@ -36,40 +36,30 @@ impl AsRef<[u8]> for Bytes {
 }
 
 fn concurrent(c: &mut Criterion) {
-    let params = &[
-        Params { streams:   1, messages:   1 },
-        Params { streams:  10, messages:   1 },
-        Params { streams:   1, messages:  10 },
-        Params { streams: 100, messages:   1 },
-        Params { streams:   1, messages: 100 },
-        Params { streams:  10, messages: 100 },
-        Params { streams: 100, messages:  10 }
-    ];
+    let data = Bytes(Arc::new(vec![0x42; 4096]));
 
-    let data0 = Bytes(Arc::new(vec![0x42; 4096]));
-    let data1 = data0.clone();
-    let data2 = data0.clone();
+    let mut group = c.benchmark_group("concurrent");
 
-    c.bench_function_over_inputs("one by one", move |b, &&params| {
-            let data = data1.clone();
+    for nstreams in [1, 10, 100].iter() {
+        for nmessages in [1, 10, 100].iter() {
+            let params = Params { streams: *nstreams, messages: *nmessages };
+            let data = data.clone();
             let mut rt = Runtime::new().unwrap();
-            b.iter(move || {
-                rt.block_on(roundtrip(params.streams, params.messages, data.clone(), false))
-            })
-        },
-        params);
+            group.throughput(Throughput::Bytes((nstreams * nmessages * data.0.len()) as u64));
+            group.bench_with_input(
+                BenchmarkId::from_parameter(params),
+                &params,
+                |b, &Params { streams, messages }| b.iter(||
+                    rt.block_on(roundtrip(streams, messages, data.clone()))
+                ),
+            );
+        }
+    }
 
-    c.bench_function_over_inputs("all at once", move |b, &&params| {
-            let data = data2.clone();
-            let mut rt = Runtime::new().unwrap();
-            b.iter(move || {
-                rt.block_on(roundtrip(params.streams, params.messages, data.clone(), true))
-            })
-        },
-        params);
+    group.finish();
 }
 
-async fn roundtrip(nstreams: usize, nmessages: usize, data: Bytes, send_all: bool) {
+async fn roundtrip(nstreams: usize, nmessages: usize, data: Bytes) {
     let msg_len = data.0.len();
     let (server, client) = Endpoint::new();
     let server = server.into_async_read();
@@ -101,33 +91,21 @@ async fn roundtrip(nstreams: usize, nmessages: usize, data: Bytes, send_all: boo
         let tx = tx.clone();
         let mut ctrl = ctrl.clone();
         task::spawn(async move {
-            let mut stream = ctrl.open_stream().await?;
-            if send_all {
-                // Send `nmessages` messages and receive `nmessages` messages.
-                for _ in 0 .. nmessages {
-                    stream.write_all(data.as_ref()).await?
-                }
-                stream.close().await?;
-                let mut n = 0;
-                let mut b = vec![0; data.0.len()];
-                loop {
-                    let k = stream.read(&mut b).await?;
-                    if k == 0 { break }
-                    n += k
-                }
-                tx.unbounded_send(n).expect("unbounded_send")
-            } else {
-                // Send and receive `nmessages` messages.
-                let mut n = 0;
-                let mut b = vec![0; data.0.len()];
-                for _ in 0 .. nmessages {
-                    stream.write_all(data.as_ref()).await?;
-                    stream.read_exact(&mut b[..]).await?;
-                    n += b.len()
-                }
-                stream.close().await?;
-                tx.unbounded_send(n).expect("unbounded_send");
+            let stream = ctrl.open_stream().await?;
+            let (mut reader, mut writer) = AsyncReadExt::split(stream);
+            // Send and receive `nmessages` messages.
+            let mut n = 0;
+            let mut b = vec![0; data.0.len()];
+            for _ in 0 .. nmessages {
+                futures::future::join(
+                    writer.write_all(data.as_ref()).map(|r| r.unwrap()),
+                    reader.read_exact(&mut b[..]).map(|r| r.unwrap()),
+                ).await;
+                n += b.len()
             }
+            let mut stream = reader.reunite(writer).unwrap();
+            stream.close().await?;
+            tx.unbounded_send(n).expect("unbounded_send");
             Ok::<(), yamux::ConnectionError>(())
         });
     }
