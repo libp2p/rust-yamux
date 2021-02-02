@@ -10,21 +10,13 @@
 
 use criterion::{BenchmarkId, criterion_group, criterion_main, Criterion, Throughput};
 use futures::{channel::mpsc, future, prelude::*, ready, io::AsyncReadExt};
-use std::{fmt, io, pin::Pin, sync::Arc, task::{Context, Poll}};
+use std::{fmt, io, pin::Pin, sync::Arc, task::{Context, Poll}, time::Duration};
 use tokio::{runtime::Runtime, task};
 use yamux::{Config, Connection, Mode};
+use constrained_connection::{Endpoint, new_unconstrained_connection, samples};
 
 criterion_group!(benches, concurrent);
 criterion_main!(benches);
-
-#[derive(Copy, Clone)]
-struct Params { streams: usize, messages: usize }
-
-impl fmt::Display for Params {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(streams {}, messages {})", self.streams, self.messages)
-    }
-}
 
 #[derive(Debug, Clone)]
 struct Bytes(Arc<Vec<u8>>);
@@ -37,134 +29,97 @@ impl AsRef<[u8]> for Bytes {
 
 fn concurrent(c: &mut Criterion) {
     let data = Bytes(Arc::new(vec![0x42; 4096]));
+    let networks = vec![
+        ("mobile", (|| samples::mobile_hsdpa().2) as fn() -> (_, _)),
+        ("adsl2+", (|| samples::residential_adsl2().2) as fn() -> (_, _)),
+        ("gbit-lan", (|| samples::gbit_lan().2) as fn() -> (_, _)),
+        ("unconstrained", new_unconstrained_connection as fn() -> (_, _)),
+    ];
 
     let mut group = c.benchmark_group("concurrent");
+    group.sample_size(10);
 
-    for nstreams in [1, 10, 100].iter() {
-        for nmessages in [1, 10, 100].iter() {
-            let params = Params { streams: *nstreams, messages: *nmessages };
-            let data = data.clone();
-            let mut rt = Runtime::new().unwrap();
-            group.throughput(Throughput::Bytes((nstreams * nmessages * data.0.len()) as u64));
-            group.bench_with_input(
-                BenchmarkId::from_parameter(params),
-                &params,
-                |b, &Params { streams, messages }| b.iter(||
-                    rt.block_on(roundtrip(streams, messages, data.clone()))
-                ),
-            );
+    for (network_name, new_connection) in networks.into_iter() {
+        for nstreams in [1, 10, 100].iter() {
+            for nmessages in [1, 10, 100].iter() {
+                let data = data.clone();
+                let mut rt = Runtime::new().unwrap();
+
+                group.throughput(Throughput::Bytes((nstreams * nmessages * data.0.len()) as u64));
+                group.bench_function(
+                    BenchmarkId::from_parameter(
+                        format!("{}/#streams{}/#messages{}", network_name, nstreams, nmessages),
+                    ),
+                    |b| b.iter(|| {
+                        let (server, client) = new_connection();
+                        rt.block_on(oneway(*nstreams, *nmessages, data.clone(), server, client))
+                    }),
+                );
+            }
         }
     }
 
     group.finish();
 }
 
-async fn roundtrip(nstreams: usize, nmessages: usize, data: Bytes) {
+fn config() -> Config {
+    let mut c = Config::default();
+    c.set_window_update_mode(yamux::WindowUpdateMode::OnRead);
+    c
+}
+
+async fn oneway(
+    nstreams: usize,
+    nmessages: usize,
+    data: Bytes,
+    server: Endpoint,
+    client: Endpoint,
+) {
     let msg_len = data.0.len();
-    let (server, client) = Endpoint::new();
-    let server = server.into_async_read();
-    let client = client.into_async_read();
+    let (tx, rx) = mpsc::unbounded();
 
     let server = async move {
-        yamux::into_stream(Connection::new(server, Config::default(), Mode::Server))
-            .try_for_each_concurrent(None, |mut stream| async move {
-                {
-                    let (mut r, mut w) = futures::io::AsyncReadExt::split(&mut stream);
-                    futures::io::copy(&mut r, &mut w).await?;
-                }
-                stream.close().await?;
-                Ok(())
-            })
-            .await
-            .expect("server works")
-    };
+        let mut connection = Connection::new(server, config(), Mode::Server);
 
+        while let Some(mut stream) = connection.next_stream().await.unwrap() {
+            let tx = tx.clone();
+
+            task::spawn(async move {
+                let mut n = 0;
+                let mut b = vec![0; msg_len];
+
+                for _ in 0 .. nmessages {
+                    stream.read_exact(&mut b[..]).await.unwrap();
+                    n += b.len()
+                }
+
+                tx.unbounded_send(n).expect("unbounded_send");
+                stream.close().await.unwrap();
+            });
+        }
+    };
     task::spawn(server);
 
-    let (tx, rx) = mpsc::unbounded();
-    let conn = Connection::new(client, Config::default(), Mode::Client);
+    let conn = Connection::new(client, config(), Mode::Client);
     let mut ctrl = conn.control();
-    task::spawn(yamux::into_stream(conn).for_each(|_| future::ready(())));
+    task::spawn(yamux::into_stream(conn).for_each(|r| {r.unwrap(); future::ready(())} ));
 
     for _ in 0 .. nstreams {
         let data = data.clone();
-        let tx = tx.clone();
         let mut ctrl = ctrl.clone();
         task::spawn(async move {
-            let stream = ctrl.open_stream().await?;
-            let (mut reader, mut writer) = AsyncReadExt::split(stream);
+            let mut stream = ctrl.open_stream().await.unwrap();
+
             // Send and receive `nmessages` messages.
-            let mut n = 0;
-            let mut b = vec![0; data.0.len()];
             for _ in 0 .. nmessages {
-                futures::future::join(
-                    writer.write_all(data.as_ref()).map(|r| r.unwrap()),
-                    reader.read_exact(&mut b[..]).map(|r| r.unwrap()),
-                ).await;
-                n += b.len()
+                stream.write_all(data.as_ref()).await.unwrap();
             }
-            let mut stream = reader.reunite(writer).unwrap();
-            stream.close().await?;
-            tx.unbounded_send(n).expect("unbounded_send");
+            stream.close().await.unwrap();
             Ok::<(), yamux::ConnectionError>(())
         });
     }
 
     let n = rx.take(nstreams).fold(0, |acc, n| future::ready(acc + n)).await;
     assert_eq!(n, nstreams * nmessages * msg_len);
-    ctrl.close().await.expect("close")
-}
-
-#[derive(Debug)]
-struct Endpoint {
-    incoming: mpsc::UnboundedReceiver<Vec<u8>>,
-    outgoing: mpsc::UnboundedSender<Vec<u8>>
-}
-
-impl Endpoint {
-    fn new() -> (Self, Self) {
-        let (tx_a, rx_a) = mpsc::unbounded();
-        let (tx_b, rx_b) = mpsc::unbounded();
-
-        let a = Endpoint { incoming: rx_a, outgoing: tx_b };
-        let b = Endpoint { incoming: rx_b, outgoing: tx_a };
-
-        (a, b)
-    }
-}
-
-impl Stream for Endpoint {
-    type Item = Result<Vec<u8>, io::Error>;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        if let Some(b) = ready!(Pin::new(&mut self.incoming).poll_next(cx)) {
-            return Poll::Ready(Some(Ok(b)))
-        }
-        Poll::Pending
-    }
-}
-
-impl AsyncWrite for Endpoint {
-    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context, buf: &[u8]) -> Poll<io::Result<usize>> {
-        if ready!(Pin::new(&mut self.outgoing).poll_ready(cx)).is_err() {
-            return Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into()))
-        }
-        let n = buf.len();
-        if Pin::new(&mut self.outgoing).start_send(Vec::from(buf)).is_err() {
-            return Poll::Ready(Err(io::ErrorKind::ConnectionAborted.into()))
-        }
-        Poll::Ready(Ok(n))
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.outgoing)
-            .poll_flush(cx)
-            .map_err(|_| io::ErrorKind::ConnectionAborted.into())
-    }
-
-    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.outgoing)
-            .poll_close(cx)
-            .map_err(|_| io::ErrorKind::ConnectionAborted.into())
-    }
+    ctrl.close().await.expect("close");
 }
