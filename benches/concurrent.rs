@@ -8,12 +8,12 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
+use constrained_connection::{Endpoint, new_unconstrained_connection, samples};
 use criterion::{BenchmarkId, criterion_group, criterion_main, Criterion, Throughput};
-use futures::{channel::mpsc, future, prelude::*, ready, io::AsyncReadExt};
-use std::{fmt, io, pin::Pin, sync::Arc, task::{Context, Poll}, time::Duration};
+use futures::{channel::mpsc, future, prelude::*, io::AsyncReadExt};
+use std::sync::Arc;
 use tokio::{runtime::Runtime, task};
 use yamux::{Config, Connection, Mode};
-use constrained_connection::{Endpoint, new_unconstrained_connection, samples};
 
 criterion_group!(benches, concurrent);
 criterion_main!(benches);
