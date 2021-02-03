@@ -82,6 +82,7 @@ async fn oneway(
                 let mut n = 0;
                 let mut b = vec![0; msg_len];
 
+                // Receive `nmessages` messages.
                 for _ in 0 .. nmessages {
                     stream.read_exact(&mut b[..]).await.unwrap();
                     n += b.len()
@@ -104,10 +105,11 @@ async fn oneway(
         task::spawn(async move {
             let mut stream = ctrl.open_stream().await.unwrap();
 
-            // Send and receive `nmessages` messages.
+            // Send `nmessages` messages.
             for _ in 0 .. nmessages {
                 stream.write_all(data.as_ref()).await.unwrap();
             }
+
             stream.close().await.unwrap();
             Ok::<(), yamux::ConnectionError>(())
         });
