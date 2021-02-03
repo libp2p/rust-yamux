@@ -43,7 +43,7 @@ fn concurrent(c: &mut Criterion) {
         for nstreams in [1, 10, 100].iter() {
             for nmessages in [1, 10, 100].iter() {
                 let data = data.clone();
-                let mut rt = Runtime::new().unwrap();
+                let rt = Runtime::new().unwrap();
 
                 group.throughput(Throughput::Bytes((nstreams * nmessages * data.0.len()) as u64));
                 group.bench_function(
