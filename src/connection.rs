@@ -658,7 +658,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 let sender = self.stream_sender.clone();
                 Stream::new(stream_id, self.id, config, credit, credit, sender)
             };
-            let window_update;
+            let mut window_update = None;
             {
                 let mut shared = stream.shared();
                 if is_finish {
@@ -666,16 +666,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 }
                 shared.window = shared.window.saturating_sub(frame.body_len());
                 shared.buffer.push(frame.into_body());
-                if !is_finish
-                    && shared.window == 0
-                    && self.config.window_update_mode == WindowUpdateMode::OnReceive
-                {
-                    shared.window = self.config.receive_window;
-                    let mut frame = Frame::window_update(stream_id, self.config.receive_window);
+
+                if let Some(credit) = shared.next_window_update() {
+                    shared.window += credit;
+                    let mut frame = Frame::window_update(stream_id, credit);
                     frame.header_mut().ack();
                     window_update = Some(frame)
-                } else {
-                    window_update = None
                 }
             }
             if window_update.is_none() {
@@ -706,12 +702,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             if let Some(w) = shared.reader.take() {
                 w.wake()
             }
-            if !is_finish
-                && shared.window == 0
-                && self.config.window_update_mode == WindowUpdateMode::OnReceive
-            {
-                shared.window = self.config.receive_window;
-                let frame = Frame::window_update(stream_id, self.config.receive_window);
+            if let Some(credit) = shared.next_window_update() {
+                shared.window += credit;
+                let frame = Frame::window_update(stream_id, credit);
                 return Action::Update(frame)
             }
         } else if !is_finish {
@@ -781,10 +774,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 w.wake()
             }
         } else if !is_finish {
-            log::debug!("{}/{}: window update for unknown stream", self.id, stream_id);
-            let mut header = Header::data(stream_id, 0);
-            header.rst();
-            return Action::Reset(Frame::new(header))
+            log::debug!("{}/{}: window update for unknown stream, ignoring", self.id, stream_id);
         }
 
         Action::None
@@ -939,4 +929,3 @@ where
         }
     })
 }
-

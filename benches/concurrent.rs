@@ -62,6 +62,12 @@ fn concurrent(c: &mut Criterion) {
     group.finish();
 }
 
+fn config() -> Config {
+    let mut c = Config::default();
+    c.set_window_update_mode(yamux::WindowUpdateMode::OnRead);
+    c
+}
+
 async fn oneway(
     nstreams: usize,
     nmessages: usize,
@@ -73,7 +79,7 @@ async fn oneway(
     let (tx, rx) = mpsc::unbounded();
 
     let server = async move {
-        let mut connection = Connection::new(server, Config::default(), Mode::Server);
+        let mut connection = Connection::new(server, config(), Mode::Server);
 
         while let Some(mut stream) = connection.next_stream().await.unwrap() {
             let tx = tx.clone();
@@ -85,7 +91,7 @@ async fn oneway(
                 // Receive `nmessages` messages.
                 for _ in 0 .. nmessages {
                     stream.read_exact(&mut b[..]).await.unwrap();
-                    n += b.len()
+                    n += b.len();
                 }
 
                 tx.unbounded_send(n).expect("unbounded_send");
@@ -95,7 +101,7 @@ async fn oneway(
     };
     task::spawn(server);
 
-    let conn = Connection::new(client, Config::default(), Mode::Client);
+    let conn = Connection::new(client, config(), Mode::Client);
     let mut ctrl = conn.control();
     task::spawn(yamux::into_stream(conn).for_each(|r| {r.unwrap(); future::ready(())} ));
 
@@ -111,7 +117,6 @@ async fn oneway(
             }
 
             stream.close().await.unwrap();
-            Ok::<(), yamux::ConnectionError>(())
         });
     }
 
