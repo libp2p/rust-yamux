@@ -22,7 +22,7 @@ static_assertions = "1"
 anyhow = "1"
 criterion = "0.3"
 futures = "0.3.4"
-quickcheck = "0.9"
+quickcheck = "1.0"
 tokio = { version = "0.2", features = ["tcp", "rt-threaded", "macros"] }
 tokio-util = { version = "0.3", features = ["compat"] }
 constrained-connection = "0.1"
