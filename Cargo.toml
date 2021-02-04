@@ -24,7 +24,7 @@ criterion = "0.3"
 futures = "0.3.4"
 quickcheck = "0.9"
 tokio = { version = "0.2", features = ["tcp", "rt-threaded", "macros"] }
-tokio-util = { version = "0.3", features = ["compat"] }
+tokio-util = { version = "0.6", features = ["compat"] }
 constrained-connection = "0.1"
 
 [[bench]]
