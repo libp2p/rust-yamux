@@ -667,11 +667,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 shared.window = shared.window.saturating_sub(frame.body_len());
                 shared.buffer.push(frame.into_body());
 
-                if let Some(credit) = shared.next_window_update() {
-                    shared.window += credit;
-                    let mut frame = Frame::window_update(stream_id, credit);
-                    frame.header_mut().ack();
-                    window_update = Some(frame)
+                if matches!(self.config.window_update_mode, WindowUpdateMode::OnReceive) {
+                    if let Some(credit) = shared.next_window_update() {
+                        shared.window += credit;
+                        let mut frame = Frame::window_update(stream_id, credit);
+                        frame.header_mut().ack();
+                        window_update = Some(frame)
+                    }
                 }
             }
             if window_update.is_none() {
@@ -702,10 +704,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             if let Some(w) = shared.reader.take() {
                 w.wake()
             }
-            if let Some(credit) = shared.next_window_update() {
-                shared.window += credit;
-                let frame = Frame::window_update(stream_id, credit);
-                return Action::Update(frame)
+            if matches!(self.config.window_update_mode, WindowUpdateMode::OnReceive) {
+                if let Some(credit) = shared.next_window_update() {
+                    shared.window += credit;
+                    let frame = Frame::window_update(stream_id, credit);
+                    return Action::Update(frame)
+                }
             }
         } else if !is_finish {
             log::debug!("{}/{}: data for unknown stream", self.id, stream_id);
