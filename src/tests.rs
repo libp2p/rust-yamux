@@ -209,6 +209,8 @@ fn prop_send_recv_half_closed() {
 /// This test simulates two endpoints of a Yamux connection which may be unable to
 /// write simultaneously but can make progress by reading. If both endpoints
 /// don't read in-between trying to finish their writes, a deadlock occurs.
+//
+// Ignored for now as the current implementation is prone to the deadlock tested below.
 #[test]
 #[ignore]
 fn write_deadlock() {
