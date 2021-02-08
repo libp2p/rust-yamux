@@ -257,12 +257,8 @@ fn write_deadlock() {
         }).boxed().into()
     ).unwrap();
 
-    // Handles to tasks on which to wait for completion.
-    let mut handles = Vec::new();
-
     // Send the message, expecting it to be echo'd.
-    let msg = msg.clone();
-    handles.push(pool.spawner().spawn_with_handle(async move {
+    pool.run_until(pool.spawner().spawn_with_handle(async move {
         let stream = ctrl.open_stream().await.unwrap();
         let (mut reader, mut writer) = AsyncReadExt::split(stream);
         let mut b = vec![0; msg.len()];
@@ -278,11 +274,6 @@ fn write_deadlock() {
         log::debug!("C: Stream {} done.", stream.id());
         assert_eq!(b, msg);
     }.boxed()).unwrap());
-
-    // Wait for completion.
-    for h in handles {
-        pool.run_until(h);
-    }
 }
 
 #[derive(Clone, Debug)]
