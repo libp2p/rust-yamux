@@ -181,17 +181,18 @@ impl Stream {
             return Poll::Ready(Ok(()));
         }
 
-        let credit = self.shared().next_window_update();
+        let mut shared = self.shared.lock();
 
-        if let Some(credit) = credit {
+        if let Some(credit) = shared.next_window_update() {
             ready!(self.sender.poll_ready(cx).map_err(|_| self.write_zero_err())?);
+
+            shared.window += credit;
+            drop(shared);
 
             let mut frame = Frame::window_update(self.id, credit).right();
             self.add_flag(frame.header_mut());
             let cmd = StreamCommand::SendFrame(frame);
-
             self.sender.start_send(cmd).map_err(|_| self.write_zero_err())?;
-            self.shared().window += credit;
         }
 
         Poll::Ready(Ok(()))
