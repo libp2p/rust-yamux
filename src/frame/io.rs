@@ -214,7 +214,7 @@ mod tests {
     use super::*;
 
     impl Arbitrary for Frame<()> {
-        fn arbitrary<G: Gen>(g: &mut G) -> Self {
+        fn arbitrary(g: &mut Gen) -> Self {
             let mut header: header::Header<()> = Arbitrary::arbitrary(g);
             let body =
                 if header.tag() == header::Tag::Data {
