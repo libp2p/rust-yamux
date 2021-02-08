@@ -15,7 +15,7 @@ futures = { version = "0.3.4", default-features = false, features = ["std"] }
 log = "0.4.8"
 nohash-hasher = "0.2"
 parking_lot = "0.11"
-rand = "0.7.2"
+rand = "0.8.3"
 static_assertions = "1"
 
 [dev-dependencies]
