@@ -411,14 +411,16 @@ impl Shared {
 
         let new_credit = match self.config.window_update_mode {
             WindowUpdateMode::OnReceive => {
-                let bytes_received = self.config.receive_window - self.window;
+                debug_assert!(self.config.receive_window >= self.window);
+                let bytes_received = self.config.receive_window.saturating_sub(self.window);
                 bytes_received
             },
             WindowUpdateMode::OnRead => {
+                debug_assert!(self.config.receive_window >= self.window);
+                let bytes_received = self.config.receive_window.saturating_sub(self.window);
                 let buffer_len: u32 = self.buffer.len()
                     .and_then(|l| l.try_into().ok())
                     .unwrap_or(std::u32::MAX);
-                let bytes_received = self.config.receive_window - self.window;
                 let bytes_read = bytes_received.saturating_sub(buffer_len);
                 bytes_read
             }
