@@ -406,22 +406,19 @@ impl std::error::Error for HeaderDecodeError {}
 #[cfg(test)]
 mod tests {
     use quickcheck::{Arbitrary, Gen, QuickCheck};
-    use rand::{Rng, seq::SliceRandom};
     use super::*;
 
     impl Arbitrary for Header<()> {
-        fn arbitrary<G: Gen>(g: &mut G) -> Self {
-            let tag = [Tag::Data, Tag::WindowUpdate, Tag::Ping, Tag::GoAway]
-                .choose(g)
-                .unwrap()
-                .clone();
+        fn arbitrary(g: &mut Gen) -> Self {
+            let tag = *g.choose(&[Tag::Data, Tag::WindowUpdate, Tag::Ping, Tag::GoAway])
+                .unwrap();
 
             Header {
                 version: Version(0),
                 tag,
-                flags: Flags(g.gen()),
-                stream_id: StreamId(g.gen()),
-                length: Len(g.gen()),
+                flags: Flags(Arbitrary::arbitrary(g)),
+                stream_id: StreamId(Arbitrary::arbitrary(g)),
+                length: Len(Arbitrary::arbitrary(g)),
                 _marker: std::marker::PhantomData
             }
         }
