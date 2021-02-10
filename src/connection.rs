@@ -711,11 +711,15 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                     return Action::Update(frame)
                 }
             }
-        } else if !is_finish {
-            log::debug!("{}/{}: data for unknown stream", self.id, stream_id);
-            let mut header = Header::data(stream_id, 0);
-            header.rst();
-            return Action::Reset(Frame::new(header))
+        } else {
+            log::debug!("{}/{}: data for unknown stream, ignoring", self.id, stream_id);
+            // Previous implementations would send back a stream reset when receiving a data frame
+            // on an unknown stream. There are multiple benign scenarios that can lead to this
+            // happening and where a stream reset would not be appropriate. One such case would be
+            // when still in the process of sending out a frame closing the stream, while the stream
+            // data structure itself has already been garbage collected.
+            //
+            // See https://github.com/paritytech/yamux/issues/110 for details.
         }
 
         Action::None
@@ -777,8 +781,15 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             if let Some(w) = shared.writer.take() {
                 w.wake()
             }
-        } else if !is_finish {
+        } else {
             log::debug!("{}/{}: window update for unknown stream, ignoring", self.id, stream_id);
+            // Previous implementations would send back a stream reset when receiving a window
+            // update frame on an unknown stream. There are multiple benign scenarios that can lead
+            // to this happening and where a stream reset would not be appropriate. One such case
+            // would be when still in the process of sending out a frame closing the stream, while
+            // the stream data structure itself has already been garbage collected.
+            //
+            // See https://github.com/paritytech/yamux/issues/110 for details.
         }
 
         Action::None
@@ -795,9 +806,15 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             return Action::Ping(Frame::new(hdr))
         }
         log::debug!("{}/{}: ping for unknown stream", self.id, stream_id);
-        let mut header = Header::data(stream_id, 0);
-        header.rst();
-        Action::Reset(Frame::new(header))
+        // Previous implementations would send back a stream reset when receiving a ping frame on
+        // an unknown stream. There are multiple benign scenarios that can lead to this happening
+        // and where a stream reset would not be appropriate. One such case would be when still in
+        // the process of sending out a frame closing the stream, while the stream data structure
+        // itself has already been garbage collected.
+        //
+        // See https://github.com/paritytech/yamux/issues/110 for details.
+
+        Action::None
     }
 
     fn next_stream_id(&mut self) -> Result<StreamId> {
