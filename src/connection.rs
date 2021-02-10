@@ -693,7 +693,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 shared.update_state(self.id, stream_id, State::RecvClosed);
             }
             let max_buffer_size = self.config.max_buffer_size;
-            if shared.buffer.len().map(move |n| n >= max_buffer_size).unwrap_or(true) {
+            if shared.buffer.len() >= max_buffer_size {
                 log::error!("{}/{}: buffer of stream grows beyond limit", self.id, stream_id);
                 let mut header = Header::data(stream_id, 0);
                 header.rst();

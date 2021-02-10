@@ -428,9 +428,7 @@ impl Shared {
             WindowUpdateMode::OnRead => {
                 debug_assert!(self.config.receive_window >= self.window);
                 let bytes_received = self.config.receive_window.saturating_sub(self.window);
-                let buffer_len: u32 = self.buffer.len()
-                    .and_then(|l| l.try_into().ok())
-                    .unwrap_or(std::u32::MAX);
+                let buffer_len: u32 = self.buffer.len().try_into().unwrap_or(std::u32::MAX);
                 let bytes_read = bytes_received.saturating_sub(buffer_len);
                 bytes_read
             }
