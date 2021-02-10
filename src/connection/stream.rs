@@ -217,7 +217,12 @@ impl futures::stream::Stream for Stream {
             return Poll::Ready(None)
         }
 
-        ready!(self.send_window_update(cx))?;
+        match self.send_window_update(cx) {
+            Poll::Ready(Ok(())) => {},
+            Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
+            // Continue reading buffered data even though sending a window update blocked.
+            Poll::Pending => {},
+        }
 
         let mut shared = self.shared();
 
@@ -257,7 +262,12 @@ impl AsyncRead for Stream {
             return Poll::Ready(Ok(0))
         }
 
-        ready!(self.send_window_update(cx))?;
+        match self.send_window_update(cx) {
+            Poll::Ready(Ok(())) => {},
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+            // Continue reading buffered data even though sending a window update blocked.
+            Poll::Pending => {},
+        }
 
         // Copy data from stream buffer.
         let mut shared = self.shared();
