@@ -40,6 +40,21 @@ pub use crate::frame::{FrameDecodeError, header::{HeaderDecodeError, StreamId}};
 
 const DEFAULT_CREDIT: u32 = 256 * 1024; // as per yamux specification
 
+/// Maximum number of bytes a Yamux data frame might carry as its payload.
+///
+/// The data frame payload size is not restricted by the yamux specification.
+/// Still, this implementation restricts the size to:
+///
+/// 1. Reduce delays sending time-sensitive frames, e.g. window updates.
+/// 2. Minimize head-of-line blocking across streams.
+/// 3. Enable better interleaving of send and receive operations, as each is
+///    carried out atomically instead of concurrently with its respective
+///    counterpart.
+///
+/// For details on why this concrete value was chosen, see
+/// https://github.com/paritytech/yamux/issues/100.
+const MAX_DATA_FRAME_PAYLOAD_SIZE: usize = 16 * 1024;
+
 /// Specifies when window update frames are sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowUpdateMode {
