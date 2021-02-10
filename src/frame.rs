@@ -15,7 +15,7 @@ use futures::future::Either;
 use header::{Header, StreamId, Data, WindowUpdate, GoAway, Ping};
 use std::{convert::TryInto, num::TryFromIntError};
 
-pub(crate) use io::Io;
+pub(crate) use io::{Io, PollSend};
 pub use io::FrameDecodeError;
 
 /// A Yamux message frame consisting of header and body.
@@ -46,6 +46,15 @@ impl<T> Frame<T> {
     /// Introduce this frame to the left of a binary frame type.
     pub(crate) fn left<U>(self) -> Frame<Either<T, U>> {
         Frame { header: self.header.left(), body: self.body }
+    }
+}
+
+impl<A: header::private::Sealed> From<Frame<A>> for Frame<()> {
+    fn from(f: Frame<A>) -> Frame<()> {
+        Frame {
+            header: f.header.into(),
+            body: f.body
+        }
     }
 }
 
@@ -117,4 +126,3 @@ impl Frame<GoAway> {
         }
     }
 }
-
