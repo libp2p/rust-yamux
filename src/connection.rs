@@ -713,11 +713,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             }
         } else {
             log::debug!("{}/{}: data for unknown stream, ignoring", self.id, stream_id);
-            // Previous implementations would send back a stream reset when receiving a data frame
-            // on an unknown stream. There are multiple benign scenarios that can lead to this
-            // happening and where a stream reset would not be appropriate. One such case would be
-            // when still in the process of sending out a frame closing the stream, while the stream
-            // data structure itself has already been garbage collected.
+            // We do not consider this a protocol violation and thus do not send a stream reset
+            // because we may still be processing pending `StreamCommand`s of this stream that were
+            // sent before it has been dropped and "garbage collected". Such a stream reset would
+            // interfere with the frames that still need to be sent, causing premature stream
+            // termination for the remote.
             //
             // See https://github.com/paritytech/yamux/issues/110 for details.
         }
@@ -783,11 +783,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             }
         } else {
             log::debug!("{}/{}: window update for unknown stream, ignoring", self.id, stream_id);
-            // Previous implementations would send back a stream reset when receiving a window
-            // update frame on an unknown stream. There are multiple benign scenarios that can lead
-            // to this happening and where a stream reset would not be appropriate. One such case
-            // would be when still in the process of sending out a frame closing the stream, while
-            // the stream data structure itself has already been garbage collected.
+            // We do not consider this a protocol violation and thus do not send a stream reset
+            // because we may still be processing pending `StreamCommand`s of this stream that were
+            // sent before it has been dropped and "garbage collected". Such a stream reset would
+            // interfere with the frames that still need to be sent, causing premature stream
+            // termination for the remote.
             //
             // See https://github.com/paritytech/yamux/issues/110 for details.
         }
@@ -806,11 +806,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             return Action::Ping(Frame::new(hdr))
         }
         log::debug!("{}/{}: ping for unknown stream", self.id, stream_id);
-        // Previous implementations would send back a stream reset when receiving a ping frame on
-        // an unknown stream. There are multiple benign scenarios that can lead to this happening
-        // and where a stream reset would not be appropriate. One such case would be when still in
-        // the process of sending out a frame closing the stream, while the stream data structure
-        // itself has already been garbage collected.
+        // We do not consider this a protocol violation and thus do not send a stream reset because
+        // we may still be processing pending `StreamCommand`s of this stream that were sent before
+        // it has been dropped and "garbage collected". Such a stream reset would interfere with the
+        // frames that still need to be sent, causing premature stream termination for the remote.
         //
         // See https://github.com/paritytech/yamux/issues/110 for details.
 
