@@ -13,7 +13,6 @@ use crate::WindowUpdateMode;
 use futures::{future, prelude::*};
 use futures::io::AsyncReadExt;
 use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};
-use rand::Rng;
 use std::{fmt::Debug, io, net::{Ipv4Addr, SocketAddr, SocketAddrV4}};
 use tokio::{net::{TcpStream, TcpListener}, runtime::Runtime, task};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
@@ -282,11 +281,17 @@ fn write_deadlock() {
 struct Msg(Vec<u8>);
 
 impl Arbitrary for Msg {
-    fn arbitrary<G: Gen>(g: &mut G) -> Msg {
-        let n: usize = g.gen_range(1, g.size() + 1);
-        let mut v = vec![0; n];
-        g.fill(&mut v[..]);
-        Msg(v)
+    fn arbitrary(g: &mut Gen) -> Msg {
+        let mut msg = Msg(Arbitrary::arbitrary(g));
+        if msg.0.is_empty() {
+            msg.0.push(Arbitrary::arbitrary(g));
+        }
+
+        msg
+    }
+
+    fn shrink(&self) -> Box<dyn Iterator<Item = Self>> {
+        Box::new(self.0.shrink().filter(|v| !v.is_empty()).map(|v| Msg(v)))
     }
 }
 
@@ -294,15 +299,15 @@ impl Arbitrary for Msg {
 struct TestConfig(Config);
 
 impl Arbitrary for TestConfig {
-    fn arbitrary<G: Gen>(g: &mut G) -> Self {
+    fn arbitrary(g: &mut Gen) -> Self {
         let mut c = Config::default();
-        c.set_window_update_mode(if g.gen() {
+        c.set_window_update_mode(if bool::arbitrary(g) {
             WindowUpdateMode::OnRead
         } else {
             WindowUpdateMode::OnReceive
         });
-        c.set_read_after_close(g.gen());
-        c.set_receive_window(g.gen_range(256 * 1024, 1024 * 1024));
+        c.set_read_after_close(Arbitrary::arbitrary(g));
+        c.set_receive_window(256 * 1024 + u32::arbitrary(g) % (768 * 1024));
         TestConfig(c)
     }
 }
