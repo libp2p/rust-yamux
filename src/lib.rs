@@ -40,6 +40,22 @@ pub use crate::frame::{FrameDecodeError, header::{HeaderDecodeError, StreamId}};
 
 const DEFAULT_CREDIT: u32 = 256 * 1024; // as per yamux specification
 
+/// Default maximum number of bytes a Yamux data frame might carry as its
+/// payload when being send. Larger Payloads will be split.
+///
+/// The data frame payload size is not restricted by the yamux specification.
+/// Still, this implementation restricts the size to:
+///
+/// 1. Reduce delays sending time-sensitive frames, e.g. window updates.
+/// 2. Minimize head-of-line blocking across streams.
+/// 3. Enable better interleaving of send and receive operations, as each is
+///    carried out atomically instead of concurrently with its respective
+///    counterpart.
+///
+/// For details on why this concrete value was chosen, see
+/// https://github.com/paritytech/yamux/issues/100.
+const DEFAULT_SPLIT_SEND_SIZE: usize = 16 * 1024;
+
 /// Specifies when window update frames are sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowUpdateMode {
@@ -76,13 +92,15 @@ pub enum WindowUpdateMode {
 /// - max. number of streams = 8192
 /// - window update mode = on receive
 /// - read after close = true
+/// - split send size = 16 KiB
 #[derive(Debug, Clone)]
 pub struct Config {
     receive_window: u32,
     max_buffer_size: usize,
     max_num_streams: usize,
     window_update_mode: WindowUpdateMode,
-    read_after_close: bool
+    read_after_close: bool,
+    split_send_size: usize
 }
 
 impl Default for Config {
@@ -92,7 +110,8 @@ impl Default for Config {
             max_buffer_size: 1024 * 1024,
             max_num_streams: 8192,
             window_update_mode: WindowUpdateMode::OnReceive,
-            read_after_close: true
+            read_after_close: true,
+            split_send_size: DEFAULT_SPLIT_SEND_SIZE
         }
     }
 }
@@ -131,6 +150,13 @@ impl Config {
     /// the connection has been closed.
     pub fn set_read_after_close(&mut self, b: bool) -> &mut Self {
         self.read_after_close = b;
+        self
+    }
+
+    /// Set the max. payload size used when sending data frames. Payloads larger
+    /// than the configured max. will be split.
+    pub fn set_split_send_size(&mut self, n: usize) -> &mut Self {
+        self.split_send_size = n;
         self
     }
 }
