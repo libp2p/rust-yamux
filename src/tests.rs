@@ -15,18 +15,25 @@ use futures::io::AsyncReadExt;
 use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};
 use std::{fmt::Debug, io, net::{Ipv4Addr, SocketAddr, SocketAddrV4}};
 use tokio::{net::{TcpStream, TcpListener}, runtime::Runtime, task};
-use tokio_util::compat::{Compat, Tokio02AsyncReadCompatExt};
+use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
+use futures::channel::mpsc::{unbounded, UnboundedSender, UnboundedReceiver};
+use futures::executor::LocalPool;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
+use std::pin::Pin;
+use futures::future::join;
+use futures::task::{Spawn, SpawnExt};
 
 #[test]
 fn prop_config_send_recv_single() {
     fn prop(mut msgs: Vec<Msg>, cfg1: TestConfig, cfg2: TestConfig) -> TestResult {
-        let mut rt = Runtime::new().unwrap();
+        let rt = Runtime::new().unwrap();
         msgs.insert(0, Msg(vec![1u8; crate::DEFAULT_CREDIT as usize]));
         rt.block_on(async move {
             let num_requests = msgs.len();
             let iter = msgs.into_iter().map(|m| m.0);
 
-            let (mut listener, address) = bind().await.expect("bind");
+            let (listener, address) = bind().await.expect("bind");
 
             let server = async {
                 let socket = listener.accept().await.expect("accept").0.compat();
@@ -52,13 +59,13 @@ fn prop_config_send_recv_single() {
 #[test]
 fn prop_config_send_recv_multi() {
     fn prop(mut msgs: Vec<Msg>, cfg1: TestConfig, cfg2: TestConfig) -> TestResult {
-        let mut rt = Runtime::new().unwrap();
+        let rt = Runtime::new().unwrap();
         msgs.insert(0, Msg(vec![1u8; crate::DEFAULT_CREDIT as usize]));
         rt.block_on(async move {
             let num_requests = msgs.len();
             let iter = msgs.into_iter().map(|m| m.0);
 
-            let (mut listener, address) = bind().await.expect("bind");
+            let (listener, address) = bind().await.expect("bind");
 
             let server = async {
                 let socket = listener.accept().await.expect("accept").0.compat();
@@ -87,12 +94,12 @@ fn prop_send_recv() {
         if msgs.is_empty() {
             return TestResult::discard()
         }
-        let mut rt = Runtime::new().unwrap();
+        let rt = Runtime::new().unwrap();
         rt.block_on(async move {
             let num_requests = msgs.len();
             let iter = msgs.into_iter().map(|m| m.0);
 
-            let (mut listener, address) = bind().await.expect("bind");
+            let (listener, address) = bind().await.expect("bind");
 
             let server = async {
                 let socket = listener.accept().await.expect("accept").0.compat();
@@ -122,9 +129,9 @@ fn prop_max_streams() {
         let mut cfg = Config::default();
         cfg.set_max_num_streams(max_streams);
 
-        let mut rt = Runtime::new().unwrap();
+        let rt = Runtime::new().unwrap();
         rt.block_on(async move {
-            let (mut listener, address) = bind().await.expect("bind");
+            let (listener, address) = bind().await.expect("bind");
 
             let cfg_s = cfg.clone();
             let server = async move {
@@ -157,9 +164,9 @@ fn prop_max_streams() {
 fn prop_send_recv_half_closed() {
     fn prop(msg: Msg) {
         let msg_len = msg.0.len();
-        let mut rt = Runtime::new().unwrap();
+        let rt = Runtime::new().unwrap();
         rt.block_on(async move {
-            let (mut listener, address) = bind().await.expect("bind");
+            let (listener, address) = bind().await.expect("bind");
 
             // Server should be able to write on a stream shutdown by the client.
             let server = async {
@@ -196,6 +203,78 @@ fn prop_send_recv_half_closed() {
         })
     }
     QuickCheck::new().tests(7).quickcheck(prop as fn(_))
+}
+
+/// This test simulates two endpoints of a Yamux connection which may be unable to
+/// write simultaneously but can make progress by reading. If both endpoints
+/// don't read in-between trying to finish their writes, a deadlock occurs.
+//
+// Ignored for now as the current implementation is prone to the deadlock tested below.
+#[test]
+#[ignore]
+fn write_deadlock() {
+    let _ = env_logger::try_init();
+    let mut pool = LocalPool::new();
+
+    // We make the message to transmit large enough s.t. the "server"
+    // is forced to start writing (i.e. echoing) the bytes before
+    // having read the entire payload.
+    let msg = vec![1u8; 1024 * 1024];
+
+    // Create a bounded channel representing the underlying "connection".
+    // Each endpoint gets a name and a bounded capacity for its outbound
+    // channel (which is the other's inbound channel).
+    let (server_endpoint, client_endpoint) = bounded::channel(("S", 1024), ("C", 1024));
+
+    // Create and spawn a "server" that echoes every message back to the client.
+    let server = Connection::new(server_endpoint, Config::default(), Mode::Server);
+    pool.spawner().spawn_obj(async move {
+        crate::into_stream(server).try_for_each_concurrent(
+            None, |mut stream| async move {
+                {
+                    let (mut r, mut w) = AsyncReadExt::split(&mut stream);
+                    // Write back the bytes received. This may buffer internally.
+                    futures::io::copy(&mut r, &mut w).await?;
+                }
+                log::debug!("S: stream {} done.", stream.id());
+                stream.close().await?;
+                Ok(())
+            })
+            .await
+            .expect("server failed")
+    }.boxed().into()).unwrap();
+
+    // Create and spawn a "client" that sends messages expected to be echoed
+    // by the server.
+    let client = Connection::new(client_endpoint, Config::default(), Mode::Client);
+    let mut ctrl = client.control();
+
+    // Continuously advance the Yamux connection of the client in a background task.
+    pool.spawner().spawn_obj(
+        crate::into_stream(client).for_each(|_| {
+            panic!("Unexpected inbound stream for client");
+            #[allow(unreachable_code)]
+            future::ready(())
+        }).boxed().into()
+    ).unwrap();
+
+    // Send the message, expecting it to be echo'd.
+    pool.run_until(pool.spawner().spawn_with_handle(async move {
+        let stream = ctrl.open_stream().await.unwrap();
+        let (mut reader, mut writer) = AsyncReadExt::split(stream);
+        let mut b = vec![0; msg.len()];
+        // Write & read concurrently, so that the client is able
+        // to start reading the echo'd bytes before it even finished
+        // sending them all.
+        let _ = join(
+            writer.write_all(msg.as_ref()).map_err(|e| panic!(e)),
+            reader.read_exact(&mut b[..]).map_err(|e| panic!(e)),
+        ).await;
+        let mut stream = reader.reunite(writer).unwrap();
+        stream.close().await.unwrap();
+        log::debug!("C: Stream {} done.", stream.id());
+        assert_eq!(b, msg);
+    }.boxed()).unwrap());
 }
 
 #[derive(Clone, Debug)]
@@ -319,3 +398,125 @@ where
     Ok(result)
 }
 
+/// This module implements a duplex connection via channels with bounded
+/// capacities. The channels used for the implementation are unbounded
+/// as the operate at the granularity of variably-sized chunks of bytes
+/// (`Vec<u8>`), whereas the capacity bounds (i.e. max. number of bytes
+/// in transit in one direction) are enforced separately.
+mod bounded {
+    use super::*;
+    use futures::ready;
+    use std::io::{Error, ErrorKind, Result};
+
+    pub struct Endpoint {
+        name: &'static str,
+        capacity: usize,
+        send: UnboundedSender<Vec<u8>>,
+        send_guard: Arc<Mutex<ChannelGuard>>,
+        recv: UnboundedReceiver<Vec<u8>>,
+        recv_buf: Vec<u8>,
+        recv_guard: Arc<Mutex<ChannelGuard>>,
+    }
+
+    /// A `ChannelGuard` is used to enforce the maximum number of
+    /// bytes "in transit" across all chunks of an unbounded channel.
+    #[derive(Default)]
+    struct ChannelGuard {
+        size: usize,
+        waker: Option<Waker>,
+    }
+
+    pub fn channel(
+        (name_a, capacity_a): (&'static str, usize),
+        (name_b, capacity_b): (&'static str, usize)
+    ) -> (Endpoint, Endpoint) {
+        let (a_to_b_sender, a_to_b_receiver) = unbounded();
+        let (b_to_a_sender, b_to_a_receiver) = unbounded();
+
+        let a_to_b_guard = Arc::new(Mutex::new(ChannelGuard::default()));
+        let b_to_a_guard = Arc::new(Mutex::new(ChannelGuard::default()));
+
+        let a = Endpoint {
+            name: name_a,
+            capacity: capacity_a,
+            send: a_to_b_sender,
+            send_guard: a_to_b_guard.clone(),
+            recv: b_to_a_receiver,
+            recv_buf: Vec::new(),
+            recv_guard: b_to_a_guard.clone(),
+        };
+
+        let b = Endpoint {
+            name: name_b,
+            capacity: capacity_b,
+            send: b_to_a_sender,
+            send_guard: b_to_a_guard,
+            recv: a_to_b_receiver,
+            recv_buf: Vec::new(),
+            recv_guard: a_to_b_guard,
+        };
+
+        (a, b)
+    }
+
+    impl AsyncRead for Endpoint {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut [u8],
+        ) -> Poll<Result<usize>> {
+            if self.recv_buf.is_empty() {
+                match ready!(self.recv.poll_next_unpin(cx)) {
+                    Some(bytes) => { self.recv_buf = bytes; }
+                    None => return Poll::Ready(Ok(0))
+                }
+            }
+
+            let n = std::cmp::min(buf.len(), self.recv_buf.len());
+            buf[0..n].copy_from_slice(&self.recv_buf[0..n]);
+            self.recv_buf = self.recv_buf.split_off(n);
+
+            let mut guard = self.recv_guard.lock().unwrap();
+            if let Some(waker) = guard.waker.take() {
+                log::debug!("{}: read: notifying waker after read of {} bytes", self.name, n);
+                waker.wake();
+            }
+            guard.size -= n;
+
+            log::debug!("{}: read: channel: {}/{}", self.name, guard.size, self.capacity);
+
+            Poll::Ready(Ok(n))
+        }
+    }
+
+    impl AsyncWrite for Endpoint {
+        fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
+            debug_assert!(buf.len() > 0);
+            let mut guard = self.send_guard.lock().unwrap();
+            let n = std::cmp::min(self.capacity - guard.size, buf.len());
+            if n == 0 {
+                log::debug!("{}: write: channel full, registering waker", self.name);
+                guard.waker = Some(cx.waker().clone());
+                return Poll::Pending;
+            }
+
+            self.send.unbounded_send(buf[0..n].to_vec())
+                .map_err(|e| Error::new(ErrorKind::ConnectionAborted, e))?;
+
+            guard.size += n;
+            log::debug!("{}: write: channel: {}/{}", self.name, guard.size, self.capacity);
+
+            Poll::Ready(Ok(n))
+        }
+
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+            ready!(self.send.poll_flush_unpin(cx)).unwrap();
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
+            ready!(self.send.poll_close_unpin(cx)).unwrap();
+            Poll::Ready(Ok(()))
+        }
+    }
+}

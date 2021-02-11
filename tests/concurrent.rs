@@ -11,11 +11,11 @@
 use futures::{channel::mpsc, prelude::*};
 use std::{net::{Ipv4Addr, SocketAddr, SocketAddrV4}, sync::Arc};
 use tokio::{net::{TcpStream, TcpListener}, task};
-use tokio_util::compat::Tokio02AsyncReadCompatExt;
+use tokio_util::compat::TokioAsyncReadCompatExt;
 use yamux::{Config, Connection, Mode};
 
 async fn roundtrip(address: SocketAddr, nstreams: usize, data: Arc<Vec<u8>>) {
-    let mut listener = TcpListener::bind(&address).await.expect("bind");
+    let listener = TcpListener::bind(&address).await.expect("bind");
     let address = listener.local_addr().expect("local address");
 
     let server = async move {
