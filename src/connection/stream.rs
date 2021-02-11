@@ -330,7 +330,7 @@ impl AsyncWrite for Stream {
                 return Poll::Pending
             }
             let k = std::cmp::min(shared.credit as usize, buf.len());
-            let k = std::cmp::min(k, crate::MAX_DATA_FRAME_PAYLOAD_SIZE);
+            let k = std::cmp::min(k, self.config.split_send_size);
             shared.credit = shared.credit.saturating_sub(k as u32);
             Vec::from(&buf[.. k])
         };
