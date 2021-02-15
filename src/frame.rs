@@ -15,7 +15,7 @@ use futures::future::Either;
 use header::{Header, StreamId, Data, WindowUpdate, GoAway, Ping};
 use std::{convert::TryInto, num::TryFromIntError};
 
-pub(crate) use io::{Io, PollSend};
+pub(crate) use io::Io;
 pub use io::FrameDecodeError;
 
 /// A Yamux message frame consisting of header and body.

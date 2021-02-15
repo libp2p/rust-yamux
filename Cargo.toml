@@ -11,7 +11,7 @@ readme = "README.md"
 edition = "2018"
 
 [dependencies]
-futures = { version = "0.3.4", default-features = false, features = ["std"] }
+futures = { version = "0.3.12", default-features = false, features = ["std"] }
 log = "0.4.8"
 nohash-hasher = "0.2"
 parking_lot = "0.11"

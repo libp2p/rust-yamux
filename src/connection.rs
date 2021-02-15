@@ -103,7 +103,8 @@ use futures::{
     channel::{mpsc, oneshot},
     future::{self, Either},
     prelude::*,
-    stream::{Fuse, FusedStream}
+    stream::{Fuse, FusedStream},
+    sink::SinkExt,
 };
 use nohash_hasher::IntMap;
 use std::{fmt, io, sync::Arc, task::{Context, Poll}};
@@ -395,9 +396,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                     let socket = &mut self.socket;
                     let io = future::poll_fn(move |cx| {
                         // Progress writing.
-                        match socket.get_mut().poll_send::<()>(cx, None) {
-                            frame::PollSend::Pending(_) => {}
-                            frame::PollSend::Ready(res) => {
+                        match socket.get_mut().poll_ready_unpin(cx) {
+                            Poll::Pending => {}
+                            Poll::Ready(res) => {
                                 res.or(Err(ConnectionError::Closed))?;
                                 if stream_receiver_paused {
                                     return Poll::Ready(Result::Ok(IoEvent::OutboundReady))
@@ -883,7 +884,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     /// Try to flush the underlying I/O stream, without waiting for it.
     async fn flush_nowait(&mut self) -> Result<()> {
         future::poll_fn(|cx| {
-            let _ = self.socket.get_mut().poll_flush(cx)?;
+            let _ = self.socket.get_mut().poll_flush_unpin(cx)?;
             Poll::Ready(Ok(()))
         }).await
     }
@@ -1009,37 +1010,18 @@ async fn send<T: AsyncRead + AsyncWrite + Unpin>(
     control_receiver: &mut Pausable<mpsc::Receiver<ControlCommand>>,
     frame: impl Into<Frame<()>>
 ) -> Result<()> {
-    let mut frame = Some(frame.into());
-    future::poll_fn(move |cx| {
-        let next = frame.take().expect("Frame has not yet been taken by `io`.");
-        match io.get_mut().poll_send(cx, Some(next)) {
-            frame::PollSend::Pending(Some(f)) => {
-                debug_assert!(stream_receiver.is_paused());
-                log::debug!("{}: send: Prior write pending. Waiting.", id);
-                frame = Some(f);
-                return Poll::Pending
-            }
-            frame::PollSend::Pending(None) => {
-                // The frame could not yet fully be written to the underlying
-                // socket, so we pause the processing of commands in order to
-                // pause writing while still being able to read from the socket.
-                // The only frames that may still be sent while commands are paused
-                // are as a reaction to frames being read, which in turn allows
-                // the remote to make progress eventually, if it should
-                // currently be blocked on writing. In this way unnecessary
-                // deadlocks between peers blocked on writing are avoided.
-                log::trace!("{}: send: Write pending. Continuing with paused command streams.", id);
+    SinkExt::feed(io.get_mut(), frame.into()).await?;
+    // Check if the write "goes through" or is pending due to back-pressure
+    // from the underlying socket.
+    future::poll_fn(|cx| {
+        match io.get_mut().poll_ready_unpin(cx)? {
+            Poll::Pending => {
+                log::debug!("{}: send: Write pending. Continuing with paused command streams.", id);
                 stream_receiver.pause();
                 control_receiver.pause();
-                return Poll::Ready(Ok(()))
+                return Poll::Ready(Result::Ok(()))
             }
-            frame::PollSend::Ready(Err(e)) => {
-                return Poll::Ready(Err(e.into()))
-            }
-            frame::PollSend::Ready(Ok(())) => {
-                // Note: We leave the unpausing of the command streams to `Connection::next()`.
-                return Poll::Ready(Ok(()))
-            }
+            Poll::Ready(()) => return Poll::Ready(Ok(()))
         }
     }).await
 }

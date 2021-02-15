@@ -33,122 +33,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Io<T> {
             max_body_len: max_frame_body_len
         }
     }
-
-    /// Continue writing on the underlying connection, possibly with a new frame.
-    ///
-    /// If there is no data pending to be written from a prior frame, an attempt
-    /// is made at writing the new frame, if any.
-    ///
-    /// If there is data pending to be written from a prior frame, an attempt is made to
-    /// complete the pending writes before accepting the new frame, if any. If
-    /// the new frame cannot be accepted due to pending writes, it is returned.
-    pub(crate) fn poll_send<A>(&mut self, cx: &mut Context<'_>, mut frame: Option<Frame<A>>)
-        -> PollSend<A, io::Result<()>>
-    {
-        loop {
-            match &mut self.write_state {
-                WriteState::Init => {
-                    if let Some(f) = frame.take() {
-                        let header = header::encode(&f.header);
-                        let buffer = f.body;
-                        self.write_state = WriteState::Header { header, buffer, offset: 0 };
-                    } else {
-                        return PollSend::Ready(Ok(()))
-                    }
-                }
-                WriteState::Header { header, buffer, ref mut offset } => {
-                    match Pin::new(&mut self.io).poll_write(cx, &header[*offset ..]) {
-                        Poll::Pending => {
-                            if let Some(f) = frame.take() {
-                                return PollSend::Pending(Some(f))
-                            }
-                            return PollSend::Pending(None)
-                        }
-                        Poll::Ready(Err(e)) => {
-                            if let Some(f) = frame.take() {
-                                return PollSend::Pending(Some(f))
-                            }
-                            return PollSend::Ready(Err(e))
-                        }
-                        Poll::Ready(Ok(n)) => {
-                            if n == 0 {
-                                return PollSend::Ready(Err(io::ErrorKind::WriteZero.into()))
-                            }
-                            *offset += n;
-                            if *offset == header.len() {
-                                if buffer.len() > 0 {
-                                    let buffer = std::mem::take(buffer);
-                                    self.write_state = WriteState::Body { buffer, offset: 0 };
-                                } else {
-                                    self.write_state = WriteState::Init;
-                                }
-                            }
-                        }
-                    }
-                }
-                WriteState::Body { buffer, ref mut offset } => {
-                    match Pin::new(&mut self.io).poll_write(cx, &buffer[*offset ..]) {
-                        Poll::Pending => {
-                            if let Some(f) = frame.take() {
-                                return PollSend::Pending(Some(f))
-                            }
-                            return PollSend::Pending(None)
-                        }
-                        Poll::Ready(Err(e)) => {
-                            if let Some(f) = frame.take() {
-                                return PollSend::Pending(Some(f))
-                            }
-                            return PollSend::Ready(Err(e))
-                        }
-                        Poll::Ready(Ok(n)) => {
-                            if n == 0 {
-                                return PollSend::Ready(Err(io::ErrorKind::WriteZero.into()))
-                            }
-                            *offset += n;
-                            if *offset == buffer.len() {
-                                self.write_state = WriteState::Init;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    pub(crate) fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.poll_send(cx, Option::<Frame<()>>::None) {
-            PollSend::Pending(_) => return Poll::Pending,
-            PollSend::Ready(r) => r?
-        }
-        Pin::new(&mut self.io).poll_flush(cx)
-    }
-
-    pub(crate) async fn close(&mut self) -> io::Result<()> {
-        future::poll_fn(|cx| self.poll_flush(cx)).await?;
-        self.io.close().await
-    }
-
-    #[cfg(test)]
-    async fn flush(&mut self) -> io::Result<()> {
-        future::poll_fn(|cx| self.poll_flush(cx)).await
-    }
-
-    #[cfg(test)]
-    async fn send<A>(&mut self, frame: Frame<A>) -> io::Result<()> {
-        let mut frame = Some(frame);
-        future::poll_fn(|cx| {
-            match self.poll_send(cx, Some(frame.take().expect("`frame` not yet taken"))) {
-                PollSend::Pending(f) => { frame = f; return Poll::Pending }
-                PollSend::Ready(r) => return Poll::Ready(r)
-            }
-        }).await
-    }
-}
-
-/// The result of [`Io::poll_send`].
-pub enum PollSend<A, B> {
-    Pending(Option<Frame<A>>),
-    Ready(B),
 }
 
 /// The stages of writing a new `Frame`.
@@ -163,6 +47,82 @@ enum WriteState {
     Body {
         buffer: Vec<u8>,
         offset: usize
+    }
+}
+
+impl<T: AsyncRead + AsyncWrite + Unpin> Sink<Frame<()>> for Io<T> {
+    type Error = io::Error;
+
+    fn poll_ready(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>
+    ) -> Poll<Result<(), Self::Error>> {
+        let this = Pin::into_inner(self);
+        loop {
+            match &mut this.write_state {
+                WriteState::Init => return Poll::Ready(Ok(())),
+                WriteState::Header { header, buffer, ref mut offset } => {
+                    match Pin::new(&mut this.io).poll_write(cx, &header[*offset ..]) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                        Poll::Ready(Ok(n)) => {
+                            if n == 0 {
+                                return Poll::Ready(Err(io::ErrorKind::WriteZero.into()))
+                            }
+                            *offset += n;
+                            if *offset == header.len() {
+                                if buffer.len() > 0 {
+                                    let buffer = std::mem::take(buffer);
+                                    this.write_state = WriteState::Body { buffer, offset: 0 };
+                                } else {
+                                    this.write_state = WriteState::Init;
+                                }
+                            }
+                        }
+                    }
+                }
+                WriteState::Body { buffer, ref mut offset } => {
+                    match Pin::new(&mut this.io).poll_write(cx, &buffer[*offset ..]) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                        Poll::Ready(Ok(n)) => {
+                            if n == 0 {
+                                return Poll::Ready(Err(io::ErrorKind::WriteZero.into()))
+                            }
+                            *offset += n;
+                            if *offset == buffer.len() {
+                                this.write_state = WriteState::Init;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn start_send(self: Pin<&mut Self>, f: Frame<()>) -> Result<(), Self::Error> {
+        let header = header::encode(&f.header);
+        let buffer = f.body;
+        self.get_mut().write_state = WriteState::Header { header, buffer, offset: 0 };
+        Ok(())
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>
+    ) -> Poll<Result<(), Self::Error>> {
+        let this = Pin::into_inner(self);
+        ready!(this.poll_ready_unpin(cx))?;
+        Pin::new(&mut this.io).poll_flush(cx)
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>
+    ) -> Poll<Result<(), Self::Error>> {
+        let this = Pin::into_inner(self);
+        ready!(this.poll_ready_unpin(cx))?;
+        Pin::new(&mut this.io).poll_close(cx)
     }
 }
 
