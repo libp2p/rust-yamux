@@ -715,10 +715,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 return Action::Update(frame)
             }
         } else if !is_finish {
-            log::debug!("{}/{}: data for unknown stream", self.id, stream_id);
-            let mut header = Header::data(stream_id, 0);
-            header.rst();
-            return Action::Reset(Frame::new(header))
+            log::debug!("{}/{}: data for unknown stream, ignoring", self.id, stream_id);
+            // We do not consider this a protocol violation and thus do not send a stream reset
+            // because we may still be processing pending `StreamCommand`s of this stream that were
+            // sent before it has been dropped and "garbage collected". Such a stream reset would
+            // interfere with the frames that still need to be sent, causing premature stream
+            // termination for the remote.
+            // See https://github.com/paritytech/yamux/issues/110 for details.
         }
 
         Action::None
@@ -782,9 +785,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             }
         } else if !is_finish {
             log::debug!("{}/{}: window update for unknown stream", self.id, stream_id);
-            let mut header = Header::data(stream_id, 0);
-            header.rst();
-            return Action::Reset(Frame::new(header))
+            // We do not consider this a protocol violation and thus do not send a stream reset
+            // because we may still be processing pending `StreamCommand`s of this stream that were
+            // sent before it has been dropped and "garbage collected". Such a stream reset would
+            // interfere with the frames that still need to be sent, causing premature stream
+            // termination for the remote.
+            // See https://github.com/paritytech/yamux/issues/110 for details.
         }
 
         Action::None
@@ -801,9 +807,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             return Action::Ping(Frame::new(hdr))
         }
         log::debug!("{}/{}: ping for unknown stream", self.id, stream_id);
-        let mut header = Header::data(stream_id, 0);
-        header.rst();
-        Action::Reset(Frame::new(header))
+        // We do not consider this a protocol violation and thus do not send a stream reset
+        // because we may still be processing pending `StreamCommand`s of this stream that were
+        // sent before it has been dropped and "garbage collected". Such a stream reset would
+        // interfere with the frames that still need to be sent, causing premature stream
+        // termination for the remote.
+        // See https://github.com/paritytech/yamux/issues/110 for details.
+        Action::None
     }
 
     fn next_stream_id(&mut self) -> Result<StreamId> {
