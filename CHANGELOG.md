@@ -1,3 +1,11 @@
+# 0.8.1
+
+- Avoid possible premature stream resets of streams that have been properly
+  closed and already dropped but receive window update or other frames while
+  the remaining buffered frames are still sent out. Incoming frames for
+  unknown streams are now ignored, instead of triggering a stream reset for
+  the remote.
+
 # 0.8.0
 
 - Upgrade step 4 of 4. This version always assumes the new semantics and
