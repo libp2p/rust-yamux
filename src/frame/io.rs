@@ -149,7 +149,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         let mut this = &mut *self;
         loop {
-            log::debug!("{}: poll_next: read: {:?}", this.id, this.read_state);
+            log::trace!("{}: poll_next: read: {:?}", this.id, this.read_state);
             match this.read_state {
                 ReadState::Init => {
                     this.read_state = ReadState::Header {
@@ -203,14 +203,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                     let body_len = header.len().val() as usize;
 
                     if *offset == body_len {
-                        log::debug!("Read complete frame of {} bytes", offset);
+                        log::trace!("{}: Read frame of {} body bytes", this.id, body_len);
                         let h = header.clone();
                         let v = std::mem::take(buffer);
                         this.read_state = ReadState::Init;
                         return Poll::Ready(Some(Ok(Frame { header: h, body: v })))
                     }
-
-                    log::debug!("Trying to read body bytes ...");
 
                     let buf = &mut buffer[*offset .. body_len];
                     match ready!(Pin::new(&mut this.io).poll_read(cx, buf))? {
@@ -219,7 +217,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                             return Poll::Ready(Some(Err(e)))
                         }
                         n => {
-                            log::debug!("Read {} body bytes", n);
+                            log::trace!("{}: Read {} body bytes", this.id, n);
                             *offset += n
                         }
                     }

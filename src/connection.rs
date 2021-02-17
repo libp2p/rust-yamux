@@ -395,14 +395,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 } else {
                     let socket = &mut self.socket;
                     let io = future::poll_fn(move |cx| {
-                        // Progress writing.
-                        match socket.get_mut().poll_ready_unpin(cx) {
-                            Poll::Pending => {}
-                            Poll::Ready(res) => {
+                        // If the stream command receiver was paused, we got
+                        // back-pressure from the underlying I/O stream and
+                        // must wait for the sink to be ready again for the
+                        // next frame.
+                        if stream_receiver_paused {
+                            if let Poll::Ready(res) = socket.get_mut().poll_ready_unpin(cx) {
                                 res.or(Err(ConnectionError::Closed))?;
-                                if stream_receiver_paused {
-                                    return Poll::Ready(Result::Ok(IoEvent::OutboundReady))
-                                }
+                                return Poll::Ready(Result::Ok(IoEvent::OutboundReady))
                             }
                         }
                         // Progress reading.
@@ -460,6 +460,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
 
             match io_event? {
                 Poll::Ready(IoEvent::OutboundReady) => {
+                    log::debug!("{}: Sink ready, unpausing command streams.", self.id);
                     self.stream_receiver.unpause();
                     // Only unpause the control command receiver if we're not
                     // shutting down already.
@@ -756,7 +757,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 }
             }
         } else {
-            log::debug!("{}/{}: data for unknown stream, ignoring", self.id, stream_id);
+            log::trace!("{}/{}: data frame for unknown stream, possibly dropped earlier: {:?}",
+                self.id, stream_id, frame);
             // We do not consider this a protocol violation and thus do not send a stream reset
             // because we may still be processing pending `StreamCommand`s of this stream that were
             // sent before it has been dropped and "garbage collected". Such a stream reset would
@@ -826,7 +828,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 w.wake()
             }
         } else {
-            log::debug!("{}/{}: window update for unknown stream, ignoring", self.id, stream_id);
+            log::trace!("{}/{}: window update for unknown stream, possibly dropped earlier: {:?}",
+                self.id, stream_id, frame);
             // We do not consider this a protocol violation and thus do not send a stream reset
             // because we may still be processing pending `StreamCommand`s of this stream that were
             // sent before it has been dropped and "garbage collected". Such a stream reset would
@@ -849,7 +852,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             hdr.ack();
             return Action::Ping(Frame::new(hdr))
         }
-        log::debug!("{}/{}: ping for unknown stream", self.id, stream_id);
+        log::trace!("{}/{}: ping for unknown stream, possibly dropped earlier: {:?}",
+            self.id, stream_id, frame);
         // We do not consider this a protocol violation and thus do not send a stream reset because
         // we may still be processing pending `StreamCommand`s of this stream that were sent before
         // it has been dropped and "garbage collected". Such a stream reset would interfere with the

@@ -69,7 +69,7 @@ async fn roundtrip(address: SocketAddr, nstreams: usize, data: Arc<Vec<u8>>) {
 #[tokio::test]
 async fn concurrent_streams() {
     let _ = env_logger::try_init();
-    let data = Arc::new(vec![0x42; 100 * 1024]);
+    let data = Arc::new(vec![0x42; 1024 * 1024]);
     let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
     roundtrip(addr, 1000, data).await
 }
