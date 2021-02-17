@@ -18,9 +18,13 @@ async fn roundtrip(address: SocketAddr, nstreams: usize, data: Arc<Vec<u8>>) {
     let listener = TcpListener::bind(&address).await.expect("bind");
     let address = listener.local_addr().expect("local address");
 
+    let mut server_cfg = Config::default();
+    server_cfg.set_split_send_size(256 * 1024);
+    let client_cfg = server_cfg.clone();
+
     let server = async move {
         let socket = listener.accept().await.expect("accept").0.compat();
-        yamux::into_stream(Connection::new(socket, Config::default(), Mode::Server))
+        yamux::into_stream(Connection::new(socket, server_cfg, Mode::Server))
             .try_for_each_concurrent(None, |mut stream| async move {
                 log::debug!("S: accepted new stream");
                 let mut len = [0; 4];
@@ -39,7 +43,7 @@ async fn roundtrip(address: SocketAddr, nstreams: usize, data: Arc<Vec<u8>>) {
 
     let socket = TcpStream::connect(&address).await.expect("connect").compat();
     let (tx, rx) = mpsc::unbounded();
-    let conn = Connection::new(socket, Config::default(), Mode::Client);
+    let conn = Connection::new(socket, client_cfg, Mode::Client);
     let mut ctrl = conn.control();
     task::spawn(yamux::into_stream(conn).for_each(|_| future::ready(())));
     for _ in 0 .. nstreams {
