@@ -400,7 +400,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                         // must wait for the sink to be ready again for the
                         // next frame.
                         if stream_receiver_paused {
-                            if let Poll::Ready(res) = socket.get_mut().poll_ready_unpin(cx) {
+                            if let Poll::Ready(res) = socket.poll_ready_unpin(cx) {
                                 res.or(Err(ConnectionError::Closed))?;
                                 return Poll::Ready(Result::Ok(IoEvent::OutboundReady))
                             }
@@ -460,7 +460,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
 
             match io_event? {
                 Poll::Ready(IoEvent::OutboundReady) => {
-                    log::debug!("{}: Sink ready, unpausing command streams.", self.id);
+                    log::trace!("{}: Sink ready, unpausing command streams.", self.id);
                     self.stream_receiver.unpause();
                     // Only unpause the control command receiver if we're not
                     // shutting down already.
@@ -628,7 +628,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                         return Ok(Some(stream))
                     }
                     Action::Update(f) => {
-                        log::trace!("{}/{}: sending update", self.id, f.header().stream_id());
+                        log::trace!("{}: sending update: {:?}", self.id, f.header());
                         self.send(f).await.or(Err(ConnectionError::Closed))?
                     }
                     Action::Ping(f) => {
@@ -958,7 +958,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 frame
             };
             if let Some(f) = frame {
-                log::trace!("{}/{}: sending final frame: {}", self.id, stream_id, f.header());
+                log::trace!("{}/{}: sending: {}", self.id, stream_id, f.header());
                 send(conn_id, &mut self.socket, &mut self.stream_receiver,
                     &mut self.control_receiver, f).await.or(Err(ConnectionError::Closed))?
             }
@@ -1020,7 +1020,7 @@ async fn send<T: AsyncRead + AsyncWrite + Unpin>(
     future::poll_fn(|cx| {
         match io.get_mut().poll_ready_unpin(cx)? {
             Poll::Pending => {
-                log::debug!("{}: send: Write pending. Continuing with paused command streams.", id);
+                log::trace!("{}: send: Write pending. Continuing with paused command streams.", id);
                 stream_receiver.pause();
                 control_receiver.pause();
                 return Poll::Ready(Result::Ok(()))

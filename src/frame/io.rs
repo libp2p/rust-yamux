@@ -36,7 +36,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Io<T> {
 }
 
 /// The stages of writing a new `Frame`.
-#[derive(Debug)]
 enum WriteState {
     Init,
     Header {
@@ -50,6 +49,22 @@ enum WriteState {
     }
 }
 
+impl fmt::Debug for WriteState {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            WriteState::Init => {
+                f.write_str("(WriteState::Init)")
+            }
+            WriteState::Header { offset, .. } => {
+                write!(f, "(WriteState::Header (offset {}))", offset)
+            }
+            WriteState::Body { offset, buffer } => {
+                write!(f, "(WriteState::Body (offset {}) (buffer-len {}))", offset, buffer.len())
+            }
+        }
+    }
+}
+
 impl<T: AsyncRead + AsyncWrite + Unpin> Sink<Frame<()>> for Io<T> {
     type Error = io::Error;
 
@@ -59,6 +74,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Sink<Frame<()>> for Io<T> {
     ) -> Poll<Result<(), Self::Error>> {
         let this = Pin::into_inner(self);
         loop {
+            log::trace!("{}: write: {:?}", this.id, this.write_state);
             match &mut this.write_state {
                 WriteState::Init => return Poll::Ready(Ok(())),
                 WriteState::Header { header, buffer, ref mut offset } => {
@@ -149,7 +165,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         let mut this = &mut *self;
         loop {
-            log::trace!("{}: poll_next: read: {:?}", this.id, this.read_state);
+            log::trace!("{}: read: {:?}", this.id, this.read_state);
             match this.read_state {
                 ReadState::Init => {
                     this.read_state = ReadState::Header {
@@ -203,7 +219,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                     let body_len = header.len().val() as usize;
 
                     if *offset == body_len {
-                        log::trace!("{}: Read frame of {} body bytes", this.id, body_len);
                         let h = header.clone();
                         let v = std::mem::take(buffer);
                         this.read_state = ReadState::Init;
@@ -216,10 +231,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                             let e = FrameDecodeError::Io(io::ErrorKind::UnexpectedEof.into());
                             return Poll::Ready(Some(Err(e)))
                         }
-                        n => {
-                            log::trace!("{}: Read {} body bytes", this.id, n);
-                            *offset += n
-                        }
+                        n => *offset += n
                     }
                 }
             }
@@ -234,7 +246,7 @@ impl fmt::Debug for ReadState {
                 f.write_str("(ReadState::Init)")
             }
             ReadState::Header { offset, .. } => {
-                write!(f, "(ReadState::Header {})", offset)
+                write!(f, "(ReadState::Header (offset {}))", offset)
             }
             ReadState::Body { header, offset, buffer } => {
                 write!(f, "(ReadState::Body (header {}) (offset {}) (buffer-len {}))",

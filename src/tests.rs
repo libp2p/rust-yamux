@@ -218,7 +218,7 @@ fn write_deadlock() {
     // We make the message to transmit large enough s.t. the "server"
     // is forced to start writing (i.e. echoing) the bytes before
     // having read the entire payload.
-    let msg = vec![1u8; 1 * 1024 * 1024];
+    let msg = vec![1u8; 1024 * 1024];
 
     // We choose a "connection capacity" that is artificially below
     // the size of a receive window. If it were equal or greater,
