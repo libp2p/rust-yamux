@@ -169,7 +169,7 @@ pub struct Connection<T> {
     control_sender: mpsc::Sender<ControlCommand>,
     control_receiver: Pausable<mpsc::Receiver<ControlCommand>>,
     stream_sender: mpsc::Sender<StreamCommand>,
-    stream_receiver: Pausable<mpsc::Receiver<StreamCommand>>,
+    stream_receiver: mpsc::Receiver<StreamCommand>,
     garbage: Vec<StreamId>, // see `Connection::garbage_collect()`
     shutdown: Shutdown,
     is_closed: bool
@@ -283,7 +283,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             control_sender,
             control_receiver: Pausable::new(control_receiver),
             stream_sender,
-            stream_receiver: Pausable::new(stream_receiver),
+            stream_receiver: stream_receiver,
             next_id: match mode {
                 Mode::Client => 1,
                 Mode::Server => 2
@@ -349,7 +349,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
 
         // Close and drain the stream command receiver.
         if !self.stream_receiver.is_terminated() {
-            self.stream_receiver.stream().close();
+            self.stream_receiver.close();
             while let Some(_cmd) = self.stream_receiver.next().await {
                 // drop it
             }
@@ -381,30 +381,17 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             // we properly wait until woken up because we actually can make
             // progress.
 
-            let mut num_terminated = 0;
-
-            // Determine if the stream command receiver is paused, which
-            // is only the case if we have pending writes, i.e. back-pressure
-            // from the underlying connection.
-            let stream_receiver_paused = self.stream_receiver.is_paused();
-
-            let mut next_io_event =
+            let next_io_event =
                 if self.socket.is_terminated() {
-                    num_terminated += 1;
                     Either::Left(future::pending())
                 } else {
                     let socket = &mut self.socket;
                     let io = future::poll_fn(move |cx| {
-                        // If the stream command receiver was paused, we got
-                        // back-pressure from the underlying I/O stream and
-                        // must wait for the sink to be ready again for the
-                        // next frame.
-                        if stream_receiver_paused {
-                            if let Poll::Ready(res) = socket.poll_ready_unpin(cx) {
-                                res.or(Err(ConnectionError::Closed))?;
-                                return Poll::Ready(Result::Ok(IoEvent::OutboundReady))
-                            }
+                        if let Poll::Ready(res) = socket.poll_ready_unpin(cx) {
+                            res.or(Err(ConnectionError::Closed))?;
+                            return Poll::Ready(Result::Ok(IoEvent::OutboundReady))
                         }
+
                         // Progress reading.
                         let next_frame = match futures::ready!(socket.poll_next_unpin(cx)) {
                             None => Ok(None),
@@ -415,6 +402,33 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                     });
                     Either::Right(io)
                 };
+
+            match next_io_event.await? {
+                IoEvent::OutboundReady => {
+                    // Only unpause the control command receiver if we're not
+                    // shutting down already.
+                    if let Shutdown::NotStarted = self.shutdown {
+                        self.control_receiver.unpause();
+                    }
+                }
+                IoEvent::Inbound(frame) => {
+                    if let Some(stream) = self.on_frame(frame).await? {
+                        self.flush_nowait().await.or(Err(ConnectionError::Closed))?;
+                        return Ok(Some(stream))
+                    }
+                }
+            }
+
+            // Getting this far implies that the socket is ready to start sending out a new frame.
+
+            let mut num_terminated = 0;
+
+            let mut next_frame = if self.socket.is_terminated() {
+                num_terminated += 1;
+                Either::Left(future::pending())
+            } else {
+                Either::Right(self.socket.next())
+            };
 
             let mut next_stream_command =
                 if self.stream_receiver.is_terminated() {
@@ -441,14 +455,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 future::poll_fn(move |cx: &mut Context| {
                     let a = next_stream_command.poll_unpin(cx);
                     let b = next_control_command.poll_unpin(cx);
-                    let c = next_io_event.poll_unpin(cx);
+                    let c = next_frame.poll_unpin(cx);
                     if a.is_pending() && b.is_pending() && c.is_pending() {
                         return Poll::Pending
                     }
                     Poll::Ready((a, b, c))
                 });
 
-            let (stream_command, control_command, io_event) = next_item.await;
+            let (stream_command, control_command, frame) = next_item.await;
 
             if let Poll::Ready(cmd) = control_command {
                 self.on_control_command(cmd).await?
@@ -458,23 +472,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 self.on_stream_command(cmd).await?
             }
 
-            match io_event? {
-                Poll::Ready(IoEvent::OutboundReady) => {
-                    log::trace!("{}: Sink ready, unpausing command streams.", self.id);
-                    self.stream_receiver.unpause();
-                    // Only unpause the control command receiver if we're not
-                    // shutting down already.
-                    if let Shutdown::NotStarted = self.shutdown {
-                        self.control_receiver.unpause();
-                    }
+            if let Poll::Ready(frame) = frame {
+                if let Some(stream) = self.on_frame(frame.transpose().map_err(Into::into)).await? {
+                    self.flush_nowait().await.or(Err(ConnectionError::Closed))?;
+                    return Ok(Some(stream))
                 }
-                Poll::Ready(IoEvent::Inbound(frame)) => {
-                    if let Some(stream) = self.on_frame(frame).await? {
-                        self.flush_nowait().await.or(Err(ConnectionError::Closed))?;
-                        return Ok(Some(stream))
-                    }
-                }
-                Poll::Pending => {}
             }
 
             self.flush_nowait().await.or(Err(ConnectionError::Closed))?;
@@ -506,7 +508,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                     let mut frame = Frame::window_update(id, extra_credit);
                     frame.header_mut().syn();
                     log::trace!("{}/{}: sending initial {}", self.id, id, frame.header());
-                    self.send(frame).await.or(Err(ConnectionError::Closed))?
+                    self.socket.get_mut().feed(frame.into()).await.or(Err(ConnectionError::Closed))?
                 }
                 let stream = {
                     let config = self.config.clone();
@@ -528,7 +530,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                         header.rst();
                         let frame = Frame::new(header);
                         log::trace!("{}/{}: sending reset", self.id, id);
-                        self.send(frame).await.or(Err(ConnectionError::Closed))?
+                        self.socket.get_mut().feed(frame.into()).await.or(Err(ConnectionError::Closed))?
                     }
                 }
             }
@@ -545,7 +547,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 self.shutdown = Shutdown::InProgress(reply);
                 log::trace!("{}: shutting down connection", self.id);
                 self.control_receiver.pause();
-                self.stream_receiver.stream().close()
+                self.stream_receiver.close()
             }
             None => {
                 // We only get here after the whole connection shutdown is complete.
@@ -559,16 +561,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         Ok(())
     }
 
-    async fn send(&mut self, f: impl Into<Frame<()>>) -> Result<()> {
-        send(self.id, &mut self.socket, &mut self.stream_receiver, &mut self.control_receiver, f).await
-    }
-
     /// Process a command from one of our `Stream`s.
     async fn on_stream_command(&mut self, cmd: Option<StreamCommand>) -> Result<()> {
         match cmd {
             Some(StreamCommand::SendFrame(frame)) => {
                 log::trace!("{}/{}: sending: {}", self.id, frame.header().stream_id(), frame.header());
-                self.send(frame).await.or(Err(ConnectionError::Closed))?
+                self.socket.get_mut().feed(frame.into()).await.or(Err(ConnectionError::Closed))?
             }
             Some(StreamCommand::CloseStream { id, ack }) => {
                 log::trace!("{}/{}: sending close", self.id, id);
@@ -576,7 +574,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 header.fin();
                 if ack { header.ack() }
                 let frame = Frame::new(header);
-                self.send(frame).await.or(Err(ConnectionError::Closed))?
+                self.socket.get_mut().feed(frame.into()).await.or(Err(ConnectionError::Closed))?
             }
             None => {
                 // We only get to this point when `self.stream_receiver`
@@ -587,7 +585,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 debug_assert!(self.shutdown.is_in_progress());
                 log::debug!("{}: sending term", self.id);
                 let frame = Frame::term();
-                self.send(frame).await.or(Err(ConnectionError::Closed))?;
+                self.socket.get_mut().feed(frame.into()).await.or(Err(ConnectionError::Closed))?;
                 let shutdown = std::mem::replace(&mut self.shutdown, Shutdown::Complete);
                 if let Shutdown::InProgress(tx) = shutdown {
                     // Inform the `Control` that initiated the shutdown.
@@ -623,25 +621,25 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                         log::trace!("{}: new inbound {} of {}", self.id, stream, self);
                         if let Some(f) = update {
                             log::trace!("{}/{}: sending update", self.id, f.header().stream_id());
-                            self.send(f).await.or(Err(ConnectionError::Closed))?
+                            self.socket.get_mut().feed(f.into()).await.or(Err(ConnectionError::Closed))?
                         }
                         return Ok(Some(stream))
                     }
                     Action::Update(f) => {
                         log::trace!("{}: sending update: {:?}", self.id, f.header());
-                        self.send(f).await.or(Err(ConnectionError::Closed))?
+                        self.socket.get_mut().feed(f.into()).await.or(Err(ConnectionError::Closed))?
                     }
                     Action::Ping(f) => {
                         log::trace!("{}/{}: pong", self.id, f.header().stream_id());
-                        self.send(f).await.or(Err(ConnectionError::Closed))?
+                        self.socket.get_mut().feed(f.into()).await.or(Err(ConnectionError::Closed))?
                     }
                     Action::Reset(f) => {
                         log::trace!("{}/{}: sending reset", self.id, f.header().stream_id());
-                        self.send(f).await.or(Err(ConnectionError::Closed))?
+                        self.socket.get_mut().feed(f.into()).await.or(Err(ConnectionError::Closed))?
                     }
                     Action::Terminate(f) => {
                         log::trace!("{}: sending term", self.id);
-                        self.send(f).await.or(Err(ConnectionError::Closed))?
+                        self.socket.get_mut().feed(f.into()).await.or(Err(ConnectionError::Closed))?
                     }
                 }
                 Ok(None)
@@ -959,8 +957,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             };
             if let Some(f) = frame {
                 log::trace!("{}/{}: sending: {}", self.id, stream_id, f.header());
-                send(conn_id, &mut self.socket, &mut self.stream_receiver,
-                    &mut self.control_receiver, f).await.or(Err(ConnectionError::Closed))?
+                self.socket.get_mut().feed(f.into()).await.or(Err(ConnectionError::Closed))?
             }
             self.garbage.push(stream_id)
         }
@@ -997,37 +994,8 @@ impl<T> Drop for Connection<T> {
 enum IoEvent {
     /// A new inbound frame arrived.
     Inbound(Result<Option<Frame<()>>>),
-    /// We can continue sending frames after having to pause earlier.
+    /// We can continue sending frames.
     OutboundReady,
-}
-
-/// Sends a frame on the given `io` stream.
-///
-/// If the frame is taken by `io` but cannot be fully sent, the command
-/// receivers are paused, without waiting for completion.
-///
-/// If a prior send operation is still pending, waits for its completion.
-async fn send<T: AsyncRead + AsyncWrite + Unpin>(
-    id: Id,
-    io: &mut Fuse<frame::Io<T>>,
-    stream_receiver: &mut Pausable<mpsc::Receiver<StreamCommand>>,
-    control_receiver: &mut Pausable<mpsc::Receiver<ControlCommand>>,
-    frame: impl Into<Frame<()>>
-) -> Result<()> {
-    SinkExt::feed(io.get_mut(), frame.into()).await?;
-    // Check if the write "goes through" or is pending due to back-pressure
-    // from the underlying socket.
-    future::poll_fn(|cx| {
-        match io.get_mut().poll_ready_unpin(cx)? {
-            Poll::Pending => {
-                log::trace!("{}: send: Write pending. Continuing with paused command streams.", id);
-                stream_receiver.pause();
-                control_receiver.pause();
-                return Poll::Ready(Result::Ok(()))
-            }
-            Poll::Ready(()) => return Poll::Ready(Ok(()))
-        }
-    }).await
 }
 
 /// Turn a Yamux [`Connection`] into a [`futures::Stream`].
