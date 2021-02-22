@@ -14,13 +14,15 @@ use tokio::{net::{TcpStream, TcpListener}, task};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use yamux::{Config, Connection, Mode, WindowUpdateMode};
 
+const PAYLOAD_SIZE: usize = 128 * 1024;
+
 async fn roundtrip(address: SocketAddr, nstreams: usize, data: Arc<Vec<u8>>) {
     let listener = TcpListener::bind(&address).await.expect("bind");
     let address = listener.local_addr().expect("local address");
 
     let mut server_cfg = Config::default();
     // Use a large frame size to speed up the test.
-    server_cfg.set_split_send_size(usize::min(256 * 1024, data.len()));
+    server_cfg.set_split_send_size(PAYLOAD_SIZE);
     // Use `WindowUpdateMode::OnRead` so window updates are sent by the
     // `Stream`s and subject to backpressure from the stream command channel. Thus
     // the `Connection` I/O loop will not need to send window updates
@@ -82,7 +84,7 @@ async fn roundtrip(address: SocketAddr, nstreams: usize, data: Arc<Vec<u8>>) {
 #[tokio::test]
 async fn concurrent_streams() {
     let _ = env_logger::try_init();
-    let data = Arc::new(vec![0x42; 128 * 1024]);
+    let data = Arc::new(vec![0x42; PAYLOAD_SIZE]);
     let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
     roundtrip(addr, 1000, data).await
 }
