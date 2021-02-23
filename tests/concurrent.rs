@@ -10,12 +10,26 @@
 
 use futures::{channel::mpsc, prelude::*};
 use std::{net::{Ipv4Addr, SocketAddr, SocketAddrV4}, sync::Arc};
-use tokio::{net::{TcpStream, TcpListener}, task};
+use tokio::{net::TcpSocket, task, runtime::Runtime};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use yamux::{Config, Connection, Mode, WindowUpdateMode};
+use quickcheck::{Arbitrary, Gen, QuickCheck};
 
-async fn roundtrip(address: SocketAddr, nstreams: usize, data: Arc<Vec<u8>>) {
-    let listener = TcpListener::bind(&address).await.expect("bind");
+async fn roundtrip(
+    address: SocketAddr,
+    nstreams: usize,
+    data: Arc<Vec<u8>>,
+    tcp_buffer_sizes: Option<TcpBuferSizes>,
+) {
+    let listener = {
+        let socket = TcpSocket::new_v4().expect("new_v4");
+        if let Some(size) = tcp_buffer_sizes {
+            socket.set_send_buffer_size(size.send).expect("send size set");
+            socket.set_recv_buffer_size(size.recv).expect("recv size set");
+        }
+        socket.bind(address).expect("bind");
+        socket.listen(1024).expect("listen")
+    };
     let address = listener.local_addr().expect("local address");
 
     let mut server_cfg = Config::default();
@@ -32,8 +46,8 @@ async fn roundtrip(address: SocketAddr, nstreams: usize, data: Arc<Vec<u8>>) {
     let client_cfg = server_cfg.clone();
 
     let server = async move {
-        let socket = listener.accept().await.expect("accept").0.compat();
-        yamux::into_stream(Connection::new(socket, server_cfg, Mode::Server))
+        let stream = listener.accept().await.expect("accept").0.compat();
+        yamux::into_stream(Connection::new(stream, server_cfg, Mode::Server))
             .try_for_each_concurrent(None, |mut stream| async move {
                 log::debug!("S: accepted new stream");
                 let mut len = [0; 4];
@@ -50,9 +64,16 @@ async fn roundtrip(address: SocketAddr, nstreams: usize, data: Arc<Vec<u8>>) {
 
     task::spawn(server);
 
-    let socket = TcpStream::connect(&address).await.expect("connect").compat();
+    let conn = {
+        let socket = TcpSocket::new_v4().expect("new_v4");
+        if let Some(size) = tcp_buffer_sizes {
+            socket.set_send_buffer_size(size.send).expect("send size set");
+            socket.set_recv_buffer_size(size.recv).expect("recv size set");
+        }
+        let stream = socket.connect(address).await.expect("connect").compat();
+        Connection::new(stream, client_cfg, Mode::Client)
+    };
     let (tx, rx) = mpsc::unbounded();
-    let conn = Connection::new(socket, client_cfg, Mode::Client);
     let mut ctrl = conn.control();
     task::spawn(yamux::into_stream(conn).for_each(|_| future::ready(())));
     for _ in 0 .. nstreams {
@@ -79,10 +100,42 @@ async fn roundtrip(address: SocketAddr, nstreams: usize, data: Arc<Vec<u8>>) {
     assert_eq!(nstreams, n)
 }
 
-#[tokio::test]
-async fn concurrent_streams() {
+/// Send and receive buffer size for a TCP socket.
+#[derive(Clone, Debug, Copy)]
+struct TcpBuferSizes {
+    send: u32,
+    recv: u32,
+}
+
+impl Arbitrary for TcpBuferSizes {
+    fn arbitrary(g: &mut Gen) -> Self {
+        let send = if bool::arbitrary(g) {
+            16*1024
+        } else {
+            32*1024
+        };
+
+        // Have receive buffer size be some multiple of send buffer size.
+        let recv = if bool::arbitrary(g) {
+            send * 2
+        } else {
+            send * 4
+        };
+
+        TcpBuferSizes { send, recv }
+    }
+}
+
+#[test]
+fn concurrent_streams() {
     let _ = env_logger::try_init();
-    let data = Arc::new(vec![0x42; 128 * 1024]);
-    let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
-    roundtrip(addr, 1000, data).await
+
+    fn prop (tcp_buffer_sizes: Option<TcpBuferSizes>) {
+        let data = Arc::new(vec![0x42; 128 * 1024]);
+        let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
+
+        Runtime::new().expect("new runtime").block_on(roundtrip(addr, 1000, data, tcp_buffer_sizes));
+    }
+
+    QuickCheck::new().tests(1).quickcheck(prop as fn(_) -> _)
 }
