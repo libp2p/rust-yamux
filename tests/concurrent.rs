@@ -114,7 +114,6 @@ impl Arbitrary for TcpSendBufferSize {
     }
 }
 
-
 #[test]
 fn concurrent_streams() {
     let _ = env_logger::try_init();
