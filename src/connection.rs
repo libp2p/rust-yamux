@@ -371,16 +371,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         loop {
             self.garbage_collect().await?;
 
-            // For each channel and the socket we create a future that gets
-            // the next item. We will poll each future and if any one of them
-            // yields an item, we return the tuple of poll results which are
-            // then all processed.
-            //
-            // For terminated sources we create non-finishing futures.
-            // This guarantees that if the remaining futures are pending
-            // we properly wait until woken up because we actually can make
-            // progress.
-
             // Wait for the frame sink to be ready or, if there is a pending
             // write, for an incoming frame. I.e. as long as there is a pending
             // write, we only read, unless a read results in needing to send a
@@ -398,31 +388,35 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                         return Poll::Ready(Result::Ok(IoEvent::OutboundReady))
                     }
 
-                    // Progress reading.
-                    let next_frame = match futures::ready!(socket.poll_next_unpin(cx)) {
-                        None => Ok(None),
-                        Some(Err(e)) => Err(e.into()),
-                        Some(Ok(f)) => Ok(Some(f))
-                    };
+                    // At this point we know the socket sink has a pending
+                    // write, so we try to read the next frame instead.
+                    let next_frame = futures::ready!(socket.poll_next_unpin(cx))
+                        .transpose()
+                        .map_err(ConnectionError::from);
                     Poll::Ready(Ok(IoEvent::Inbound(next_frame)))
                 });
                 Either::Right(io)
             };
 
-            match next_io_event.await? {
-                IoEvent::OutboundReady => {},
-                IoEvent::Inbound(frame) => {
-                    if let Some(stream) = self.on_frame(frame).await? {
-                        self.flush_nowait().await.or(Err(ConnectionError::Closed))?;
-                        return Ok(Some(stream))
-                    }
-                    continue // The sink is still pending.
+            if let IoEvent::Inbound(frame) = next_io_event.await? {
+                if let Some(stream) = self.on_frame(frame).await? {
+                    self.flush_nowait().await.or(Err(ConnectionError::Closed))?;
+                    return Ok(Some(stream))
                 }
+                continue // The socket sink still has a pending write.
             }
 
-            // Getting this far implies that the socket is ready to start
-            // sending out a new frame, so we can now listen for new commands
-            // while waiting for the next inbound frame
+            // Getting this far implies that the socket is ready to accept
+            // a new frame, so we can now listen for new commands while waiting
+            // for the next inbound frame. To that end, for each channel and the
+            // socket we create a future that gets the next item. We will poll
+            // each future and if any one of them yields an item, we return the
+            // tuple of poll results which are then all processed.
+            //
+            // For terminated sources we create non-finishing futures.
+            // This guarantees that if the remaining futures are pending
+            // we properly wait until woken up because we actually can make
+            // progress.
 
             let mut num_terminated = 0;
 

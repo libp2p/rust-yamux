@@ -20,7 +20,7 @@ async fn roundtrip(
     address: SocketAddr,
     nstreams: usize,
     data: Arc<Vec<u8>>,
-    tcp_buffer_sizes: Option<TcpBuferSizes>,
+    tcp_buffer_sizes: Option<TcpBufferSizes>,
 ) {
     let listener = {
         let socket = TcpSocket::new_v4().expect("new_v4");
@@ -103,12 +103,12 @@ async fn roundtrip(
 
 /// Send and receive buffer size for a TCP socket.
 #[derive(Clone, Debug, Copy)]
-struct TcpBuferSizes {
+struct TcpBufferSizes {
     send: u32,
     recv: u32,
 }
 
-impl Arbitrary for TcpBuferSizes {
+impl Arbitrary for TcpBufferSizes {
     fn arbitrary(g: &mut Gen) -> Self {
         let send = if bool::arbitrary(g) {
             16*1024
@@ -123,7 +123,7 @@ impl Arbitrary for TcpBuferSizes {
             send * 4
         };
 
-        TcpBuferSizes { send, recv }
+        TcpBufferSizes { send, recv }
     }
 }
 
@@ -131,12 +131,12 @@ impl Arbitrary for TcpBuferSizes {
 fn concurrent_streams() {
     let _ = env_logger::try_init();
 
-    fn prop (tcp_buffer_sizes: Option<TcpBuferSizes>) {
+    fn prop(tcp_buffer_sizes: Option<TcpBufferSizes>) {
         let data = Arc::new(vec![0x42; PAYLOAD_SIZE]);
         let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
 
         Runtime::new().expect("new runtime").block_on(roundtrip(addr, 1000, data, tcp_buffer_sizes));
     }
 
-    QuickCheck::new().tests(1).quickcheck(prop as fn(_) -> _)
+    QuickCheck::new().tests(3).quickcheck(prop as fn(_) -> _)
 }
