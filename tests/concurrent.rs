@@ -19,12 +19,13 @@ async fn roundtrip(
     address: SocketAddr,
     nstreams: usize,
     data: Arc<Vec<u8>>,
-    tcp_send_buffer_size: TcpSendBufferSize,
+    tcp_buffer_sizes: Option<TcpBuferSizes>,
 ) {
     let listener = {
         let socket = TcpSocket::new_v4().expect("new_v4");
-        if let Some(size) = tcp_send_buffer_size.0 {
-            socket.set_send_buffer_size(size).expect("size set");
+        if let Some(size) = tcp_buffer_sizes {
+            socket.set_send_buffer_size(size.send).expect("send size set");
+            socket.set_recv_buffer_size(size.recv).expect("recv size set");
         }
         socket.bind(address).expect("bind");
         socket.listen(1024).expect("listen")
@@ -65,8 +66,9 @@ async fn roundtrip(
 
     let conn = {
         let socket = TcpSocket::new_v4().expect("new_v4");
-        if let Some(size) = tcp_send_buffer_size.0 {
-            socket.set_send_buffer_size(size).expect("size set");
+        if let Some(size) = tcp_buffer_sizes {
+            socket.set_send_buffer_size(size.send).expect("send size set");
+            socket.set_recv_buffer_size(size.recv).expect("recv size set");
         }
         let stream = socket.connect(address).await.expect("connect").compat();
         Connection::new(stream, client_cfg, Mode::Client)
@@ -98,19 +100,29 @@ async fn roundtrip(
     assert_eq!(nstreams, n)
 }
 
-/// Send buffer size for a TCP socket.
-///
-/// Leave unchanged, i.e. use OS default value, when `None`.
-#[derive(Clone, Debug)]
-struct TcpSendBufferSize(Option<u32>);
+/// Send and receive buffer size for a TCP socket.
+#[derive(Clone, Debug, Copy)]
+struct TcpBuferSizes {
+    send: u32,
+    recv: u32,
+}
 
-impl Arbitrary for TcpSendBufferSize {
+impl Arbitrary for TcpBuferSizes {
     fn arbitrary(g: &mut Gen) -> Self {
-        if bool::arbitrary(g) {
-            TcpSendBufferSize(None)
+        let send = if bool::arbitrary(g) {
+            16*1024
         } else {
-            TcpSendBufferSize(Some(16 * 1024))
-        }
+            32*1024
+        };
+
+        // Have receive buffer size be some multiple of send buffer size.
+        let recv = if bool::arbitrary(g) {
+            send * 2
+        } else {
+            send * 4
+        };
+
+        TcpBuferSizes { send, recv }
     }
 }
 
@@ -118,11 +130,11 @@ impl Arbitrary for TcpSendBufferSize {
 fn concurrent_streams() {
     let _ = env_logger::try_init();
 
-    fn prop (tcp_send_buffer_size: TcpSendBufferSize) {
+    fn prop (tcp_buffer_sizes: Option<TcpBuferSizes>) {
         let data = Arc::new(vec![0x42; 128 * 1024]);
         let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
 
-        Runtime::new().expect("new runtime").block_on(roundtrip(addr, 1000, data, tcp_send_buffer_size));
+        Runtime::new().expect("new runtime").block_on(roundtrip(addr, 1000, data, tcp_buffer_sizes));
     }
 
     QuickCheck::new().tests(1).quickcheck(prop as fn(_) -> _)
