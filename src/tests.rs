@@ -211,7 +211,6 @@ fn prop_send_recv_half_closed() {
 //
 // Ignored for now as the current implementation is prone to the deadlock tested below.
 #[test]
-#[ignore]
 fn write_deadlock() {
     let _ = env_logger::try_init();
     let mut pool = LocalPool::new();
@@ -221,10 +220,19 @@ fn write_deadlock() {
     // having read the entire payload.
     let msg = vec![1u8; 1024 * 1024];
 
+    // We choose a "connection capacity" that is artificially below
+    // the size of a receive window. If it were equal or greater,
+    // multiple concurrently writing streams would be needed to non-deterministically
+    // provoke the write deadlock. This is supposed to reflect the
+    // fact that the sum of receive windows of all open streams can easily
+    // be larger than the send capacity of the connection at any point in time.
+    // Using such a low capacity here therefore yields a more reproducible test.
+    let capacity = 1024;
+
     // Create a bounded channel representing the underlying "connection".
     // Each endpoint gets a name and a bounded capacity for its outbound
     // channel (which is the other's inbound channel).
-    let (server_endpoint, client_endpoint) = bounded::channel(("S", 1024), ("C", 1024));
+    let (server_endpoint, client_endpoint) = bounded::channel(("S", capacity), ("C", capacity));
 
     // Create and spawn a "server" that echoes every message back to the client.
     let server = Connection::new(server_endpoint, Config::default(), Mode::Server);

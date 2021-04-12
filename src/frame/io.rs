@@ -18,7 +18,8 @@ use super::{Frame, header::{self, HeaderDecodeError}};
 pub(crate) struct Io<T> {
     id: Id,
     io: T,
-    state: ReadState,
+    read_state: ReadState,
+    write_state: WriteState,
     max_body_len: usize
 }
 
@@ -27,23 +28,117 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Io<T> {
         Io {
             id,
             io,
-            state: ReadState::Init,
+            read_state: ReadState::Init,
+            write_state: WriteState::Init,
             max_body_len: max_frame_body_len
         }
     }
+}
 
-    pub(crate) async fn send<A>(&mut self, frame: &Frame<A>) -> io::Result<()> {
-        let header = header::encode(&frame.header);
-        self.io.write_all(&header).await?;
-        self.io.write_all(&frame.body).await
+/// The stages of writing a new `Frame`.
+enum WriteState {
+    Init,
+    Header {
+        header: [u8; header::HEADER_SIZE],
+        buffer: Vec<u8>,
+        offset: usize
+    },
+    Body {
+        buffer: Vec<u8>,
+        offset: usize
+    }
+}
+
+impl fmt::Debug for WriteState {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            WriteState::Init => {
+                f.write_str("(WriteState::Init)")
+            }
+            WriteState::Header { offset, .. } => {
+                write!(f, "(WriteState::Header (offset {}))", offset)
+            }
+            WriteState::Body { offset, buffer } => {
+                write!(f, "(WriteState::Body (offset {}) (buffer-len {}))", offset, buffer.len())
+            }
+        }
+    }
+}
+
+impl<T: AsyncRead + AsyncWrite + Unpin> Sink<Frame<()>> for Io<T> {
+    type Error = io::Error;
+
+    fn poll_ready(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>
+    ) -> Poll<Result<(), Self::Error>> {
+        let this = Pin::into_inner(self);
+        loop {
+            log::trace!("{}: write: {:?}", this.id, this.write_state);
+            match &mut this.write_state {
+                WriteState::Init => return Poll::Ready(Ok(())),
+                WriteState::Header { header, buffer, ref mut offset } => {
+                    match Pin::new(&mut this.io).poll_write(cx, &header[*offset ..]) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                        Poll::Ready(Ok(n)) => {
+                            if n == 0 {
+                                return Poll::Ready(Err(io::ErrorKind::WriteZero.into()))
+                            }
+                            *offset += n;
+                            if *offset == header.len() {
+                                if buffer.len() > 0 {
+                                    let buffer = std::mem::take(buffer);
+                                    this.write_state = WriteState::Body { buffer, offset: 0 };
+                                } else {
+                                    this.write_state = WriteState::Init;
+                                }
+                            }
+                        }
+                    }
+                }
+                WriteState::Body { buffer, ref mut offset } => {
+                    match Pin::new(&mut this.io).poll_write(cx, &buffer[*offset ..]) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                        Poll::Ready(Ok(n)) => {
+                            if n == 0 {
+                                return Poll::Ready(Err(io::ErrorKind::WriteZero.into()))
+                            }
+                            *offset += n;
+                            if *offset == buffer.len() {
+                                this.write_state = WriteState::Init;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    pub(crate) async fn flush(&mut self) -> io::Result<()> {
-        self.io.flush().await
+    fn start_send(self: Pin<&mut Self>, f: Frame<()>) -> Result<(), Self::Error> {
+        let header = header::encode(&f.header);
+        let buffer = f.body;
+        self.get_mut().write_state = WriteState::Header { header, buffer, offset: 0 };
+        Ok(())
     }
 
-    pub(crate) async fn close(&mut self) -> io::Result<()> {
-        self.io.close().await
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>
+    ) -> Poll<Result<(), Self::Error>> {
+        let this = Pin::into_inner(self);
+        ready!(this.poll_ready_unpin(cx))?;
+        Pin::new(&mut this.io).poll_flush(cx)
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>
+    ) -> Poll<Result<(), Self::Error>> {
+        let this = Pin::into_inner(self);
+        ready!(this.poll_ready_unpin(cx))?;
+        Pin::new(&mut this.io).poll_close(cx)
     }
 }
 
@@ -70,10 +165,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         let mut this = &mut *self;
         loop {
-            log::trace!("{}: read: {:?}", this.id, this.state);
-            match this.state {
+            log::trace!("{}: read: {:?}", this.id, this.read_state);
+            match this.read_state {
                 ReadState::Init => {
-                    this.state = ReadState::Header {
+                    this.read_state = ReadState::Header {
                         offset: 0,
                         buffer: [0; header::HEADER_SIZE]
                     };
@@ -89,7 +184,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                         log::trace!("{}: read: {}", this.id, header);
 
                         if header.tag() != header::Tag::Data {
-                            this.state = ReadState::Init;
+                            this.read_state = ReadState::Init;
                             return Poll::Ready(Some(Ok(Frame::new(header))))
                         }
 
@@ -99,7 +194,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                             return Poll::Ready(Some(Err(FrameDecodeError::FrameTooLarge(body_len))))
                         }
 
-                        this.state = ReadState::Body {
+                        this.read_state = ReadState::Body {
                             header,
                             offset: 0,
                             buffer: vec![0; body_len]
@@ -126,7 +221,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                     if *offset == body_len {
                         let h = header.clone();
                         let v = std::mem::take(buffer);
-                        this.state = ReadState::Init;
+                        this.read_state = ReadState::Init;
                         return Poll::Ready(Some(Ok(Frame { header: h, body: v })))
                     }
 
@@ -151,7 +246,7 @@ impl fmt::Debug for ReadState {
                 f.write_str("(ReadState::Init)")
             }
             ReadState::Header { offset, .. } => {
-                write!(f, "(ReadState::Header {})", offset)
+                write!(f, "(ReadState::Header (offset {}))", offset)
             }
             ReadState::Body { header, offset, buffer } => {
                 write!(f, "(ReadState::Body (header {}) (offset {}) (buffer-len {}))",
@@ -235,7 +330,7 @@ mod tests {
             futures::executor::block_on(async move {
                 let id = crate::connection::Id::random();
                 let mut io = Io::new(id, futures::io::Cursor::new(Vec::new()), f.body.len());
-                if io.send(&f).await.is_err() {
+                if io.send(f.clone()).await.is_err() {
                     return false
                 }
                 if io.flush().await.is_err() {

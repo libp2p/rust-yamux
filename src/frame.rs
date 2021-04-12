@@ -49,6 +49,15 @@ impl<T> Frame<T> {
     }
 }
 
+impl<A: header::private::Sealed> From<Frame<A>> for Frame<()> {
+    fn from(f: Frame<A>) -> Frame<()> {
+        Frame {
+            header: f.header.into(),
+            body: f.body
+        }
+    }
+}
+
 impl Frame<()> {
     pub(crate) fn into_data(self) -> Frame<Data> {
         Frame { header: self.header.into_data(), body: self.body }
@@ -117,4 +126,3 @@ impl Frame<GoAway> {
         }
     }
 }
-
