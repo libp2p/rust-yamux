@@ -954,7 +954,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             };
             if let Some(f) = frame {
                 log::trace!("{}/{}: sending: {}", self.id, stream_id, f.header());
-                self.socket.feed(f.into()).await.or(Err(ConnectionError::Closed))?
+                // send to message process queue to process(/send) orderly
+                let cmd = StreamCommand::SendFrame(f.left());
+                if self.stream_sender.try_send(cmd).is_err() {
+                    continue;
+                }
             }
             self.garbage.push(stream_id)
         }
