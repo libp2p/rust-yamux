@@ -1,3 +1,14 @@
+# 0.10.0 [unreleased]
+
+- Default to `WindowUpdateMode::OnRead`, thus enabling full Yamux flow-control,
+  exercising back pressure on senders, preventing stream resets due to reaching
+  the buffer limit.
+
+  See the [`WindowUpdateMode` documentation] for details, especially the section
+  on deadlocking when sending data larger than the receivers window.
+
+  [`WindowUpdateMode` documentation]: https://docs.rs/yamux/0.9.0/yamux/enum.WindowUpdateMode.html
+
 # 0.9.0
 
 - Force-split larger frames, for better interleaving of
