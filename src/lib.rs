@@ -90,7 +90,7 @@ pub enum WindowUpdateMode {
 /// - receive window = 256 KiB
 /// - max. buffer size (per stream) = 1 MiB
 /// - max. number of streams = 8192
-/// - window update mode = on receive
+/// - window update mode = on read
 /// - read after close = true
 /// - split send size = 16 KiB
 #[derive(Debug, Clone)]
@@ -109,7 +109,7 @@ impl Default for Config {
             receive_window: DEFAULT_CREDIT,
             max_buffer_size: 1024 * 1024,
             max_num_streams: 8192,
-            window_update_mode: WindowUpdateMode::OnReceive,
+            window_update_mode: WindowUpdateMode::OnRead,
             read_after_close: true,
             split_send_size: DEFAULT_SPLIT_SEND_SIZE
         }
