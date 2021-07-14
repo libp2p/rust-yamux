@@ -21,7 +21,7 @@ static_assertions = "1"
 [dev-dependencies]
 anyhow = "1"
 criterion = "0.3"
-env_logger = "0.8"
+env_logger = "0.9"
 futures = "0.3.4"
 quickcheck = "1.0"
 tokio = { version = "1.0", features = ["net", "rt-multi-thread", "macros", "time"] }
