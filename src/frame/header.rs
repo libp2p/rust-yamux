@@ -77,6 +77,12 @@ impl<T> Header<T> {
     }
 }
 
+impl<A: private::Sealed> From<Header<A>> for Header<()> {
+    fn from(h: Header<A>) -> Header<()> {
+        h.cast()
+    }
+}
+
 impl Header<()> {
     pub(crate) fn into_data(self) -> Header<Data> {
         debug_assert_eq!(self.tag, Tag::Data);
@@ -242,12 +248,13 @@ pub trait HasRst: private::Sealed {}
 impl HasRst for Data {}
 impl HasRst for WindowUpdate {}
 
-mod private {
+pub(super) mod private {
     pub trait Sealed {}
 
     impl Sealed for super::Data {}
     impl Sealed for super::WindowUpdate {}
     impl Sealed for super::Ping {}
+    impl Sealed for super::GoAway {}
     impl<A: Sealed, B: Sealed> Sealed for super::Either<A, B> {}
 }
 
@@ -406,22 +413,19 @@ impl std::error::Error for HeaderDecodeError {}
 #[cfg(test)]
 mod tests {
     use quickcheck::{Arbitrary, Gen, QuickCheck};
-    use rand::{Rng, seq::SliceRandom};
     use super::*;
 
     impl Arbitrary for Header<()> {
-        fn arbitrary<G: Gen>(g: &mut G) -> Self {
-            let tag = [Tag::Data, Tag::WindowUpdate, Tag::Ping, Tag::GoAway]
-                .choose(g)
-                .unwrap()
-                .clone();
+        fn arbitrary(g: &mut Gen) -> Self {
+            let tag = *g.choose(&[Tag::Data, Tag::WindowUpdate, Tag::Ping, Tag::GoAway])
+                .unwrap();
 
             Header {
                 version: Version(0),
                 tag,
-                flags: Flags(g.gen()),
-                stream_id: StreamId(g.gen()),
-                length: Len(g.gen()),
+                flags: Flags(Arbitrary::arbitrary(g)),
+                stream_id: StreamId(Arbitrary::arbitrary(g)),
+                length: Len(Arbitrary::arbitrary(g)),
                 _marker: std::marker::PhantomData
             }
         }

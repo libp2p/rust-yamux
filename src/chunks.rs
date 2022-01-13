@@ -17,24 +17,24 @@ use std::{collections::VecDeque, io};
 /// [`Chunk`] elements.
 #[derive(Debug)]
 pub(crate) struct Chunks {
-    seq: VecDeque<Chunk>
+    seq: VecDeque<Chunk>,
+    len: usize
 }
 
 impl Chunks {
     /// A new empty chunk list.
     pub(crate) fn new() -> Self {
-        Chunks { seq: VecDeque::new() }
+        Chunks { seq: VecDeque::new(), len: 0 }
     }
 
-    /// The total length of bytes contained in all `Chunk`s.
-    pub(crate) fn len(&self) -> Option<usize> {
-        self.seq.iter().fold(Some(0), |total, x| {
-            total.and_then(|n| n.checked_add(x.len()))
-        })
+    /// The total length of bytes yet-to-be-read in all `Chunk`s.
+    pub(crate) fn len(&self) -> usize {
+        self.len - self.seq.front().map(|c| c.offset()).unwrap_or(0)
     }
 
     /// Add another chunk of bytes to the end.
     pub(crate) fn push(&mut self, x: Vec<u8>) {
+        self.len += x.len();
         if !x.is_empty() {
             self.seq.push_back(Chunk { cursor: io::Cursor::new(x) })
         }
@@ -42,7 +42,9 @@ impl Chunks {
 
     /// Remove and return the first chunk.
     pub(crate) fn pop(&mut self) -> Option<Chunk> {
-        self.seq.pop_front()
+        let chunk = self.seq.pop_front();
+        self.len -= chunk.as_ref().map(|c| c.len() + c.offset()).unwrap_or(0);
+        chunk
     }
 
     /// Get a mutable reference to the first chunk.

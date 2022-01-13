@@ -1,3 +1,33 @@
+# 0.10.0
+
+- Default to `WindowUpdateMode::OnRead`, thus enabling full Yamux flow-control,
+  exercising back pressure on senders, preventing stream resets due to reaching
+  the buffer limit.
+
+  See the [`WindowUpdateMode` documentation] for details, especially the section
+  on deadlocking when sending data larger than the receivers window.
+
+  [`WindowUpdateMode` documentation]: https://docs.rs/yamux/0.9.0/yamux/enum.WindowUpdateMode.html
+
+# 0.9.0
+
+- Force-split larger frames, for better interleaving of
+  reads and writes between different substreams and to avoid
+  single, large writes. By default frames are capped at, and
+  thus split at, `16KiB`, which can be adjusted by a new
+  configuration option, if necessary.
+
+- Send window updates earlier, when half of the window has
+  been consumed, to minimise pauses due to transmission delays,
+  particularly if there is just a single dominant substream.
+
+- Avoid possible premature stream resets of streams that
+  have been properly closed and already dropped but receive
+  window update or other frames while the remaining buffered
+  frames are still sent out. Incoming frames for unknown streams
+  are now ignored, instead of triggering a stream reset for the
+  remote.
+
 # 0.8.1
 
 - Avoid possible premature stream resets of streams that have been properly
