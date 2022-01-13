@@ -1,4 +1,4 @@
-# 0.10.0 [unreleased]
+# 0.10.0
 
 - Default to `WindowUpdateMode::OnRead`, thus enabling full Yamux flow-control,
   exercising back pressure on senders, preventing stream resets due to reaching
