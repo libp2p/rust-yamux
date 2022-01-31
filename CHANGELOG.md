@@ -1,3 +1,9 @@
+# 0.10.1 [unreleased]
+
+- Update `parking_lot` dependency. See [PR 126].
+
+[PR 126]: https://github.com/libp2p/rust-yamux/pull/126
+
 # 0.10.0
 
 - Default to `WindowUpdateMode::OnRead`, thus enabling full Yamux flow-control,
