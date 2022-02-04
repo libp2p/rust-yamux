@@ -632,10 +632,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                     }
                     Action::Reset(f) => {
                         log::trace!("{}/{}: sending reset", self.id, f.header().stream_id());
+                        // prevent reception of further frames, since we already rejected data
+                        self.streams.remove(&f.header().stream_id());
                         self.socket.feed(f.into()).await.or(Err(ConnectionError::Closed))?
                     }
                     Action::Terminate(f) => {
                         log::trace!("{}: sending term", self.id);
+                        // prevent reception of further frames, since we already rejected data
+                        self.streams.remove(&f.header().stream_id());
                         self.socket.feed(f.into()).await.or(Err(ConnectionError::Closed))?
                     }
                 }
