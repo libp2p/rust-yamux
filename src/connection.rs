@@ -408,7 +408,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
 
             if let IoEvent::Inbound(frame) = next_io_event.await? {
                 if let Some(stream) = self.on_frame(frame).await? {
-                    self.flush_nowait().await.or(Err(ConnectionError::Closed))?;
                     return Ok(Some(stream));
                 }
                 continue; // The socket sink still has a pending write.
@@ -490,12 +489,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
 
             if let Poll::Ready(frame) = frame {
                 if let Some(stream) = self.on_frame(frame.transpose().map_err(Into::into)).await? {
-                    self.flush_nowait().await.or(Err(ConnectionError::Closed))?;
                     return Ok(Some(stream));
                 }
             }
-
-            self.flush_nowait().await.or(Err(ConnectionError::Closed))?;
         }
     }
 
@@ -974,15 +970,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             Mode::Client => id.is_server(),
             Mode::Server => id.is_client(),
         }
-    }
-
-    /// Try to flush the underlying I/O stream, without waiting for it.
-    async fn flush_nowait(&mut self) -> Result<()> {
-        future::poll_fn(|cx| {
-            let _ = self.socket.get_mut().poll_flush_unpin(cx)?;
-            Poll::Ready(Ok(()))
-        })
-        .await
     }
 
     /// Remove stale streams and send necessary messages to the remote.
