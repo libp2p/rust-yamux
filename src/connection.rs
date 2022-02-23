@@ -431,7 +431,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 num_terminated += 1;
                 Either::Left(future::pending())
             } else {
-                // poll socket for next incoming frame, but also make sure any pending writes are properly flushed
+                // Poll socket for next incoming frame, but also make sure any pending writes are properly flushed.
                 let socket = &mut self.socket;
                 let next_frame = future::poll_fn(move |cx| {
                     if let Poll::Ready(res) = socket.poll_next_unpin(cx) {
