@@ -433,13 +433,23 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             } else {
                 // Poll socket for next incoming frame, but also make sure any pending writes are properly flushed.
                 let socket = &mut self.socket;
+                let mut flush_done = false;
                 let next_frame = future::poll_fn(move |cx| {
                     if let Poll::Ready(res) = socket.poll_next_unpin(cx) {
                         return Poll::Ready(res);
                     }
 
-                    if let Poll::Ready(Err(err)) = socket.poll_flush_unpin(cx) {
-                        return Poll::Ready(Some(Err(err.into())));
+                    // Prevent calling potentially heavy `flush` once it has completed.
+                    if !flush_done {
+                        match socket.poll_flush_unpin(cx) {
+                            Poll::Ready(Ok(_)) => {
+                                flush_done = true;
+                            }
+                            Poll::Ready(Err(err)) => {
+                                return Poll::Ready(Some(Err(err.into())));
+                            }
+                            Poll::Pending => {}
+                        }
                     }
 
                     Poll::Pending
