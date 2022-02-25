@@ -2,7 +2,10 @@
 
 - Update `parking_lot` dependency. See [PR 126].
 
+- Flush socket while waiting for next frame. See [PR 130].
+
 [PR 126]: https://github.com/libp2p/rust-yamux/pull/126
+[PR 130]: https://github.com/libp2p/rust-yamux/pull/130
 
 # 0.10.0
 
