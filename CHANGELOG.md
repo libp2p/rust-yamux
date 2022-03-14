@@ -1,4 +1,4 @@
-# 0.10.1-rc.1 [2022-02-25]
+# 0.10.1
 
 - Update `parking_lot` dependency. See [PR 126].
 
