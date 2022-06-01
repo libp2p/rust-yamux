@@ -1,3 +1,9 @@
+# 0.11.0
+
+- Remove `ConnectionError` from public API in favor `std::io::Error`. See [PR 135].
+
+[PR 135]: https://github.com/libp2p/rust-yamux/pull/135
+
 # 0.10.1
 
 - Update `parking_lot` dependency. See [PR 126].

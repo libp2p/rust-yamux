@@ -11,6 +11,7 @@
 use futures::{channel::mpsc, prelude::*};
 use quickcheck::{Arbitrary, Gen, QuickCheck};
 use std::{
+    io,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     sync::Arc,
 };
@@ -106,7 +107,7 @@ async fn roundtrip(
             log::debug!("C: {}: read {} bytes", stream.id(), frame.len());
             assert_eq!(&data[..], &frame[..]);
             tx.unbounded_send(1).expect("unbounded_send");
-            Ok::<(), yamux::ConnectionError>(())
+            Ok::<(), io::Error>(())
         });
     }
     let n = rx

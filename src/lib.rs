@@ -35,7 +35,6 @@ mod tests;
 pub(crate) mod connection;
 
 pub use crate::connection::{into_stream, Connection, Control, Mode, Packet, Stream};
-pub use crate::error::ConnectionError;
 pub use crate::frame::{
     header::{HeaderDecodeError, StreamId},
     FrameDecodeError,

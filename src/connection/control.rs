@@ -9,18 +9,18 @@
 // at https://opensource.org/licenses/MIT.
 
 use super::ControlCommand;
-use crate::{error::ConnectionError, Stream};
+use crate::error::{into_io_error, ConnectionError};
+use crate::Stream;
 use futures::{
     channel::{mpsc, oneshot},
     prelude::*,
     ready,
 };
 use std::{
+    io,
     pin::Pin,
     task::{Context, Poll},
 };
-
-type Result<T> = std::result::Result<T, ConnectionError>;
 
 /// The Yamux `Connection` controller.
 ///
@@ -36,7 +36,7 @@ pub struct Control {
     /// Command channel to `Connection`.
     sender: mpsc::Sender<ControlCommand>,
     /// Pending state of `poll_open_stream`.
-    pending_open: Option<oneshot::Receiver<Result<Stream>>>,
+    pending_open: Option<oneshot::Receiver<Result<Stream, ConnectionError>>>,
     /// Pending state of `poll_close`.
     pending_close: Option<oneshot::Receiver<()>>,
 }
@@ -61,14 +61,19 @@ impl Control {
     }
 
     /// Open a new stream to the remote.
-    pub async fn open_stream(&mut self) -> Result<Stream> {
+    pub async fn open_stream(&mut self) -> io::Result<Stream> {
         let (tx, rx) = oneshot::channel();
-        self.sender.send(ControlCommand::OpenStream(tx)).await?;
-        rx.await?
+        self.sender
+            .send(ControlCommand::OpenStream(tx))
+            .await
+            .map_err(into_io_error)?;
+        let stream = rx.await.map_err(into_io_error)?.map_err(into_io_error)?;
+
+        Ok(stream)
     }
 
     /// Close the connection.
-    pub async fn close(&mut self) -> Result<()> {
+    pub async fn close(&mut self) -> io::Result<()> {
         let (tx, rx) = oneshot::channel();
         if self
             .sender
@@ -86,17 +91,22 @@ impl Control {
     }
 
     /// [`Poll`] based alternative to [`Control::open_stream`].
-    pub fn poll_open_stream(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<Stream>> {
+    pub fn poll_open_stream(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context,
+    ) -> Poll<io::Result<Stream>> {
         loop {
             match self.pending_open.take() {
                 None => {
-                    ready!(self.sender.poll_ready(cx)?);
+                    ready!(self.sender.poll_ready(cx).map_err(into_io_error)?);
                     let (tx, rx) = oneshot::channel();
-                    self.sender.start_send(ControlCommand::OpenStream(tx))?;
+                    self.sender
+                        .start_send(ControlCommand::OpenStream(tx))
+                        .map_err(into_io_error)?;
                     self.pending_open = Some(rx)
                 }
-                Some(mut rx) => match rx.poll_unpin(cx)? {
-                    Poll::Ready(result) => return Poll::Ready(result),
+                Some(mut rx) => match rx.poll_unpin(cx).map_err(into_io_error)? {
+                    Poll::Ready(result) => return Poll::Ready(result.map_err(into_io_error)),
                     Poll::Pending => {
                         self.pending_open = Some(rx);
                         return Poll::Pending;
@@ -112,7 +122,7 @@ impl Control {
     }
 
     /// [`Poll`] based alternative to [`Control::close`].
-    pub fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<()>> {
+    pub fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
         loop {
             match self.pending_close.take() {
                 None => {

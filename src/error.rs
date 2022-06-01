@@ -9,6 +9,7 @@
 // at https://opensource.org/licenses/MIT.
 
 use crate::frame::FrameDecodeError;
+use std::io;
 
 /// The various error cases a connection may encounter.
 #[non_exhaustive]
@@ -60,6 +61,15 @@ impl std::error::Error for ConnectionError {
             | ConnectionError::Closed
             | ConnectionError::TooManyStreams => None,
         }
+    }
+}
+
+pub fn into_io_error<E: Into<ConnectionError>>(error: E) -> std::io::Error {
+    let connection_error = error.into();
+
+    match connection_error {
+        ConnectionError::Io(io) => io,
+        other => io::Error::new(io::ErrorKind::Other, other),
     }
 }
 

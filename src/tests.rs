@@ -9,7 +9,7 @@
 // at https://opensource.org/licenses/MIT.
 
 use crate::WindowUpdateMode;
-use crate::{connection::State, Config, Connection, ConnectionError, Control, Mode};
+use crate::{connection::State, error::ConnectionError, Config, Connection, Control, Mode};
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures::executor::LocalPool;
 use futures::future::join;
@@ -164,7 +164,12 @@ fn prop_max_streams() {
             for _ in 0..max_streams {
                 v.push(control.open_stream().await.expect("open_stream"))
             }
-            if let Err(ConnectionError::TooManyStreams) = control.open_stream().await {
+            if let Err(Some(Ok(ConnectionError::TooManyStreams))) =
+                control.open_stream().await.map_err(|e| {
+                    e.into_inner()
+                        .map(|inner| inner.downcast::<ConnectionError>().map(|b| *b))
+                })
+            {
                 true
             } else {
                 false
