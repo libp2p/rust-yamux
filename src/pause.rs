@@ -9,7 +9,10 @@
 // at https://opensource.org/licenses/MIT.
 
 use futures::{prelude::*, stream::FusedStream};
-use std::{pin::Pin, task::{Context, Poll, Waker}};
+use std::{
+    pin::Pin,
+    task::{Context, Poll, Waker},
+};
 
 /// Wraps a [`futures::stream::Stream`] and adds the ability to pause it.
 ///
@@ -21,7 +24,7 @@ use std::{pin::Pin, task::{Context, Poll, Waker}};
 pub(crate) struct Pausable<S> {
     paused: bool,
     stream: S,
-    waker: Option<Waker>
+    waker: Option<Waker>,
 }
 
 impl<S: Stream + Unpin> Pausable<S> {
@@ -29,7 +32,7 @@ impl<S: Stream + Unpin> Pausable<S> {
         Pausable {
             paused: false,
             stream,
-            waker: None
+            waker: None,
         }
     }
 
@@ -58,7 +61,7 @@ impl<S: Stream + Unpin> Stream for Pausable<S> {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
         if !self.paused {
-            return self.stream.poll_next_unpin(cx)
+            return self.stream.poll_next_unpin(cx);
         }
         self.waker = Some(cx.waker().clone());
         Poll::Pending
@@ -77,8 +80,8 @@ impl<S: FusedStream + Unpin> FusedStream for Pausable<S> {
 
 #[cfg(test)]
 mod tests {
-    use futures::prelude::*;
     use super::Pausable;
+    use futures::prelude::*;
 
     #[test]
     fn pause_unpause() {

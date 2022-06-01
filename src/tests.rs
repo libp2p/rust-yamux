@@ -8,21 +8,29 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-use crate::{Config, Connection, ConnectionError, Mode, Control, connection::State};
 use crate::WindowUpdateMode;
-use futures::{future, prelude::*};
-use futures::io::AsyncReadExt;
-use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};
-use std::{fmt::Debug, io, net::{Ipv4Addr, SocketAddr, SocketAddrV4}};
-use tokio::{net::{TcpStream, TcpListener}, runtime::Runtime, task};
-use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
-use futures::channel::mpsc::{unbounded, UnboundedSender, UnboundedReceiver};
+use crate::{connection::State, Config, Connection, ConnectionError, Control, Mode};
+use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures::executor::LocalPool;
+use futures::future::join;
+use futures::io::AsyncReadExt;
+use futures::task::{Spawn, SpawnExt};
+use futures::{future, prelude::*};
+use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
-use std::pin::Pin;
-use futures::future::join;
-use futures::task::{Spawn, SpawnExt};
+use std::{
+    fmt::Debug,
+    io,
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+};
+use tokio::{
+    net::{TcpListener, TcpStream},
+    runtime::Runtime,
+    task,
+};
+use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 
 #[test]
 fn prop_config_send_recv_single() {
@@ -46,14 +54,18 @@ fn prop_config_send_recv_single() {
                 let connection = Connection::new(socket, cfg2.0, Mode::Client);
                 let control = connection.control();
                 task::spawn(crate::into_stream(connection).for_each(|_| future::ready(())));
-                send_recv_single(control, iter.clone()).await.expect("send_recv")
+                send_recv_single(control, iter.clone())
+                    .await
+                    .expect("send_recv")
             };
 
             let result = futures::join!(server, client).1;
             TestResult::from_bool(result.len() == num_requests && result.into_iter().eq(iter))
         })
     }
-    QuickCheck::new().tests(10).quickcheck(prop as fn(_, _, _) -> _)
+    QuickCheck::new()
+        .tests(10)
+        .quickcheck(prop as fn(_, _, _) -> _)
 }
 
 #[test]
@@ -85,14 +97,16 @@ fn prop_config_send_recv_multi() {
             TestResult::from_bool(result.len() == num_requests && result.into_iter().eq(iter))
         })
     }
-    QuickCheck::new().tests(10).quickcheck(prop as fn(_, _, _) -> _)
+    QuickCheck::new()
+        .tests(10)
+        .quickcheck(prop as fn(_, _, _) -> _)
 }
 
 #[test]
 fn prop_send_recv() {
     fn prop(msgs: Vec<Msg>) -> TestResult {
         if msgs.is_empty() {
-            return TestResult::discard()
+            return TestResult::discard();
         }
         let rt = Runtime::new().unwrap();
         rt.block_on(async move {
@@ -147,7 +161,7 @@ fn prop_max_streams() {
             let mut control = connection.control();
             task::spawn(crate::into_stream(connection).for_each(|_| future::ready(())));
             let mut v = Vec::new();
-            for _ in 0 .. max_streams {
+            for _ in 0..max_streams {
                 v.push(control.open_stream().await.expect("open_stream"))
             }
             if let Err(ConnectionError::TooManyStreams) = control.open_stream().await {
@@ -172,7 +186,9 @@ fn prop_send_recv_half_closed() {
             let server = async {
                 let socket = listener.accept().await.expect("accept").0.compat();
                 let mut connection = Connection::new(socket, Config::default(), Mode::Server);
-                let mut stream = connection.next_stream().await
+                let mut stream = connection
+                    .next_stream()
+                    .await
                     .expect("S: next_stream")
                     .expect("S: some stream");
                 task::spawn(crate::into_stream(connection).for_each(|_| future::ready(())));
@@ -236,21 +252,27 @@ fn write_deadlock() {
 
     // Create and spawn a "server" that echoes every message back to the client.
     let server = Connection::new(server_endpoint, Config::default(), Mode::Server);
-    pool.spawner().spawn_obj(async move {
-        crate::into_stream(server).try_for_each_concurrent(
-            None, |mut stream| async move {
-                {
-                    let (mut r, mut w) = AsyncReadExt::split(&mut stream);
-                    // Write back the bytes received. This may buffer internally.
-                    futures::io::copy(&mut r, &mut w).await?;
-                }
-                log::debug!("S: stream {} done.", stream.id());
-                stream.close().await?;
-                Ok(())
-            })
-            .await
-            .expect("server failed")
-    }.boxed().into()).unwrap();
+    pool.spawner()
+        .spawn_obj(
+            async move {
+                crate::into_stream(server)
+                    .try_for_each_concurrent(None, |mut stream| async move {
+                        {
+                            let (mut r, mut w) = AsyncReadExt::split(&mut stream);
+                            // Write back the bytes received. This may buffer internally.
+                            futures::io::copy(&mut r, &mut w).await?;
+                        }
+                        log::debug!("S: stream {} done.", stream.id());
+                        stream.close().await?;
+                        Ok(())
+                    })
+                    .await
+                    .expect("server failed")
+            }
+            .boxed()
+            .into(),
+        )
+        .unwrap();
 
     // Create and spawn a "client" that sends messages expected to be echoed
     // by the server.
@@ -258,31 +280,44 @@ fn write_deadlock() {
     let mut ctrl = client.control();
 
     // Continuously advance the Yamux connection of the client in a background task.
-    pool.spawner().spawn_obj(
-        crate::into_stream(client).for_each(|_| {
-            panic!("Unexpected inbound stream for client");
-            #[allow(unreachable_code)]
-            future::ready(())
-        }).boxed().into()
-    ).unwrap();
+    pool.spawner()
+        .spawn_obj(
+            crate::into_stream(client)
+                .for_each(|_| {
+                    panic!("Unexpected inbound stream for client");
+                    #[allow(unreachable_code)]
+                    future::ready(())
+                })
+                .boxed()
+                .into(),
+        )
+        .unwrap();
 
     // Send the message, expecting it to be echo'd.
-    pool.run_until(pool.spawner().spawn_with_handle(async move {
-        let stream = ctrl.open_stream().await.unwrap();
-        let (mut reader, mut writer) = AsyncReadExt::split(stream);
-        let mut b = vec![0; msg.len()];
-        // Write & read concurrently, so that the client is able
-        // to start reading the echo'd bytes before it even finished
-        // sending them all.
-        let _ = join(
-            writer.write_all(msg.as_ref()).map_err(|e| panic!(e)),
-            reader.read_exact(&mut b[..]).map_err(|e| panic!(e)),
-        ).await;
-        let mut stream = reader.reunite(writer).unwrap();
-        stream.close().await.unwrap();
-        log::debug!("C: Stream {} done.", stream.id());
-        assert_eq!(b, msg);
-    }.boxed()).unwrap());
+    pool.run_until(
+        pool.spawner()
+            .spawn_with_handle(
+                async move {
+                    let stream = ctrl.open_stream().await.unwrap();
+                    let (mut reader, mut writer) = AsyncReadExt::split(stream);
+                    let mut b = vec![0; msg.len()];
+                    // Write & read concurrently, so that the client is able
+                    // to start reading the echo'd bytes before it even finished
+                    // sending them all.
+                    let _ = join(
+                        writer.write_all(msg.as_ref()).map_err(|e| panic!(e)),
+                        reader.read_exact(&mut b[..]).map_err(|e| panic!(e)),
+                    )
+                    .await;
+                    let mut stream = reader.reunite(writer).unwrap();
+                    stream.close().await.unwrap();
+                    log::debug!("C: Stream {} done.", stream.id());
+                    assert_eq!(b, msg);
+                }
+                .boxed(),
+            )
+            .unwrap(),
+    );
 }
 
 #[derive(Clone, Debug)]
@@ -346,7 +381,7 @@ async fn repeat_echo(c: Connection<Compat<TcpStream>>) -> Result<(), ConnectionE
 /// collect the response. The sequence of responses will be returned.
 async fn send_recv<I>(mut control: Control, iter: I) -> Result<Vec<Vec<u8>>, ConnectionError>
 where
-    I: Iterator<Item = Vec<u8>>
+    I: Iterator<Item = Vec<u8>>,
 {
     let mut result = Vec::new();
 
@@ -379,7 +414,7 @@ where
 /// sequence of responses will be returned.
 async fn send_recv_single<I>(mut control: Control, iter: I) -> Result<Vec<Vec<u8>>, ConnectionError>
 where
-    I: Iterator<Item = Vec<u8>>
+    I: Iterator<Item = Vec<u8>>,
 {
     let stream = control.open_stream().await?;
     log::debug!("C: new stream: {}", stream);
@@ -436,7 +471,7 @@ mod bounded {
 
     pub fn channel(
         (name_a, capacity_a): (&'static str, usize),
-        (name_b, capacity_b): (&'static str, usize)
+        (name_b, capacity_b): (&'static str, usize),
     ) -> (Endpoint, Endpoint) {
         let (a_to_b_sender, a_to_b_receiver) = unbounded();
         let (b_to_a_sender, b_to_a_receiver) = unbounded();
@@ -475,8 +510,10 @@ mod bounded {
         ) -> Poll<Result<usize>> {
             if self.recv_buf.is_empty() {
                 match ready!(self.recv.poll_next_unpin(cx)) {
-                    Some(bytes) => { self.recv_buf = bytes; }
-                    None => return Poll::Ready(Ok(0))
+                    Some(bytes) => {
+                        self.recv_buf = bytes;
+                    }
+                    None => return Poll::Ready(Ok(0)),
                 }
             }
 
@@ -486,19 +523,32 @@ mod bounded {
 
             let mut guard = self.recv_guard.lock().unwrap();
             if let Some(waker) = guard.waker.take() {
-                log::debug!("{}: read: notifying waker after read of {} bytes", self.name, n);
+                log::debug!(
+                    "{}: read: notifying waker after read of {} bytes",
+                    self.name,
+                    n
+                );
                 waker.wake();
             }
             guard.size -= n;
 
-            log::debug!("{}: read: channel: {}/{}", self.name, guard.size, self.capacity);
+            log::debug!(
+                "{}: read: channel: {}/{}",
+                self.name,
+                guard.size,
+                self.capacity
+            );
 
             Poll::Ready(Ok(n))
         }
     }
 
     impl AsyncWrite for Endpoint {
-        fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize>> {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<Result<usize>> {
             debug_assert!(buf.len() > 0);
             let mut guard = self.send_guard.lock().unwrap();
             let n = std::cmp::min(self.capacity - guard.size, buf.len());
@@ -508,11 +558,17 @@ mod bounded {
                 return Poll::Pending;
             }
 
-            self.send.unbounded_send(buf[0..n].to_vec())
+            self.send
+                .unbounded_send(buf[0..n].to_vec())
                 .map_err(|e| Error::new(ErrorKind::ConnectionAborted, e))?;
 
             guard.size += n;
-            log::debug!("{}: write: channel: {}/{}", self.name, guard.size, self.capacity);
+            log::debug!(
+                "{}: write: channel: {}/{}",
+                self.name,
+                guard.size,
+                self.capacity
+            );
 
             Poll::Ready(Ok(n))
         }

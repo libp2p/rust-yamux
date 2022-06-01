@@ -8,10 +8,17 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-use crate::{Stream, error::ConnectionError};
-use futures::{ready, channel::{mpsc, oneshot}, prelude::*};
-use std::{pin::Pin, task::{Context, Poll}};
 use super::ControlCommand;
+use crate::{error::ConnectionError, Stream};
+use futures::{
+    channel::{mpsc, oneshot},
+    prelude::*,
+    ready,
+};
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 type Result<T> = std::result::Result<T, ConnectionError>;
 
@@ -31,7 +38,7 @@ pub struct Control {
     /// Pending state of `poll_open_stream`.
     pending_open: Option<oneshot::Receiver<Result<Stream>>>,
     /// Pending state of `poll_close`.
-    pending_close: Option<oneshot::Receiver<()>>
+    pending_close: Option<oneshot::Receiver<()>>,
 }
 
 impl Clone for Control {
@@ -39,7 +46,7 @@ impl Clone for Control {
         Control {
             sender: self.sender.clone(),
             pending_open: None,
-            pending_close: None
+            pending_close: None,
         }
     }
 }
@@ -49,7 +56,7 @@ impl Control {
         Control {
             sender,
             pending_open: None,
-            pending_close: None
+            pending_close: None,
         }
     }
 
@@ -63,9 +70,14 @@ impl Control {
     /// Close the connection.
     pub async fn close(&mut self) -> Result<()> {
         let (tx, rx) = oneshot::channel();
-        if self.sender.send(ControlCommand::CloseConnection(tx)).await.is_err() {
+        if self
+            .sender
+            .send(ControlCommand::CloseConnection(tx))
+            .await
+            .is_err()
+        {
             // The receiver is closed which means the connection is already closed.
-            return Ok(())
+            return Ok(());
         }
         // A dropped `oneshot::Sender` means the `Connection` is gone,
         // so we do not treat receive errors differently here.
@@ -84,14 +96,12 @@ impl Control {
                     self.pending_open = Some(rx)
                 }
                 Some(mut rx) => match rx.poll_unpin(cx)? {
-                    Poll::Ready(result) => {
-                        return Poll::Ready(result)
-                    }
+                    Poll::Ready(result) => return Poll::Ready(result),
                     Poll::Pending => {
                         self.pending_open = Some(rx);
-                        return Poll::Pending
+                        return Poll::Pending;
                     }
-                }
+                },
             }
         }
     }
@@ -108,35 +118,32 @@ impl Control {
                 None => {
                     if ready!(self.sender.poll_ready(cx)).is_err() {
                         // The receiver is closed which means the connection is already closed.
-                        return Poll::Ready(Ok(()))
+                        return Poll::Ready(Ok(()));
                     }
                     let (tx, rx) = oneshot::channel();
                     if let Err(e) = self.sender.start_send(ControlCommand::CloseConnection(tx)) {
                         if e.is_full() {
-                            continue
+                            continue;
                         }
                         debug_assert!(e.is_disconnected());
                         // The receiver is closed which means the connection is already closed.
-                        return Poll::Ready(Ok(()))
+                        return Poll::Ready(Ok(()));
                     }
                     self.pending_close = Some(rx)
                 }
                 Some(mut rx) => match rx.poll_unpin(cx) {
-                    Poll::Ready(Ok(())) => {
-                        return Poll::Ready(Ok(()))
-                    }
+                    Poll::Ready(Ok(())) => return Poll::Ready(Ok(())),
                     Poll::Ready(Err(oneshot::Canceled)) => {
                         // A dropped `oneshot::Sender` means the `Connection` is gone,
                         // which is `Ok`ay for us here.
-                        return Poll::Ready(Ok(()))
+                        return Poll::Ready(Ok(()));
                     }
                     Poll::Pending => {
                         self.pending_close = Some(rx);
-                        return Poll::Pending
+                        return Poll::Pending;
                     }
-                }
+                },
             }
         }
     }
 }
-

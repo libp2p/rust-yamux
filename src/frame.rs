@@ -12,22 +12,25 @@ pub mod header;
 mod io;
 
 use futures::future::Either;
-use header::{Header, StreamId, Data, WindowUpdate, GoAway, Ping};
+use header::{Data, GoAway, Header, Ping, StreamId, WindowUpdate};
 use std::{convert::TryInto, num::TryFromIntError};
 
-pub(crate) use io::Io;
 pub use io::FrameDecodeError;
+pub(crate) use io::Io;
 
 /// A Yamux message frame consisting of header and body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame<T> {
     header: Header<T>,
-    body: Vec<u8>
+    body: Vec<u8>,
 }
 
 impl<T> Frame<T> {
     pub fn new(header: Header<T>) -> Self {
-        Frame { header, body: Vec::new() }
+        Frame {
+            header,
+            body: Vec::new(),
+        }
     }
 
     pub fn header(&self) -> &Header<T> {
@@ -40,12 +43,18 @@ impl<T> Frame<T> {
 
     /// Introduce this frame to the right of a binary frame type.
     pub(crate) fn right<U>(self) -> Frame<Either<U, T>> {
-        Frame { header: self.header.right(), body: self.body }
+        Frame {
+            header: self.header.right(),
+            body: self.body,
+        }
     }
 
     /// Introduce this frame to the left of a binary frame type.
     pub(crate) fn left<U>(self) -> Frame<Either<T, U>> {
-        Frame { header: self.header.left(), body: self.body }
+        Frame {
+            header: self.header.left(),
+            body: self.body,
+        }
     }
 }
 
@@ -53,22 +62,31 @@ impl<A: header::private::Sealed> From<Frame<A>> for Frame<()> {
     fn from(f: Frame<A>) -> Frame<()> {
         Frame {
             header: f.header.into(),
-            body: f.body
+            body: f.body,
         }
     }
 }
 
 impl Frame<()> {
     pub(crate) fn into_data(self) -> Frame<Data> {
-        Frame { header: self.header.into_data(), body: self.body }
+        Frame {
+            header: self.header.into_data(),
+            body: self.body,
+        }
     }
 
     pub(crate) fn into_window_update(self) -> Frame<WindowUpdate> {
-        Frame { header: self.header.into_window_update(), body: self.body }
+        Frame {
+            header: self.header.into_window_update(),
+            body: self.body,
+        }
     }
 
     pub(crate) fn into_ping(self) -> Frame<Ping> {
-        Frame { header: self.header.into_ping(), body: self.body }
+        Frame {
+            header: self.header.into_ping(),
+            body: self.body,
+        }
     }
 }
 
@@ -76,7 +94,7 @@ impl Frame<Data> {
     pub fn data(id: StreamId, b: Vec<u8>) -> Result<Self, TryFromIntError> {
         Ok(Frame {
             header: Header::data(id, b.len().try_into()?),
-            body: b
+            body: b,
         })
     }
 
@@ -99,7 +117,7 @@ impl Frame<WindowUpdate> {
     pub fn window_update(id: StreamId, credit: u32) -> Self {
         Frame {
             header: Header::window_update(id, credit),
-            body: Vec::new()
+            body: Vec::new(),
         }
     }
 }
@@ -108,21 +126,21 @@ impl Frame<GoAway> {
     pub fn term() -> Self {
         Frame {
             header: Header::term(),
-            body: Vec::new()
+            body: Vec::new(),
         }
     }
 
     pub fn protocol_error() -> Self {
         Frame {
             header: Header::protocol_error(),
-            body: Vec::new()
+            body: Vec::new(),
         }
     }
 
     pub fn internal_error() -> Self {
         Frame {
             header: Header::internal_error(),
-            body: Vec::new()
+            body: Vec::new(),
         }
     }
 }
