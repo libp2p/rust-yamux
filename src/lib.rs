@@ -34,9 +34,12 @@ mod tests;
 
 pub(crate) mod connection;
 
-pub use crate::connection::{Connection, Mode, Control, Packet, Stream, into_stream};
+pub use crate::connection::{into_stream, Connection, Control, Mode, Packet, Stream};
 pub use crate::error::ConnectionError;
-pub use crate::frame::{FrameDecodeError, header::{HeaderDecodeError, StreamId}};
+pub use crate::frame::{
+    header::{HeaderDecodeError, StreamId},
+    FrameDecodeError,
+};
 
 const DEFAULT_CREDIT: u32 = 256 * 1024; // as per yamux specification
 
@@ -80,7 +83,7 @@ pub enum WindowUpdateMode {
     /// - Endpoints *A* and *B* write at most *n* frames concurrently such that the sum
     ///   of the frame lengths is less or equal to the available credit of *A* and *B*
     ///   respectively.
-    OnRead
+    OnRead,
 }
 
 /// Yamux configuration.
@@ -100,7 +103,7 @@ pub struct Config {
     max_num_streams: usize,
     window_update_mode: WindowUpdateMode,
     read_after_close: bool,
-    split_send_size: usize
+    split_send_size: usize,
 }
 
 impl Default for Config {
@@ -111,7 +114,7 @@ impl Default for Config {
             max_num_streams: 8192,
             window_update_mode: WindowUpdateMode::OnRead,
             read_after_close: true,
-            split_send_size: DEFAULT_SPLIT_SEND_SIZE
+            split_send_size: DEFAULT_SPLIT_SEND_SIZE,
         }
     }
 }
@@ -170,4 +173,3 @@ static_assertions::const_assert! {
 static_assertions::const_assert! {
     std::mem::size_of::<u32>() <= std::mem::size_of::<usize>()
 }
-

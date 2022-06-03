@@ -9,11 +9,14 @@
 // at https://opensource.org/licenses/MIT.
 
 use futures::{channel::mpsc, prelude::*};
-use std::{net::{Ipv4Addr, SocketAddr, SocketAddrV4}, sync::Arc};
-use tokio::{net::TcpSocket, task, runtime::Runtime};
+use quickcheck::{Arbitrary, Gen, QuickCheck};
+use std::{
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+    sync::Arc,
+};
+use tokio::{net::TcpSocket, runtime::Runtime, task};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use yamux::{Config, Connection, Mode, WindowUpdateMode};
-use quickcheck::{Arbitrary, Gen, QuickCheck};
 
 const PAYLOAD_SIZE: usize = 128 * 1024;
 async fn roundtrip(
@@ -25,8 +28,12 @@ async fn roundtrip(
     let listener = {
         let socket = TcpSocket::new_v4().expect("new_v4");
         if let Some(size) = tcp_buffer_sizes {
-            socket.set_send_buffer_size(size.send).expect("send size set");
-            socket.set_recv_buffer_size(size.recv).expect("recv size set");
+            socket
+                .set_send_buffer_size(size.send)
+                .expect("send size set");
+            socket
+                .set_recv_buffer_size(size.recv)
+                .expect("recv size set");
         }
         socket.bind(address).expect("bind");
         socket.listen(1024).expect("listen")
@@ -68,8 +75,12 @@ async fn roundtrip(
     let conn = {
         let socket = TcpSocket::new_v4().expect("new_v4");
         if let Some(size) = tcp_buffer_sizes {
-            socket.set_send_buffer_size(size.send).expect("send size set");
-            socket.set_recv_buffer_size(size.recv).expect("recv size set");
+            socket
+                .set_send_buffer_size(size.send)
+                .expect("send size set");
+            socket
+                .set_recv_buffer_size(size.recv)
+                .expect("recv size set");
         }
         let stream = socket.connect(address).await.expect("connect").compat();
         Connection::new(stream, client_cfg, Mode::Client)
@@ -77,14 +88,16 @@ async fn roundtrip(
     let (tx, rx) = mpsc::unbounded();
     let mut ctrl = conn.control();
     task::spawn(yamux::into_stream(conn).for_each(|_| future::ready(())));
-    for _ in 0 .. nstreams {
+    for _ in 0..nstreams {
         let data = data.clone();
         let tx = tx.clone();
         let mut ctrl = ctrl.clone();
         task::spawn(async move {
             let mut stream = ctrl.open_stream().await?;
             log::debug!("C: opened new stream {}", stream.id());
-            stream.write_all(&(data.len() as u32).to_be_bytes()[..]).await?;
+            stream
+                .write_all(&(data.len() as u32).to_be_bytes()[..])
+                .await?;
             stream.write_all(&data).await?;
             stream.close().await?;
             log::debug!("C: {}: wrote {} bytes", stream.id(), data.len());
@@ -96,7 +109,10 @@ async fn roundtrip(
             Ok::<(), yamux::ConnectionError>(())
         });
     }
-    let n = rx.take(nstreams).fold(0, |acc, n| future::ready(acc + n)).await;
+    let n = rx
+        .take(nstreams)
+        .fold(0, |acc, n| future::ready(acc + n))
+        .await;
     ctrl.close().await.expect("close connection");
     assert_eq!(nstreams, n)
 }
@@ -111,9 +127,9 @@ struct TcpBufferSizes {
 impl Arbitrary for TcpBufferSizes {
     fn arbitrary(g: &mut Gen) -> Self {
         let send = if bool::arbitrary(g) {
-            16*1024
+            16 * 1024
         } else {
-            32*1024
+            32 * 1024
         };
 
         // Have receive buffer size be some multiple of send buffer size.
@@ -135,7 +151,12 @@ fn concurrent_streams() {
         let data = Arc::new(vec![0x42; PAYLOAD_SIZE]);
         let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
 
-        Runtime::new().expect("new runtime").block_on(roundtrip(addr, 1000, data, tcp_buffer_sizes));
+        Runtime::new().expect("new runtime").block_on(roundtrip(
+            addr,
+            1000,
+            data,
+            tcp_buffer_sizes,
+        ));
     }
 
     QuickCheck::new().tests(3).quickcheck(prop as fn(_) -> _)
