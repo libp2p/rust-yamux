@@ -63,6 +63,15 @@ impl std::error::Error for ConnectionError {
     }
 }
 
+impl From<ConnectionError> for std::io::Error {
+    fn from(e: ConnectionError) -> Self {
+        match e {
+            ConnectionError::Io(e) => e,
+            e => std::io::Error::new(std::io::ErrorKind::Other, e),
+        }
+    }
+}
+
 impl From<std::io::Error> for ConnectionError {
     fn from(e: std::io::Error) -> Self {
         ConnectionError::Io(e)
@@ -84,5 +93,25 @@ impl From<futures::channel::mpsc::SendError> for ConnectionError {
 impl From<futures::channel::oneshot::Canceled> for ConnectionError {
     fn from(_: futures::channel::oneshot::Canceled) -> Self {
         ConnectionError::Closed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_error_can_be_question_marked_to_io_error() {
+        returns_io_error().expect_err("to fail");
+    }
+
+    fn returns_io_error() -> std::io::Result<()> {
+        always_err()?;
+
+        Ok(())
+    }
+
+    fn always_err() -> Result<(), ConnectionError> {
+        Err(ConnectionError::Closed)
     }
 }
