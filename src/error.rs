@@ -95,23 +95,3 @@ impl From<futures::channel::oneshot::Canceled> for ConnectionError {
         ConnectionError::Closed
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn connection_error_can_be_question_marked_to_io_error() {
-        returns_io_error().expect_err("to fail");
-    }
-
-    fn returns_io_error() -> std::io::Result<()> {
-        always_err()?;
-
-        Ok(())
-    }
-
-    fn always_err() -> Result<(), ConnectionError> {
-        Err(ConnectionError::Closed)
-    }
-}
