@@ -489,6 +489,26 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
 
             let (stream_command, control_command, frame) = next_item.await;
 
+            // Return early in case we hit an error.
+            let frame = match frame {
+                Poll::Ready(Some(Err(e))) => {
+                    let e: ConnectionError = e.into();
+                    if e.io_kind() == Some(io::ErrorKind::ConnectionReset) {
+                        log::debug!("{}: connection reset", self.id);
+                        return Err(ConnectionError::Closed);
+                    } else {
+                        log::error!("{}: socket error: {}", self.id, e);
+                        return Err(e);
+                    }
+                }
+                Poll::Ready(None) => {
+                    log::debug!("{}: socket eof", self.id);
+                    return Err(ConnectionError::Closed);
+                }
+                x @ Poll::Ready(Some(Ok(_))) => x,
+                x @ Poll::Pending => x,
+            };
+
             if let Poll::Ready(cmd) = control_command {
                 self.on_control_command(cmd).await?
             }
