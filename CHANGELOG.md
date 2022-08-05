@@ -1,3 +1,10 @@
+# 0.10.2
+
+- Process command or socket result immediately and thereby no longer accessing
+  the socket after it returned an error. See [PR 138] for details.
+
+[PR 138]: https://github.com/libp2p/rust-yamux/pull/138
+
 # 0.10.1
 
 - Update `parking_lot` dependency. See [PR 126].
