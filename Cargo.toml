@@ -20,7 +20,7 @@ static_assertions = "1"
 
 [dev-dependencies]
 anyhow = "1"
-criterion = "0.3"
+criterion = "0.4"
 env_logger = "0.9"
 futures = "0.3.4"
 quickcheck = "1.0"
