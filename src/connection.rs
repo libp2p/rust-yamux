@@ -478,7 +478,22 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             );
             match combined_future.await {
                 Either::Left((Either::Left((cmd, _)), _)) => self.on_stream_command(cmd).await?,
-                Either::Left((Either::Right((cmd, _)), _)) => self.on_control_command(cmd).await?,
+                Either::Left((Either::Right((Some(cmd), _)), _)) => {
+                    self.on_control_command(cmd).await?
+                }
+                Either::Left((Either::Right((None, _)), _)) => {
+                    // We only get here after the whole connection shutdown is complete.
+                    // No further processing of commands of any kind or incoming frames
+                    // will happen.
+                    debug_assert!(self.shutdown.is_complete());
+                    self.socket
+                        .get_mut()
+                        .close()
+                        .await
+                        .or(Err(ConnectionError::Closed))?;
+
+                    return Err(ConnectionError::Closed);
+                }
                 Either::Right((frame, _)) => {
                     if let Some(stream) =
                         self.on_frame(frame.transpose().map_err(Into::into)).await?
@@ -495,9 +510,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     /// We only process control commands if we are not in the process of closing
     /// the connection. Only once we finished closing will we drain the remaining
     /// commands and reply back that we are closed.
-    async fn on_control_command(&mut self, cmd: Option<ControlCommand>) -> Result<()> {
+    async fn on_control_command(&mut self, cmd: ControlCommand) -> Result<()> {
         match cmd {
-            Some(ControlCommand::OpenStream(reply)) => {
+            ControlCommand::OpenStream(reply) => {
                 if self.shutdown.is_complete() {
                     // We are already closed so just inform the control.
                     let _ = reply.send(Err(ConnectionError::Closed));
@@ -548,7 +563,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                     }
                 }
             }
-            Some(ControlCommand::CloseConnection(reply)) => {
+            ControlCommand::CloseConnection(reply) => {
                 if self.shutdown.is_complete() {
                     // We are already closed so just inform the control.
                     let _ = reply.send(());
@@ -562,18 +577,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 log::trace!("{}: shutting down connection", self.id);
                 self.control_receiver.pause();
                 self.stream_receiver.close()
-            }
-            None => {
-                // We only get here after the whole connection shutdown is complete.
-                // No further processing of commands of any kind or incoming frames
-                // will happen.
-                debug_assert!(self.shutdown.is_complete());
-                self.socket
-                    .get_mut()
-                    .close()
-                    .await
-                    .or(Err(ConnectionError::Closed))?;
-                return Err(ConnectionError::Closed);
             }
         }
         Ok(())
