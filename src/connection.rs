@@ -477,7 +477,31 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 next_frame,
             );
             match combined_future.await {
-                Either::Left((Either::Left((cmd, _)), _)) => self.on_stream_command(cmd).await?,
+                Either::Left((Either::Left((Some(cmd), _)), _)) => {
+                    self.on_stream_command(cmd).await?
+                }
+                Either::Left((Either::Left((None, _)), _)) => {
+                    // We only get to this point when `self.stream_receiver`
+                    // was closed which only happens in response to a close control
+                    // command. Now that we are at the end of the stream command queue,
+                    // we send the final term frame to the remote and complete the
+                    // closure by closing the already paused control command receiver.
+                    debug_assert!(self.shutdown.is_in_progress());
+                    log::debug!("{}: sending term", self.id);
+                    let frame = Frame::term();
+                    self.socket
+                        .feed(frame.into())
+                        .await
+                        .or(Err(ConnectionError::Closed))?;
+                    let shutdown = std::mem::replace(&mut self.shutdown, Shutdown::Complete);
+                    if let Shutdown::InProgress(tx) = shutdown {
+                        // Inform the `Control` that initiated the shutdown.
+                        let _ = tx.send(());
+                    }
+                    debug_assert!(self.control_receiver.is_paused());
+                    self.control_receiver.unpause();
+                    self.control_receiver.stream().close()
+                }
                 Either::Left((Either::Right((Some(cmd), _)), _)) => {
                     self.on_control_command(cmd).await?
                 }
@@ -583,9 +607,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     }
 
     /// Process a command from one of our `Stream`s.
-    async fn on_stream_command(&mut self, cmd: Option<StreamCommand>) -> Result<()> {
+    async fn on_stream_command(&mut self, cmd: StreamCommand) -> Result<()> {
         match cmd {
-            Some(StreamCommand::SendFrame(frame)) => {
+            StreamCommand::SendFrame(frame) => {
                 log::trace!(
                     "{}/{}: sending: {}",
                     self.id,
@@ -597,7 +621,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                     .await
                     .or(Err(ConnectionError::Closed))?
             }
-            Some(StreamCommand::CloseStream { id, ack }) => {
+            StreamCommand::CloseStream { id, ack } => {
                 log::trace!("{}/{}: sending close", self.id, id);
                 let mut header = Header::data(id, 0);
                 header.fin();
@@ -609,28 +633,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                     .feed(frame.into())
                     .await
                     .or(Err(ConnectionError::Closed))?
-            }
-            None => {
-                // We only get to this point when `self.stream_receiver`
-                // was closed which only happens in response to a close control
-                // command. Now that we are at the end of the stream command queue,
-                // we send the final term frame to the remote and complete the
-                // closure by closing the already paused control command receiver.
-                debug_assert!(self.shutdown.is_in_progress());
-                log::debug!("{}: sending term", self.id);
-                let frame = Frame::term();
-                self.socket
-                    .feed(frame.into())
-                    .await
-                    .or(Err(ConnectionError::Closed))?;
-                let shutdown = std::mem::replace(&mut self.shutdown, Shutdown::Complete);
-                if let Shutdown::InProgress(tx) = shutdown {
-                    // Inform the `Control` that initiated the shutdown.
-                    let _ = tx.send(());
-                }
-                debug_assert!(self.control_receiver.is_paused());
-                self.control_receiver.unpause();
-                self.control_receiver.stream().close()
             }
         }
         Ok(())
