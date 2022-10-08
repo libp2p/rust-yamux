@@ -174,7 +174,7 @@ pub struct Connection<T> {
     shutdown: Shutdown,
     is_closed: bool,
 
-    pending_frames: VecDeque<Frame<Data>>,
+    pending_frames: VecDeque<Frame<()>>,
 }
 
 /// `Control` to `Connection` commands.
@@ -369,7 +369,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
 
             while let Some(frame) = self.pending_frames.pop_front() {
                 self.socket
-                    .feed(frame.into())
+                    .feed(frame)
                     .await
                     .or(Err(ConnectionError::Closed))?
             }
@@ -402,7 +402,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             };
 
             if let IoEvent::Inbound(frame) = next_io_event.await? {
-                if let Some(stream) = self.on_frame(frame).await? {
+                if let Some(stream) = self.on_frame(frame)? {
                     return Ok(stream);
                 }
                 continue; // The socket sink still has a pending write.
@@ -477,9 +477,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 next_frame,
             );
             match combined_future.await {
-                Either::Left((Either::Left((Some(cmd), _)), _)) => {
-                    self.on_stream_command(cmd).await?
-                }
+                Either::Left((Either::Left((Some(cmd), _)), _)) => self.on_stream_command(cmd)?,
                 Either::Left((Either::Left((None, _)), _)) => {
                     // We only get to this point when `self.stream_receiver`
                     // was closed which only happens in response to a close control
@@ -502,9 +500,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                     self.control_receiver.unpause();
                     self.control_receiver.stream().close()
                 }
-                Either::Left((Either::Right((Some(cmd), _)), _)) => {
-                    self.on_control_command(cmd).await?
-                }
+                Either::Left((Either::Right((Some(cmd), _)), _)) => self.on_control_command(cmd)?,
                 Either::Left((Either::Right((None, _)), _)) => {
                     // We only get here after the whole connection shutdown is complete.
                     // No further processing of commands of any kind or incoming frames
@@ -519,9 +515,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                     return Err(ConnectionError::Closed);
                 }
                 Either::Right((frame, _)) => {
-                    if let Some(stream) =
-                        self.on_frame(frame.transpose().map_err(Into::into)).await?
-                    {
+                    if let Some(stream) = self.on_frame(frame.transpose().map_err(Into::into))? {
                         return Ok(stream);
                     }
                 }
@@ -534,7 +528,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     /// We only process control commands if we are not in the process of closing
     /// the connection. Only once we finished closing will we drain the remaining
     /// commands and reply back that we are closed.
-    async fn on_control_command(&mut self, cmd: ControlCommand) -> Result<()> {
+    fn on_control_command(&mut self, cmd: ControlCommand) -> Result<()> {
         match cmd {
             ControlCommand::OpenStream(reply) => {
                 if self.shutdown.is_complete() {
@@ -554,10 +548,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                     let mut frame = Frame::window_update(id, extra_credit);
                     frame.header_mut().syn();
                     log::trace!("{}/{}: sending initial {}", self.id, id, frame.header());
-                    self.socket
-                        .feed(frame.into())
-                        .await
-                        .or(Err(ConnectionError::Closed))?
+                    self.pending_frames.push_back(frame.into());
                 }
                 let stream = {
                     let config = self.config.clone();
@@ -580,10 +571,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                         header.rst();
                         let frame = Frame::new(header);
                         log::trace!("{}/{}: sending reset", self.id, id);
-                        self.socket
-                            .feed(frame.into())
-                            .await
-                            .or(Err(ConnectionError::Closed))?
+                        self.pending_frames.push_back(frame.into());
                     }
                 }
             }
@@ -607,7 +595,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     }
 
     /// Process a command from one of our `Stream`s.
-    async fn on_stream_command(&mut self, cmd: StreamCommand) -> Result<()> {
+    fn on_stream_command(&mut self, cmd: StreamCommand) -> Result<()> {
         match cmd {
             StreamCommand::SendFrame(frame) => {
                 log::trace!(
@@ -616,10 +604,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                     frame.header().stream_id(),
                     frame.header()
                 );
-                self.socket
-                    .feed(frame.into())
-                    .await
-                    .or(Err(ConnectionError::Closed))?
+                self.pending_frames.push_back(frame.into());
             }
             StreamCommand::CloseStream { id, ack } => {
                 log::trace!("{}/{}: sending close", self.id, id);
@@ -629,10 +614,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                     header.ack()
                 }
                 let frame = Frame::new(header);
-                self.socket
-                    .feed(frame.into())
-                    .await
-                    .or(Err(ConnectionError::Closed))?
+                self.pending_frames.push_back(frame.into());
             }
         }
         Ok(())
@@ -644,7 +626,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     /// and return a corresponding error, which terminates the connection.
     /// Otherwise we process the frame and potentially return a new `Stream`
     /// if one was opened by the remote.
-    async fn on_frame(&mut self, frame: Result<Option<Frame<()>>>) -> Result<Option<Stream>> {
+    fn on_frame(&mut self, frame: Result<Option<Frame<()>>>) -> Result<Option<Stream>> {
         match frame {
             Ok(Some(frame)) => {
                 log::trace!("{}: received: {}", self.id, frame.header());
@@ -660,40 +642,25 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                         log::trace!("{}: new inbound {} of {}", self.id, stream, self);
                         if let Some(f) = update {
                             log::trace!("{}/{}: sending update", self.id, f.header().stream_id());
-                            self.socket
-                                .feed(f.into())
-                                .await
-                                .or(Err(ConnectionError::Closed))?
+                            self.pending_frames.push_back(f.into());
                         }
                         return Ok(Some(stream));
                     }
                     Action::Update(f) => {
                         log::trace!("{}: sending update: {:?}", self.id, f.header());
-                        self.socket
-                            .feed(f.into())
-                            .await
-                            .or(Err(ConnectionError::Closed))?
+                        self.pending_frames.push_back(f.into());
                     }
                     Action::Ping(f) => {
                         log::trace!("{}/{}: pong", self.id, f.header().stream_id());
-                        self.socket
-                            .feed(f.into())
-                            .await
-                            .or(Err(ConnectionError::Closed))?
+                        self.pending_frames.push_back(f.into());
                     }
                     Action::Reset(f) => {
                         log::trace!("{}/{}: sending reset", self.id, f.header().stream_id());
-                        self.socket
-                            .feed(f.into())
-                            .await
-                            .or(Err(ConnectionError::Closed))?
+                        self.pending_frames.push_back(f.into());
                     }
                     Action::Terminate(f) => {
                         log::trace!("{}: sending term", self.id);
-                        self.socket
-                            .feed(f.into())
-                            .await
-                            .or(Err(ConnectionError::Closed))?
+                        self.pending_frames.push_back(f.into());
                     }
                 }
                 Ok(None)
@@ -1036,7 +1003,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             };
             if let Some(f) = frame {
                 log::trace!("{}/{}: sending: {}", self.id, stream_id, f.header());
-                self.pending_frames.push_back(f);
+                self.pending_frames.push_back(f.into());
             }
             self.garbage.push(stream_id)
         }
