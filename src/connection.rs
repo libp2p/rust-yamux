@@ -170,8 +170,7 @@ pub struct Connection<T> {
     control_receiver: Pausable<mpsc::Receiver<ControlCommand>>,
     stream_sender: mpsc::Sender<StreamCommand>,
     stream_receiver: mpsc::Receiver<StreamCommand>,
-    garbage: Vec<StreamId>,
-    // see `Connection::garbage_collect()`
+    garbage: Vec<StreamId>, // see `Connection::garbage_collect()`
     shutdown: Shutdown,
     is_closed: bool,
 
