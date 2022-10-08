@@ -105,6 +105,7 @@ use futures::{
     stream::{Fuse, FusedStream},
 };
 use nohash_hasher::IntMap;
+use std::collections::VecDeque;
 use std::{fmt, io, sync::Arc, task::Poll};
 
 pub use control::Control;
@@ -168,9 +169,12 @@ pub struct Connection<T> {
     control_receiver: Pausable<mpsc::Receiver<ControlCommand>>,
     stream_sender: mpsc::Sender<StreamCommand>,
     stream_receiver: mpsc::Receiver<StreamCommand>,
-    garbage: Vec<StreamId>, // see `Connection::garbage_collect()`
+    garbage: Vec<StreamId>,
+    // see `Connection::garbage_collect()`
     shutdown: Shutdown,
     is_closed: bool,
+
+    pending_frames: VecDeque<Frame<Data>>,
 }
 
 /// `Control` to `Connection` commands.
@@ -283,6 +287,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             garbage: Vec::new(),
             shutdown: Shutdown::NotStarted,
             is_closed: false,
+            pending_frames: VecDeque::default(),
         }
     }
 
@@ -360,7 +365,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     /// case of an error or at EOF.
     async fn next(&mut self) -> Result<Stream> {
         loop {
-            self.garbage_collect().await?;
+            self.garbage_collect();
+
+            while let Some(frame) = self.pending_frames.pop_front() {
+                self.socket
+                    .feed(frame.into())
+                    .await
+                    .or(Err(ConnectionError::Closed))?
+            }
 
             // Wait for the frame sink to be ready or, if there is a pending
             // write, for an incoming frame. I.e. as long as there is a pending
@@ -955,11 +967,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         }
     }
 
-    /// Remove stale streams and send necessary messages to the remote.
-    ///
-    /// If we ever get async destructors we can replace this with streams
-    /// sending a proper command when dropped.
-    async fn garbage_collect(&mut self) -> Result<()> {
+    /// Remove stale streams and create necessary messages to be sent to the remote.
+    fn garbage_collect(&mut self) {
         let conn_id = self.id;
         let win_update_mode = self.config.window_update_mode;
         for stream in self.streams.values_mut() {
@@ -1022,17 +1031,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             };
             if let Some(f) = frame {
                 log::trace!("{}/{}: sending: {}", self.id, stream_id, f.header());
-                self.socket
-                    .feed(f.into())
-                    .await
-                    .or(Err(ConnectionError::Closed))?
+                self.pending_frames.push_back(f);
             }
             self.garbage.push(stream_id)
         }
         for id in self.garbage.drain(..) {
             self.streams.remove(&id);
         }
-        Ok(())
     }
 }
 
