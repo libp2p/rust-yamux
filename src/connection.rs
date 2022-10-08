@@ -308,11 +308,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             return Ok(None);
         }
 
-        let result = self.next().await;
-
-        if let Ok(Some(_)) = result {
-            return result;
-        }
+        let error = match self.next().await {
+            Ok(stream) => return Ok(Some(stream)),
+            Err(e) => e,
+        };
 
         self.is_closed = true;
 
@@ -347,11 +346,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             }
         }
 
-        if let Err(ConnectionError::Closed) = result {
+        if let ConnectionError::Closed = error {
             return Ok(None);
         }
 
-        result
+        Err(error)
     }
 
     /// Get the next inbound `Stream` and make progress along the way.
@@ -359,7 +358,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     /// This is called from `Connection::next_stream` instead of being a
     /// public method itself in order to guarantee proper closing in
     /// case of an error or at EOF.
-    async fn next(&mut self) -> Result<Option<Stream>> {
+    async fn next(&mut self) -> Result<Stream> {
         loop {
             self.garbage_collect().await?;
 
@@ -392,7 +391,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
 
             if let IoEvent::Inbound(frame) = next_io_event.await? {
                 if let Some(stream) = self.on_frame(frame).await? {
-                    return Ok(Some(stream));
+                    return Ok(stream);
                 }
                 continue; // The socket sink still has a pending write.
             }
@@ -472,7 +471,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                     if let Some(stream) =
                         self.on_frame(frame.transpose().map_err(Into::into)).await?
                     {
-                        return Ok(Some(stream));
+                        return Ok(stream);
                     }
                 }
             }
