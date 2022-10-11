@@ -450,7 +450,20 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                     continue;
                 }
                 Poll::Ready(Some(ControlCommand::CloseConnection(reply))) => {
-                    self.on_close_connection(reply)?;
+                    if self.shutdown.is_complete() {
+                        // We are already closed so just inform the control.
+                        let _ = reply.send(());
+                        return Poll::Ready(Err(ConnectionError::Closed));
+                    }
+                    // Handle initial close command by pausing the control command
+                    // receiver and closing the stream command receiver. I.e. we
+                    // wait for the stream commands to drain.
+                    debug_assert!(self.shutdown.has_not_started());
+                    self.shutdown = Shutdown::InProgress(reply);
+                    log::trace!("{}: shutting down connection", self.id);
+                    self.control_receiver.pause();
+                    self.stream_receiver.close();
+
                     continue;
                 }
                 Poll::Ready(None) => {
@@ -541,24 +554,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 self.pending_frames.push_back(frame.into());
             }
         }
-
-        Ok(())
-    }
-
-    fn on_close_connection(&mut self, reply: oneshot::Sender<()>) -> Result<()> {
-        if self.shutdown.is_complete() {
-            // We are already closed so just inform the control.
-            let _ = reply.send(());
-            return Err(ConnectionError::Closed);
-        }
-        // Handle initial close command by pausing the control command
-        // receiver and closing the stream command receiver. I.e. we
-        // wait for the stream commands to drain.
-        debug_assert!(self.shutdown.has_not_started());
-        self.shutdown = Shutdown::InProgress(reply);
-        log::trace!("{}: shutting down connection", self.id);
-        self.control_receiver.pause();
-        self.stream_receiver.close();
 
         Ok(())
     }
