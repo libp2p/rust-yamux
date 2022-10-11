@@ -173,7 +173,6 @@ pub struct Connection<T> {
     garbage: Vec<StreamId>, // see `Connection::garbage_collect()`
     shutdown: Shutdown,
     is_closed: bool,
-
     pending_frames: VecDeque<Frame<()>>,
 }
 
@@ -438,8 +437,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             }
 
             match self.control_receiver.poll_next_unpin(cx) {
-                Poll::Ready(Some(cmd)) => {
-                    self.on_control_command(cmd)?;
+                Poll::Ready(Some(ControlCommand::OpenStream(reply))) => {
+                    self.on_open_stream(reply)?;
+                    continue;
+                }
+                Poll::Ready(Some(ControlCommand::CloseConnection(reply))) => {
+                    self.on_close_connection(reply);
                     continue;
                 }
                 Poll::Ready(None) => {
@@ -464,75 +467,67 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         }
     }
 
-    /// Process a command from a `Control`.
-    ///
-    /// We only process control commands if we are not in the process of closing
-    /// the connection. Only once we finished closing will we drain the remaining
-    /// commands and reply back that we are closed.
-    fn on_control_command(&mut self, cmd: ControlCommand) -> Result<()> {
-        match cmd {
-            ControlCommand::OpenStream(reply) => {
-                if self.shutdown.is_complete() {
-                    // We are already closed so just inform the control.
-                    let _ = reply.send(Err(ConnectionError::Closed));
-                    return Ok(());
-                }
-                if self.streams.len() >= self.config.max_num_streams {
-                    log::error!("{}: maximum number of streams reached", self.id);
-                    let _ = reply.send(Err(ConnectionError::TooManyStreams));
-                    return Ok(());
-                }
-                log::trace!("{}: creating new outbound stream", self.id);
-                let id = self.next_stream_id()?;
-                let extra_credit = self.config.receive_window - DEFAULT_CREDIT;
-                if extra_credit > 0 {
-                    let mut frame = Frame::window_update(id, extra_credit);
-                    frame.header_mut().syn();
-                    log::trace!("{}/{}: sending initial {}", self.id, id, frame.header());
-                    self.pending_frames.push_back(frame.into());
-                }
-                let stream = {
-                    let config = self.config.clone();
-                    let sender = self.stream_sender.clone();
-                    let window = self.config.receive_window;
-                    let mut stream =
-                        Stream::new(id, self.id, config, window, DEFAULT_CREDIT, sender);
-                    if extra_credit == 0 {
-                        stream.set_flag(stream::Flag::Syn)
-                    }
-                    stream
-                };
-                if reply.send(Ok(stream.clone())).is_ok() {
-                    log::debug!("{}: new outbound {} of {}", self.id, stream, self);
-                    self.streams.insert(id, stream);
-                } else {
-                    log::debug!("{}: open stream {} has been cancelled", self.id, id);
-                    if extra_credit > 0 {
-                        let mut header = Header::data(id, 0);
-                        header.rst();
-                        let frame = Frame::new(header);
-                        log::trace!("{}/{}: sending reset", self.id, id);
-                        self.pending_frames.push_back(frame.into());
-                    }
-                }
+    fn on_open_stream(&mut self, reply: oneshot::Sender<Result<Stream>>) -> Result<()> {
+        if self.shutdown.is_complete() {
+            // We are already closed so just inform the control.
+            let _ = reply.send(Err(ConnectionError::Closed));
+            return Ok(());
+        }
+        if self.streams.len() >= self.config.max_num_streams {
+            log::error!("{}: maximum number of streams reached", self.id);
+            let _ = reply.send(Err(ConnectionError::TooManyStreams));
+            return Ok(());
+        }
+        log::trace!("{}: creating new outbound stream", self.id);
+        let id = self.next_stream_id()?;
+        let extra_credit = self.config.receive_window - DEFAULT_CREDIT;
+        if extra_credit > 0 {
+            let mut frame = Frame::window_update(id, extra_credit);
+            frame.header_mut().syn();
+            log::trace!("{}/{}: sending initial {}", self.id, id, frame.header());
+            self.pending_frames.push_back(frame.into());
+        }
+        let stream = {
+            let config = self.config.clone();
+            let sender = self.stream_sender.clone();
+            let window = self.config.receive_window;
+            let mut stream = Stream::new(id, self.id, config, window, DEFAULT_CREDIT, sender);
+            if extra_credit == 0 {
+                stream.set_flag(stream::Flag::Syn)
             }
-            ControlCommand::CloseConnection(reply) => {
-                if self.shutdown.is_complete() {
-                    // We are already closed so just inform the control.
-                    let _ = reply.send(());
-                    return Ok(());
-                }
-                // Handle initial close command by pausing the control command
-                // receiver and closing the stream command receiver. I.e. we
-                // wait for the stream commands to drain.
-                debug_assert!(self.shutdown.has_not_started());
-                self.shutdown = Shutdown::InProgress(reply);
-                log::trace!("{}: shutting down connection", self.id);
-                self.control_receiver.pause();
-                self.stream_receiver.close()
+            stream
+        };
+        if reply.send(Ok(stream.clone())).is_ok() {
+            log::debug!("{}: new outbound {} of {}", self.id, stream, self);
+            self.streams.insert(id, stream);
+        } else {
+            log::debug!("{}: open stream {} has been cancelled", self.id, id);
+            if extra_credit > 0 {
+                let mut header = Header::data(id, 0);
+                header.rst();
+                let frame = Frame::new(header);
+                log::trace!("{}/{}: sending reset", self.id, id);
+                self.pending_frames.push_back(frame.into());
             }
         }
+
         Ok(())
+    }
+
+    fn on_close_connection(&mut self, reply: oneshot::Sender<()>) {
+        if self.shutdown.is_complete() {
+            // We are already closed so just inform the control.
+            let _ = reply.send(());
+            return;
+        }
+        // Handle initial close command by pausing the control command
+        // receiver and closing the stream command receiver. I.e. we
+        // wait for the stream commands to drain.
+        debug_assert!(self.shutdown.has_not_started());
+        self.shutdown = Shutdown::InProgress(reply);
+        log::trace!("{}: shutting down connection", self.id);
+        self.control_receiver.pause();
+        self.stream_receiver.close();
     }
 
     /// Process a command from one of our `Stream`s.
