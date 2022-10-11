@@ -154,12 +154,54 @@ impl fmt::Display for Id {
     }
 }
 
+#[derive(Debug)]
+pub struct Connection<T> {
+    inner: ConnectionState<T>,
+}
+
+impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
+    pub fn new(socket: T, cfg: Config, mode: Mode) -> Self {
+        Self {
+            inner: ConnectionState::Active(Active::new(socket, cfg, mode)),
+        }
+    }
+
+    /// Get a controller for this connection.
+    pub fn control(&self) -> Result<Control> {
+        match &self.inner {
+            ConnectionState::Active(active) => Ok(active.control()),
+        }
+    }
+
+    /// Get the next incoming stream, opened by the remote.
+    ///
+    /// This must be called repeatedly in order to make progress.
+    /// Once `Ok(None)` or `Err(_)` is returned the connection is
+    /// considered closed and no further invocation of this method
+    /// must be attempted.
+    ///
+    /// # Cancellation
+    ///
+    /// Please note that if you poll the returned [`Future`] it *must
+    /// not be cancelled* but polled until [`Poll::Ready`] is returned.
+    pub async fn next_stream(&mut self) -> Result<Option<Stream>> {
+        match &mut self.inner {
+            ConnectionState::Active(active) => active.next_stream().await,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ConnectionState<T> {
+    Active(Active<T>),
+}
+
 /// A Yamux connection object.
 ///
 /// Wraps the underlying I/O resource and makes progress via its
 /// [`Connection::next_stream`] method which must be called repeatedly
 /// until `Ok(None)` signals EOF or an error is encountered.
-pub struct Connection<T> {
+struct Active<T> {
     id: Id,
     mode: Mode,
     config: Arc<Config>,
@@ -237,7 +279,7 @@ impl Shutdown {
     }
 }
 
-impl<T> fmt::Debug for Connection<T> {
+impl<T> fmt::Debug for Active<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Connection")
             .field("id", &self.id)
@@ -249,7 +291,7 @@ impl<T> fmt::Debug for Connection<T> {
     }
 }
 
-impl<T> fmt::Display for Connection<T> {
+impl<T> fmt::Display for Active<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
@@ -261,15 +303,15 @@ impl<T> fmt::Display for Connection<T> {
     }
 }
 
-impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
+impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     /// Create a new `Connection` from the given I/O resource.
-    pub fn new(socket: T, cfg: Config, mode: Mode) -> Self {
+    fn new(socket: T, cfg: Config, mode: Mode) -> Self {
         let id = Id::random();
         log::debug!("new connection: {} ({:?})", id, mode);
         let (stream_sender, stream_receiver) = mpsc::channel(MAX_COMMAND_BACKLOG);
         let (control_sender, control_receiver) = mpsc::channel(MAX_COMMAND_BACKLOG);
         let socket = frame::Io::new(id, socket, cfg.max_buffer_size).fuse();
-        Connection {
+        Active {
             id,
             mode,
             config: Arc::new(cfg),
@@ -290,23 +332,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         }
     }
 
-    /// Get a controller for this connection.
-    pub fn control(&self) -> Control {
+    fn control(&self) -> Control {
         Control::new(self.control_sender.clone())
     }
 
-    /// Get the next incoming stream, opened by the remote.
-    ///
-    /// This must be called repeatedly in order to make progress.
-    /// Once `Ok(None)` or `Err(_)` is returned the connection is
-    /// considered closed and no further invocation of this method
-    /// must be attempted.
-    ///
-    /// # Cancellation
-    ///
-    /// Please note that if you poll the returned [`Future`] it *must
-    /// not be cancelled* but polled until [`Poll::Ready`] is returned.
-    pub async fn next_stream(&mut self) -> Result<Option<Stream>> {
+    async fn next_stream(&mut self) -> Result<Option<Stream>> {
         if self.is_closed {
             log::debug!("{}: connection is closed", self.id);
             return Ok(None);
@@ -941,7 +971,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     }
 }
 
-impl<T> Connection<T> {
+impl<T> Active<T> {
     /// Close and drop all `Stream`s and wake any pending `Waker`s.
     fn drop_all_streams(&mut self) {
         for (id, s) in self.streams.drain() {
@@ -957,7 +987,7 @@ impl<T> Connection<T> {
     }
 }
 
-impl<T> Drop for Connection<T> {
+impl<T> Drop for Active<T> {
     fn drop(&mut self) {
         self.drop_all_streams()
     }

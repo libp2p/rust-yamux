@@ -113,7 +113,7 @@ async fn oneway(
     task::spawn(server);
 
     let conn = Connection::new(client, config(), Mode::Client);
-    let mut ctrl = conn.control();
+    let mut ctrl = conn.control().unwrap();
     task::spawn(yamux::into_stream(conn).for_each(|r| {
         r.unwrap();
         future::ready(())

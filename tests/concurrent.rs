@@ -36,7 +36,7 @@ fn concurrent_streams() {
 
             task::spawn(echo_server(server));
 
-            let mut ctrl = client.control();
+            let mut ctrl = client.control().unwrap();
             task::spawn(noop_server(client));
 
             let result = (0..n_streams)

@@ -47,7 +47,7 @@ fn prop_config_send_recv_single() {
 
             let server = echo_server(server);
             let client = async {
-                let control = client.control();
+                let control = client.control().unwrap();
                 task::spawn(noop_server(client));
                 send_on_single_stream(control, msgs).await?;
 
@@ -78,7 +78,7 @@ fn prop_config_send_recv_multi() {
 
             let server = echo_server(server);
             let client = async {
-                let control = client.control();
+                let control = client.control().unwrap();
                 task::spawn(noop_server(client));
                 send_on_separate_streams(control, msgs).await?;
 
@@ -107,7 +107,7 @@ fn prop_send_recv() {
 
             let server = echo_server(server);
             let client = async {
-                let control = client.control();
+                let control = client.control().unwrap();
                 task::spawn(noop_server(client));
                 send_on_separate_streams(control, msgs).await?;
 
@@ -134,7 +134,7 @@ fn prop_max_streams() {
 
             task::spawn(echo_server(server));
 
-            let mut control = client.control();
+            let mut control = client.control().unwrap();
             task::spawn(noop_server(client));
 
             let mut v = Vec::new();
@@ -176,7 +176,7 @@ fn prop_send_recv_half_closed() {
 
             // Client should be able to read after shutting down the stream.
             let client = async {
-                let mut control = client.control();
+                let mut control = client.control().unwrap();
                 task::spawn(noop_server(client));
 
                 let mut stream = control.open_stream().await?;
@@ -184,7 +184,6 @@ fn prop_send_recv_half_closed() {
                 stream.close().await?;
 
                 assert!(stream.is_write_closed());
-
                 let mut buf = vec![0; msg_len];
                 stream.read_exact(&mut buf).await?;
 
@@ -243,7 +242,7 @@ fn write_deadlock() {
     // Create and spawn a "client" that sends messages expected to be echoed
     // by the server.
     let client = Connection::new(client_endpoint, Config::default(), Mode::Client);
-    let mut ctrl = client.control();
+    let mut ctrl = client.control().unwrap();
 
     // Continuously advance the Yamux connection of the client in a background task.
     pool.spawner()
