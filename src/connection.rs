@@ -452,8 +452,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             }
 
             match self.stream_receiver.poll_next_unpin(cx) {
-                Poll::Ready(Some(cmd)) => {
-                    self.on_stream_command(cmd)?;
+                Poll::Ready(Some(StreamCommand::SendFrame(frame))) => {
+                    self.on_send_frame(frame);
+                    continue;
+                }
+                Poll::Ready(Some(StreamCommand::CloseStream { id, ack })) => {
+                    self.on_close_stream(id, ack);
                     continue;
                 }
                 Poll::Ready(None) => {
@@ -536,30 +540,25 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         self.stream_receiver.close();
     }
 
-    /// Process a command from one of our `Stream`s.
-    fn on_stream_command(&mut self, cmd: StreamCommand) -> Result<()> {
-        match cmd {
-            StreamCommand::SendFrame(frame) => {
-                log::trace!(
-                    "{}/{}: sending: {}",
-                    self.id,
-                    frame.header().stream_id(),
-                    frame.header()
-                );
-                self.pending_frames.push_back(frame.into());
-            }
-            StreamCommand::CloseStream { id, ack } => {
-                log::trace!("{}/{}: sending close", self.id, id);
-                let mut header = Header::data(id, 0);
-                header.fin();
-                if ack {
-                    header.ack()
-                }
-                let frame = Frame::new(header);
-                self.pending_frames.push_back(frame.into());
-            }
+    fn on_send_frame(&mut self, frame: Frame<Either<Data, WindowUpdate>>) {
+        log::trace!(
+            "{}/{}: sending: {}",
+            self.id,
+            frame.header().stream_id(),
+            frame.header()
+        );
+        self.pending_frames.push_back(frame.into());
+    }
+
+    fn on_close_stream(&mut self, id: StreamId, ack: bool) {
+        log::trace!("{}/{}: sending close", self.id, id);
+        let mut header = Header::data(id, 0);
+        header.fin();
+        if ack {
+            header.ack()
         }
-        Ok(())
+        let frame = Frame::new(header);
+        self.pending_frames.push_back(frame.into());
     }
 
     /// Process the result of reading from the socket.
