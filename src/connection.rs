@@ -473,20 +473,25 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             let _ = reply.send(Err(ConnectionError::Closed));
             return Ok(());
         }
+
         if self.streams.len() >= self.config.max_num_streams {
             log::error!("{}: maximum number of streams reached", self.id);
             let _ = reply.send(Err(ConnectionError::TooManyStreams));
             return Ok(());
         }
+
         log::trace!("{}: creating new outbound stream", self.id);
+
         let id = self.next_stream_id()?;
         let extra_credit = self.config.receive_window - DEFAULT_CREDIT;
+
         if extra_credit > 0 {
             let mut frame = Frame::window_update(id, extra_credit);
             frame.header_mut().syn();
             log::trace!("{}/{}: sending initial {}", self.id, id, frame.header());
             self.pending_frames.push_back(frame.into());
         }
+
         let stream = {
             let config = self.config.clone();
             let sender = self.stream_sender.clone();
@@ -497,6 +502,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
             }
             stream
         };
+
         if reply.send(Ok(stream.clone())).is_ok() {
             log::debug!("{}: new outbound {} of {}", self.id, stream, self);
             self.streams.insert(id, stream);
