@@ -429,7 +429,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                     continue;
                 }
                 Poll::Ready(Some(ControlCommand::CloseConnection(reply))) => {
-                    self.on_close_connection(reply);
+                    self.on_close_connection(reply)?;
                     continue;
                 }
                 Poll::Ready(None) => {
@@ -524,11 +524,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         Ok(())
     }
 
-    fn on_close_connection(&mut self, reply: oneshot::Sender<()>) {
+    fn on_close_connection(&mut self, reply: oneshot::Sender<()>) -> Result<()> {
         if self.shutdown.is_complete() {
             // We are already closed so just inform the control.
             let _ = reply.send(());
-            return;
+            return Err(ConnectionError::Closed);
         }
         // Handle initial close command by pausing the control command
         // receiver and closing the stream command receiver. I.e. we
@@ -538,6 +538,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         log::trace!("{}: shutting down connection", self.id);
         self.control_receiver.pause();
         self.stream_receiver.close();
+
+        Ok(())
     }
 
     fn on_send_frame(&mut self, frame: Frame<Either<Data, WindowUpdate>>) {
