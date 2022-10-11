@@ -423,19 +423,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 Poll::Pending => {}
             }
 
-            match self.socket.poll_next_unpin(cx) {
-                Poll::Ready(Some(frame)) => {
-                    if let Some(stream) = self.on_frame(frame?)? {
-                        return Poll::Ready(Ok(Event::NewStream(stream)));
-                    }
-                    continue;
-                }
-                Poll::Ready(None) => {
-                    return Poll::Ready(Err(ConnectionError::Closed));
-                }
-                _ => {}
-            }
-
             match self.control_receiver.poll_next_unpin(cx) {
                 Poll::Ready(Some(ControlCommand::OpenStream(reply))) => {
                     self.on_open_stream(reply)?;
@@ -462,6 +449,19 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 }
                 Poll::Ready(None) => {
                     return Poll::Ready(Ok(Event::StreamReceiverClosed));
+                }
+                _ => {}
+            }
+
+            match self.socket.poll_next_unpin(cx) {
+                Poll::Ready(Some(frame)) => {
+                    if let Some(stream) = self.on_frame(frame?)? {
+                        return Poll::Ready(Ok(Event::NewStream(stream)));
+                    }
+                    continue;
+                }
+                Poll::Ready(None) => {
+                    return Poll::Ready(Err(ConnectionError::Closed));
                 }
                 _ => {}
             }
