@@ -170,7 +170,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Connection<T> {
     pub fn control(&self) -> Result<Control> {
         match &self.inner {
             ConnectionState::Active(active) => Ok(active.control()),
-            ConnectionState::Closed | ConnectionState::Closing(_) | ConnectionState::Failing(_) => {
+            ConnectionState::Closed | ConnectionState::Closing(_) | ConnectionState::Cleanup(_) => {
                 Err(ConnectionError::Closed)
             }
             ConnectionState::Poisoned => unreachable!(),
@@ -205,7 +205,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Connection<T> {
 enum ConnectionState<T> {
     Active(Active<T>),
     Closing(BoxFuture<'static, Result<()>>),
-    Failing(BoxFuture<'static, Result<()>>),
+    Cleanup(BoxFuture<'static, Result<()>>),
     Closed,
     Poisoned,
 }
@@ -215,7 +215,7 @@ impl<T> fmt::Debug for ConnectionState<T> {
         match self {
             ConnectionState::Active(_) => write!(f, "Active"),
             ConnectionState::Closing(_) => write!(f, "Closing"),
-            ConnectionState::Failing(_) => write!(f, "Failing"),
+            ConnectionState::Cleanup(_) => write!(f, "Cleanup"),
             ConnectionState::Closed => write!(f, "Closed"),
             ConnectionState::Poisoned => write!(f, "Poisoned"),
         }
@@ -236,7 +236,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionState<T> {
                         continue;
                     }
                     Poll::Ready(Err(e)) => {
-                        *self = ConnectionState::Failing(
+                        *self = ConnectionState::Cleanup(
                             async move {
                                 active.cleanup().await;
 
@@ -264,7 +264,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionState<T> {
                         return Poll::Pending;
                     }
                 },
-                ConnectionState::Failing(mut failing) => match failing.poll_unpin(cx) {
+                ConnectionState::Cleanup(mut cleanup) => match cleanup.poll_unpin(cx) {
                     Poll::Ready(Ok(())) => {
                         *self = ConnectionState::Closed;
                         return Poll::Ready(None);
@@ -281,7 +281,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionState<T> {
                         return Poll::Ready(maybe_error);
                     }
                     Poll::Pending => {
-                        *self = ConnectionState::Failing(failing);
+                        *self = ConnectionState::Cleanup(cleanup);
                         return Poll::Pending;
                     }
                 },
