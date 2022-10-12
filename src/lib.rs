@@ -27,7 +27,6 @@
 mod chunks;
 mod error;
 mod frame;
-mod pause;
 
 pub(crate) mod connection;
 

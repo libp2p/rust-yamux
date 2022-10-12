@@ -94,7 +94,6 @@ use crate::{
     error::ConnectionError,
     frame::header::{self, Data, GoAway, Header, Ping, StreamId, Tag, WindowUpdate, CONNECTION_ID},
     frame::{self, Frame},
-    pause::Pausable,
     Config, WindowUpdateMode, DEFAULT_CREDIT,
 };
 use futures::{
@@ -191,10 +190,25 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 match future::poll_fn(|cx| active.poll(cx)).await {
                     Ok(Event::NewStream(stream)) => Ok(Some(stream)),
                     Ok(Event::CloseRequested { reply }) => {
-                        active.control_receiver.pause();
+                        // Prevent more control commands being sent.
+                        active.control_receiver.close();
+
+                        // Drain all remaining control commands.
+                        while let Some(cmd) = active.control_receiver.next().await {
+                            match cmd {
+                                ControlCommand::OpenStream(reply) => {
+                                    let _ = reply.send(Err(ConnectionError::Closed));
+                                }
+                                ControlCommand::CloseConnection(reply) => {
+                                    let _ = reply.send(());
+                                }
+                            }
+                        }
+
+                        // Prevent any more work being sent from streams.
                         active.stream_receiver.close();
 
-                        // Drain all control receiver items
+                        // Drain all remaining stream commands.
                         while let Some(cmd) = active.stream_receiver.next().await {
                             match cmd {
                                 StreamCommand::SendFrame(frame) => {
@@ -206,9 +220,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                             }
                         }
 
+                        // Send `GoAway` frame.
                         log::debug!("{}: sending term", active.id);
                         active.pending_frames.push_back(Frame::term().into());
 
+                        // Drain all remaining frames.
                         while let Some(pending_frame) = active.pending_frames.pop_front() {
                             active
                                 .socket
@@ -223,21 +239,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                             .await
                             .or(Err(ConnectionError::Closed))?;
 
-                        active.control_receiver.unpause();
-                        active.control_receiver.stream().close();
-
-                        // Drain all control receiver items
-                        while let Some(cmd) = active.control_receiver.next().await {
-                            match cmd {
-                                ControlCommand::OpenStream(reply) => {
-                                    let _ = reply.send(Err(ConnectionError::Closed));
-                                }
-                                ControlCommand::CloseConnection(reply) => {
-                                    let _ = reply.send(());
-                                }
-                            }
-                        }
-
+                        // Close the socket.
                         active
                             .socket
                             .get_mut()
@@ -245,8 +247,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                             .await
                             .or(Err(ConnectionError::Closed))?;
 
+                        // We are done closing the connection.
                         let _ = reply.send(());
-
                         self.inner = ConnectionState::Closed;
 
                         Ok(None)
@@ -258,9 +260,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                         // submitted. The connection is then considered closed.
 
                         // Close and drain the control command receiver.
-                        if !active.control_receiver.stream().is_terminated() {
-                            active.control_receiver.stream().close();
-                            active.control_receiver.unpause();
+                        if !active.control_receiver.is_terminated() {
+                            active.control_receiver.close();
                             while let Some(cmd) = active.control_receiver.next().await {
                                 match cmd {
                                     ControlCommand::OpenStream(reply) => {
@@ -313,7 +314,7 @@ struct Active<T> {
     next_id: u32,
     streams: IntMap<StreamId, Stream>,
     control_sender: mpsc::Sender<ControlCommand>,
-    control_receiver: Pausable<mpsc::Receiver<ControlCommand>>,
+    control_receiver: mpsc::Receiver<ControlCommand>,
     stream_sender: mpsc::Sender<StreamCommand>,
     stream_receiver: mpsc::Receiver<StreamCommand>,
     garbage: Vec<StreamId>,
@@ -394,7 +395,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             socket,
             streams: IntMap::default(),
             control_sender,
-            control_receiver: Pausable::new(control_receiver),
+            control_receiver,
             stream_sender,
             stream_receiver,
             next_id: match mode {
