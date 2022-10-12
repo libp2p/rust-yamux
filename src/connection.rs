@@ -203,10 +203,15 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Connection<T> {
 }
 
 enum ConnectionState<T> {
+    /// The connection is alive and healthy.
     Active(Active<T>),
+    /// Our user requested to shutdown the connection, we are working on it.
     Closing(BoxFuture<'static, Result<()>>),
+    /// An error occurred and we are cleaning up our resources.
     Cleanup(BoxFuture<'static, Result<()>>),
+    /// The connection is closed.
     Closed,
+    /// Something went wrong during our state transitions. Should never happen unless there is a bug.
     Poisoned,
 }
 
