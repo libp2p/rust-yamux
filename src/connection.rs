@@ -188,7 +188,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Connection<T> {
     ///
     /// This function is cancellation-safe.
     pub async fn next_stream(&mut self) -> Result<Option<Stream>> {
-        future::poll_fn(|cx| self.inner.poll(cx)).await.transpose()
+        future::poll_fn(|cx| self.inner.poll_next(cx))
+            .await
+            .transpose()
     }
 
     /// Have the underlying connection make progress.
@@ -196,7 +198,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Connection<T> {
     /// If this returns `Poll::Ready(None)`, the connection is closed and does no longer
     /// need to be polled.
     pub fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<Stream>>> {
-        self.inner.poll(cx)
+        self.inner.poll_next(cx)
     }
 }
 
@@ -221,7 +223,7 @@ impl<T> fmt::Debug for ConnectionState<T> {
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionState<T> {
-    fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<Stream>>> {
+    fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<Stream>>> {
         loop {
             match std::mem::replace(self, ConnectionState::Poisoned) {
                 ConnectionState::Active(mut active) => match active.poll(cx) {
