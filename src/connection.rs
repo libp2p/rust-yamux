@@ -190,6 +190,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Connection<T> {
     pub async fn next_stream(&mut self) -> Result<Option<Stream>> {
         future::poll_fn(|cx| self.inner.poll(cx)).await.transpose()
     }
+
+    /// Have the underlying connection make progress.
+    ///
+    /// If this returns `Poll::Ready(None)`, the connection is closed and does no longer
+    /// need to be polled.
+    pub fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<Stream>>> {
+        self.inner.poll(cx)
+    }
 }
 
 enum ConnectionState<T> {
@@ -1012,15 +1020,9 @@ enum Event {
 }
 
 /// Turn a Yamux [`Connection`] into a [`futures::Stream`].
-pub fn into_stream<T>(c: Connection<T>) -> impl futures::stream::Stream<Item = Result<Stream>>
+pub fn into_stream<T>(mut c: Connection<T>) -> impl futures::stream::Stream<Item = Result<Stream>>
 where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    futures::stream::unfold(c, |mut c| async {
-        match c.next_stream().await {
-            Ok(None) => None,
-            Ok(Some(stream)) => Some((Ok(stream), c)),
-            Err(e) => Some((Err(e), c)),
-        }
-    })
+    futures::stream::poll_fn(move |cx| c.poll_next(cx))
 }
