@@ -271,7 +271,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionState<T> {
                     }
                     Poll::Ready(Err(e)) => {
                         *self = ConnectionState::Closed;
-                        return Poll::Ready(Some(Err(e)));
+
+                        let maybe_error = if matches!(e, ConnectionError::Closed) {
+                            None
+                        } else {
+                            Some(Err(e))
+                        };
+
+                        return Poll::Ready(maybe_error);
                     }
                     Poll::Pending => {
                         *self = ConnectionState::Failing(failing);
