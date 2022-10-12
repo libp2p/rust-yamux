@@ -188,9 +188,68 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     pub async fn next_stream(&mut self) -> Result<Option<Stream>> {
         match &mut self.inner {
             ConnectionState::Active(active) => {
-                match active.next().await {
-                    Ok(stream) => {
-                        Ok(Some(stream))
+                match future::poll_fn(|cx| active.poll(cx)).await {
+                    Ok(Event::NewStream(stream)) => Ok(Some(stream)),
+                    Ok(Event::CloseRequested { reply }) => {
+                        active.control_receiver.pause();
+                        active.stream_receiver.close();
+
+                        // Drain all control receiver items
+                        while let Some(cmd) = active.stream_receiver.next().await {
+                            match cmd {
+                                StreamCommand::SendFrame(frame) => {
+                                    active.on_send_frame(frame);
+                                }
+                                StreamCommand::CloseStream { id, ack } => {
+                                    active.on_close_stream(id, ack);
+                                }
+                            }
+                        }
+
+                        log::debug!("{}: sending term", active.id);
+                        active.pending_frames.push_back(Frame::term().into());
+
+                        while let Some(pending_frame) = active.pending_frames.pop_front() {
+                            active
+                                .socket
+                                .feed(pending_frame)
+                                .await
+                                .or(Err(ConnectionError::Closed))?;
+                        }
+
+                        active
+                            .socket
+                            .flush()
+                            .await
+                            .or(Err(ConnectionError::Closed))?;
+
+                        active.control_receiver.unpause();
+                        active.control_receiver.stream().close();
+
+                        // Drain all control receiver items
+                        while let Some(cmd) = active.control_receiver.next().await {
+                            match cmd {
+                                ControlCommand::OpenStream(reply) => {
+                                    let _ = reply.send(Err(ConnectionError::Closed));
+                                }
+                                ControlCommand::CloseConnection(reply) => {
+                                    let _ = reply.send(());
+                                }
+                            }
+                        }
+
+                        active
+                            .socket
+                            .get_mut()
+                            .close()
+                            .await
+                            .or(Err(ConnectionError::Closed))?;
+
+                        let _ = reply.send(());
+
+                        self.inner = ConnectionState::Closed;
+
+                        Ok(None)
                     }
                     Err(e) => {
                         // At this point we are either at EOF or encountered an error.
@@ -257,8 +316,8 @@ struct Active<T> {
     control_receiver: Pausable<mpsc::Receiver<ControlCommand>>,
     stream_sender: mpsc::Sender<StreamCommand>,
     stream_receiver: mpsc::Receiver<StreamCommand>,
-    garbage: Vec<StreamId>, // see `Connection::garbage_collect()`
-    shutdown: Shutdown,
+    garbage: Vec<StreamId>,
+    // see `Connection::garbage_collect()`
     pending_frames: VecDeque<Frame<()>>,
 }
 
@@ -295,32 +354,6 @@ enum Action {
     Reset(Frame<Data>),
     /// The connection should be terminated.
     Terminate(Frame<GoAway>),
-}
-
-/// This enum captures the various stages of shutting down the connection.
-#[derive(Debug)]
-enum Shutdown {
-    /// We are open for business.
-    NotStarted,
-    /// We have received a `ControlCommand::Close` and are shutting
-    /// down operations. The `Sender` will be informed once we are done.
-    InProgress(oneshot::Sender<()>),
-    /// The shutdown is complete and we are closed for good.
-    Complete,
-}
-
-impl Shutdown {
-    fn has_not_started(&self) -> bool {
-        matches!(self, Shutdown::NotStarted)
-    }
-
-    fn is_in_progress(&self) -> bool {
-        matches!(self, Shutdown::InProgress(_))
-    }
-
-    fn is_complete(&self) -> bool {
-        matches!(self, Shutdown::Complete)
-    }
 }
 
 impl<T> fmt::Debug for Active<T> {
@@ -369,63 +402,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 Mode::Server => 2,
             },
             garbage: Vec::new(),
-            shutdown: Shutdown::NotStarted,
             pending_frames: VecDeque::default(),
         }
     }
 
     fn control(&self) -> Control {
         Control::new(self.control_sender.clone())
-    }
-
-    /// Get the next inbound `Stream` and make progress along the way.
-    ///
-    /// This is called from `Connection::next_stream` instead of being a
-    /// public method itself in order to guarantee proper closing in
-    /// case of an error or at EOF.
-    async fn next(&mut self) -> Result<Stream> {
-        loop {
-            match future::poll_fn(|cx| self.poll(cx)).await? {
-                Event::StreamReceiverClosed => {
-                    // We only get to this point when `self.stream_receiver`
-                    // was closed which only happens in response to a close control
-                    // command. Now that we are at the end of the stream command queue,
-                    // we send the final term frame to the remote and complete the
-                    // closure by closing the already paused control command receiver.
-                    debug_assert!(self.shutdown.is_in_progress());
-                    log::debug!("{}: sending term", self.id);
-                    let frame = Frame::term();
-                    self.socket
-                        .feed(frame.into())
-                        .await
-                        .or(Err(ConnectionError::Closed))?;
-                    let shutdown = std::mem::replace(&mut self.shutdown, Shutdown::Complete);
-                    if let Shutdown::InProgress(tx) = shutdown {
-                        // Inform the `Control` that initiated the shutdown.
-                        let _ = tx.send(());
-                    }
-                    debug_assert!(self.control_receiver.is_paused());
-                    self.control_receiver.unpause();
-                    self.control_receiver.stream().close()
-                }
-                Event::ControlReceiverClosed => {
-                    // We only get here after the whole connection shutdown is complete.
-                    // No further processing of commands of any kind or incoming frames
-                    // will happen.
-                    debug_assert!(self.shutdown.is_complete());
-                    self.socket
-                        .get_mut()
-                        .close()
-                        .await
-                        .or(Err(ConnectionError::Closed))?;
-
-                    return Err(ConnectionError::Closed);
-                }
-                Event::NewStream(stream) => {
-                    return Ok(stream);
-                }
-            }
-        }
     }
 
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Result<Event>> {
@@ -450,24 +432,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                     continue;
                 }
                 Poll::Ready(Some(ControlCommand::CloseConnection(reply))) => {
-                    if self.shutdown.is_complete() {
-                        // We are already closed so just inform the control.
-                        let _ = reply.send(());
-                        return Poll::Ready(Err(ConnectionError::Closed));
-                    }
-                    // Handle initial close command by pausing the control command
-                    // receiver and closing the stream command receiver. I.e. we
-                    // wait for the stream commands to drain.
-                    debug_assert!(self.shutdown.has_not_started());
-                    self.shutdown = Shutdown::InProgress(reply);
-                    log::trace!("{}: shutting down connection", self.id);
-                    self.control_receiver.pause();
-                    self.stream_receiver.close();
-
-                    continue;
+                    return Poll::Ready(Ok(Event::CloseRequested { reply }));
                 }
                 Poll::Ready(None) => {
-                    return Poll::Ready(Ok(Event::ControlReceiverClosed));
+                    debug_assert!(false, "Only closed during shutdown")
                 }
                 _ => {}
             }
@@ -482,7 +450,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                     continue;
                 }
                 Poll::Ready(None) => {
-                    return Poll::Ready(Ok(Event::StreamReceiverClosed));
+                    debug_assert!(false, "Only closed during shutdown")
                 }
                 _ => {}
             }
@@ -506,12 +474,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     }
 
     fn on_open_stream(&mut self, reply: oneshot::Sender<Result<Stream>>) -> Result<()> {
-        if self.shutdown.is_complete() {
-            // We are already closed so just inform the control.
-            let _ = reply.send(Err(ConnectionError::Closed));
-            return Ok(());
-        }
-
         if self.streams.len() >= self.config.max_num_streams {
             log::error!("{}: maximum number of streams reached", self.id);
             let _ = reply.send(Err(ConnectionError::TooManyStreams));
@@ -981,8 +943,7 @@ impl<T> Drop for Active<T> {
 
 enum Event {
     NewStream(Stream),
-    ControlReceiverClosed,
-    StreamReceiverClosed,
+    CloseRequested { reply: oneshot::Sender<()> },
 }
 
 /// Turn a Yamux [`Connection`] into a [`futures::Stream`].

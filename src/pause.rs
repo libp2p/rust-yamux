@@ -36,10 +36,6 @@ impl<S: Stream + Unpin> Pausable<S> {
         }
     }
 
-    pub(crate) fn is_paused(&mut self) -> bool {
-        self.paused
-    }
-
     pub(crate) fn pause(&mut self) {
         self.paused = true
     }
