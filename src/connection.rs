@@ -395,6 +395,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         Control::new(self.control_sender.clone())
     }
 
+    /// Gracefully close the connection to the remote.
     async fn close(mut self, reply: oneshot::Sender<()>) -> Result<()> {
         // Prevent more control commands being sent.
         self.control_receiver.close();
@@ -453,12 +454,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         Ok(())
     }
 
+    /// Cleanup all our resources.
+    ///
+    /// This should be called in the context of an unrecoverable error on the connection.
     async fn cleanup(mut self) {
-        // At this point we are either at EOF or encountered an error.
-        // We close all streams and wake up the associated tasks. We also
-        // close and drain all receivers so no more commands can be
-        // submitted. The connection is then considered closed.
-
         // Close and drain the control command receiver.
         if !self.control_receiver.is_terminated() {
             self.control_receiver.close();
