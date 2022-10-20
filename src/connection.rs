@@ -170,9 +170,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Connection<T> {
     pub fn control(&self) -> Result<Control> {
         match &self.inner {
             ConnectionState::Active(active) => Ok(active.control()),
-            ConnectionState::Closed | ConnectionState::Closing(_) | ConnectionState::Cleanup(_) => {
-                Err(ConnectionError::Closed)
-            }
+            ConnectionState::Closed
+            | ConnectionState::Closing { .. }
+            | ConnectionState::Cleanup(_) => Err(ConnectionError::Closed),
             ConnectionState::Poisoned => unreachable!(),
         }
     }
@@ -206,7 +206,10 @@ enum ConnectionState<T> {
     /// The connection is alive and healthy.
     Active(Active<T>),
     /// Our user requested to shutdown the connection, we are working on it.
-    Closing(BoxFuture<'static, Result<()>>),
+    Closing {
+        inner: BoxFuture<'static, Result<()>>,
+        reply: oneshot::Sender<()>,
+    },
     /// An error occurred and we are cleaning up our resources.
     Cleanup(BoxFuture<'static, Result<()>>),
     /// The connection is closed.
@@ -219,7 +222,7 @@ impl<T> fmt::Debug for ConnectionState<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ConnectionState::Active(_) => write!(f, "Active"),
-            ConnectionState::Closing(_) => write!(f, "Closing"),
+            ConnectionState::Closing { .. } => write!(f, "Closing"),
             ConnectionState::Cleanup(_) => write!(f, "Cleanup"),
             ConnectionState::Closed => write!(f, "Closed"),
             ConnectionState::Poisoned => write!(f, "Poisoned"),
@@ -237,7 +240,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionState<T> {
                         return Poll::Ready(Some(Ok(stream)));
                     }
                     Poll::Ready(Ok(Event::CloseRequested { reply })) => {
-                        *self = ConnectionState::Closing(active.close(reply).boxed());
+                        *self = ConnectionState::Closing {
+                            inner: active.close().boxed(),
+                            reply,
+                        };
                         continue;
                     }
                     Poll::Ready(Err(e)) => {
@@ -255,17 +261,25 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionState<T> {
                         return Poll::Pending;
                     }
                 },
-                ConnectionState::Closing(mut closing) => match closing.poll_unpin(cx) {
+                ConnectionState::Closing {
+                    inner: mut closing,
+                    reply,
+                } => match closing.poll_unpin(cx) {
                     Poll::Ready(Ok(())) => {
+                        let _ = reply.send(());
                         *self = ConnectionState::Closed;
                         return Poll::Ready(None);
                     }
                     Poll::Ready(Err(e)) => {
+                        let _ = reply.send(());
                         *self = ConnectionState::Closed;
                         return Poll::Ready(Some(Err(e)));
                     }
                     Poll::Pending => {
-                        *self = ConnectionState::Closing(closing);
+                        *self = ConnectionState::Closing {
+                            inner: closing,
+                            reply,
+                        };
                         return Poll::Pending;
                     }
                 },
@@ -408,7 +422,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     }
 
     /// Gracefully close the connection to the remote.
-    async fn close(mut self, reply: oneshot::Sender<()>) -> Result<()> {
+    async fn close(mut self) -> Result<()> {
         // Prevent more control commands being sent.
         self.control_receiver.close();
 
@@ -459,9 +473,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             .close()
             .await
             .or(Err(ConnectionError::Closed))?;
-
-        // We are done closing the connection.
-        let _ = reply.send(());
 
         Ok(())
     }
