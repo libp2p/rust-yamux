@@ -87,6 +87,7 @@
 //   command processing instead of having to scan the whole collection of
 //   `Stream`s on each loop iteration, which is not great.
 
+mod closing;
 mod control;
 mod stream;
 
@@ -109,6 +110,7 @@ use std::collections::VecDeque;
 use std::task::Context;
 use std::{fmt, sync::Arc, task::Poll};
 
+use crate::connection::closing::Closing;
 pub use control::Control;
 pub use stream::{Packet, State, Stream};
 
@@ -219,7 +221,7 @@ enum ConnectionState<T> {
     Active(Active<T>),
     /// Our user requested to shutdown the connection, we are working on it.
     Closing {
-        inner: BoxFuture<'static, Result<()>>,
+        inner: Closing<T>,
         reply: oneshot::Sender<()>,
     },
     /// An error occurred and we are cleaning up our resources.
@@ -256,7 +258,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionState<T> {
                         }
                         Poll::Ready(Some(ControlCommand::CloseConnection(reply))) => {
                             *self = ConnectionState::Closing {
-                                inner: active.close().boxed(),
+                                inner: active.close(),
                                 reply,
                             };
                             continue;
@@ -449,59 +451,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     }
 
     /// Gracefully close the connection to the remote.
-    async fn close(mut self) -> Result<()> {
-        // Prevent more control commands being sent.
-        self.control_receiver.close();
-
-        // Drain all remaining control commands.
-        while let Some(cmd) = self.control_receiver.next().await {
-            match cmd {
-                ControlCommand::OpenStream(reply) => {
-                    let _ = reply.send(Err(ConnectionError::Closed));
-                }
-                ControlCommand::CloseConnection(reply) => {
-                    let _ = reply.send(());
-                }
-            }
-        }
-
-        // Prevent any more work being sent from streams.
-        self.stream_receiver.close();
-
-        // Drain all remaining stream commands.
-        while let Some(cmd) = self.stream_receiver.next().await {
-            match cmd {
-                StreamCommand::SendFrame(frame) => {
-                    self.on_send_frame(frame);
-                }
-                StreamCommand::CloseStream { id, ack } => {
-                    self.on_close_stream(id, ack);
-                }
-            }
-        }
-
-        // Send `GoAway` frame.
-        log::debug!("{}: sending term", self.id);
-        self.pending_frames.push_back(Frame::term().into());
-
-        // Drain all remaining frames.
-        while let Some(pending_frame) = self.pending_frames.pop_front() {
-            self.socket
-                .feed(pending_frame)
-                .await
-                .or(Err(ConnectionError::Closed))?;
-        }
-
-        self.socket.flush().await.or(Err(ConnectionError::Closed))?;
-
-        // Close the socket.
-        self.socket
-            .get_mut()
-            .close()
-            .await
-            .or(Err(ConnectionError::Closed))?;
-
-        Ok(())
+    fn close(self) -> Closing<T> {
+        Closing::new(
+            self.control_receiver,
+            self.stream_receiver,
+            self.pending_frames,
+            self.socket,
+        )
     }
 
     /// Cleanup all our resources.
