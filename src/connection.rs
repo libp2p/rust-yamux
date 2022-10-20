@@ -630,13 +630,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
     fn on_close_stream(&mut self, id: StreamId, ack: bool) {
         log::trace!("{}/{}: sending close", self.id, id);
-        let mut header = Header::data(id, 0);
-        header.fin();
-        if ack {
-            header.ack()
-        }
-        let frame = Frame::new(header);
-        self.pending_frames.push_back(frame.into());
+        self.pending_frames
+            .push_back(Frame::close_stream(id, ack).into());
     }
 
     /// Process the result of reading from the socket.
