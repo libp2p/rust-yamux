@@ -202,6 +202,18 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Connection<T> {
     }
 }
 
+impl<T> Drop for Connection<T> {
+    fn drop(&mut self) {
+        match &mut self.inner {
+            ConnectionState::Active(active) => active.drop_all_streams(),
+            ConnectionState::Closing { .. } => {}
+            ConnectionState::Cleanup(_) => {}
+            ConnectionState::Closed => {}
+            ConnectionState::Poisoned => {}
+        }
+    }
+}
+
 enum ConnectionState<T> {
     /// The connection is alive and healthy.
     Active(Active<T>),
@@ -1025,12 +1037,6 @@ impl<T> Active<T> {
                 w.wake()
             }
         }
-    }
-}
-
-impl<T> Drop for Active<T> {
-    fn drop(&mut self) {
-        self.drop_all_streams()
     }
 }
 
