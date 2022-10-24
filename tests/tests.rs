@@ -367,7 +367,7 @@ async fn echo_server(c: Connection<Compat<TcpStream>>) {
     yamux::into_stream(c)
         .try_for_each_concurrent(None, |mut stream| async move {
             {
-                let (mut r, mut w) = futures::io::AsyncReadExt::split(&mut stream);
+                let (mut r, mut w) = AsyncReadExt::split(&mut stream);
                 futures::io::copy(&mut r, &mut w).await?;
             }
             stream.close().await?;
