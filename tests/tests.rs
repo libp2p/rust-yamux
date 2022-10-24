@@ -48,7 +48,7 @@ fn prop_config_send_recv_single() {
             let client = async {
                 let control = client.control();
                 task::spawn(noop_server(client));
-                send_recv_single(control, msgs).await?;
+                send_on_single_stream(control, msgs).await?;
 
                 Ok(())
             };
@@ -79,7 +79,7 @@ fn prop_config_send_recv_multi() {
             let client = async {
                 let control = client.control();
                 task::spawn(noop_server(client));
-                send_recv(control, msgs).await?;
+                send_on_separate_streams(control, msgs).await?;
 
                 Ok(())
             };
@@ -108,7 +108,7 @@ fn prop_send_recv() {
             let client = async {
                 let control = client.control();
                 task::spawn(noop_server(client));
-                send_recv(control, msgs).await?;
+                send_on_separate_streams(control, msgs).await?;
 
                 Ok(())
             };
@@ -377,9 +377,8 @@ where
         .await;
 }
 
-/// For each message in `iter`, open a new stream, send the message and
-/// collect the response. The sequence of responses will be returned.
-async fn send_recv(
+/// Send all messages, opening a new stream for each one.
+async fn send_on_separate_streams(
     mut control: Control,
     iter: impl IntoIterator<Item = Msg>,
 ) -> Result<(), ConnectionError> {
@@ -397,9 +396,8 @@ async fn send_recv(
     Ok(())
 }
 
-/// Open a stream, send all messages and collect the responses. The
-/// sequence of responses will be returned.
-async fn send_recv_single(
+/// Send all messages, using only a single stream.
+async fn send_on_single_stream(
     mut control: Control,
     iter: impl IntoIterator<Item = Msg>,
 ) -> Result<(), ConnectionError> {
