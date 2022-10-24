@@ -1,7 +1,7 @@
 use crate::connection::Result;
-use crate::connection::{ControlCommand, StreamCommand};
+use crate::connection::StreamCommand;
+use crate::frame;
 use crate::frame::Frame;
-use crate::{frame, ConnectionError};
 use futures::channel::mpsc;
 use futures::stream::Fuse;
 use futures::{ready, AsyncRead, AsyncWrite, SinkExt, StreamExt};
@@ -14,7 +14,6 @@ use std::task::{Context, Poll};
 #[must_use]
 pub struct Closing<T> {
     state: State,
-    control_receiver: mpsc::Receiver<ControlCommand>,
     stream_receiver: mpsc::Receiver<StreamCommand>,
     pending_frames: VecDeque<Frame<()>>,
     socket: Fuse<frame::Io<T>>,
@@ -25,14 +24,12 @@ where
     T: AsyncRead + AsyncWrite + Unpin,
 {
     pub(crate) fn new(
-        control_receiver: mpsc::Receiver<ControlCommand>,
         stream_receiver: mpsc::Receiver<StreamCommand>,
         pending_frames: VecDeque<Frame<()>>,
         socket: Fuse<frame::Io<T>>,
     ) -> Self {
         Self {
-            state: State::ClosingControlReceiver,
-            control_receiver,
+            state: State::ClosingStreamReceiver,
             stream_receiver,
             pending_frames,
             socket,
@@ -51,21 +48,6 @@ where
 
         loop {
             match this.state {
-                State::ClosingControlReceiver => {
-                    this.control_receiver.close();
-                    this.state = State::DrainingControlReceiver;
-                }
-                State::DrainingControlReceiver => {
-                    match ready!(this.control_receiver.poll_next_unpin(cx)) {
-                        Some(ControlCommand::OpenStream(reply)) => {
-                            let _ = reply.send(Err(ConnectionError::Closed));
-                        }
-                        Some(ControlCommand::CloseConnection(reply)) => {
-                            let _ = reply.send(());
-                        }
-                        None => this.state = State::ClosingStreamReceiver,
-                    }
-                }
                 State::ClosingStreamReceiver => {
                     this.stream_receiver.close();
                     this.state = State::DrainingStreamReceiver;
@@ -106,9 +88,7 @@ where
     }
 }
 
-pub enum State {
-    ClosingControlReceiver,
-    DrainingControlReceiver,
+enum State {
     ClosingStreamReceiver,
     DrainingStreamReceiver,
     SendingTermFrame,

@@ -98,21 +98,15 @@ use crate::{
     frame::{self, Frame},
     Config, WindowUpdateMode, DEFAULT_CREDIT,
 };
-use futures::{
-    channel::{mpsc, oneshot},
-    future::{self, Either},
-    prelude::*,
-    sink::SinkExt,
-    stream::Fuse,
-};
+use cleanup::Cleanup;
+use closing::Closing;
+use futures::{channel::mpsc, future::Either, prelude::*, sink::SinkExt, stream::Fuse};
 use nohash_hasher::IntMap;
 use std::collections::VecDeque;
 use std::task::Context;
 use std::{fmt, sync::Arc, task::Poll};
 
-use crate::connection::cleanup::Cleanup;
-use crate::connection::closing::Closing;
-pub use control::Control;
+pub use control::{Control, ControlledConnection};
 pub use stream::{Packet, State, Stream};
 
 /// Arbitrary limit of our internal command channels.
@@ -169,39 +163,148 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         }
     }
 
-    /// Get a controller for this connection.
-    pub fn control(&self) -> Result<Control> {
-        match &self.inner {
-            ConnectionState::Active(active) => Ok(active.control()),
-            ConnectionState::Closed
-            | ConnectionState::Closing { .. }
-            | ConnectionState::Cleanup(_) => Err(ConnectionError::Closed),
-            ConnectionState::Poisoned => unreachable!(),
+    /// Poll for a new outbound stream.
+    ///
+    /// This function will fail if the current state does not allow opening new outbound streams.
+    pub fn poll_new_outbound(&mut self, cx: &mut Context<'_>) -> Poll<Result<Stream>> {
+        loop {
+            match std::mem::replace(&mut self.inner, ConnectionState::Poisoned) {
+                ConnectionState::Active(mut active) => match active.new_outbound() {
+                    Ok(stream) => {
+                        self.inner = ConnectionState::Active(active);
+                        return Poll::Ready(Ok(stream));
+                    }
+                    Err(e) => {
+                        self.inner = ConnectionState::Cleanup(active.cleanup(e));
+                        continue;
+                    }
+                },
+                ConnectionState::Closing(mut inner) => match inner.poll_unpin(cx) {
+                    Poll::Ready(Ok(())) => {
+                        self.inner = ConnectionState::Closed;
+                        return Poll::Ready(Err(ConnectionError::Closed));
+                    }
+                    Poll::Ready(Err(e)) => {
+                        self.inner = ConnectionState::Closed;
+                        return Poll::Ready(Err(e));
+                    }
+                    Poll::Pending => {
+                        self.inner = ConnectionState::Closing(inner);
+                        return Poll::Pending;
+                    }
+                },
+                ConnectionState::Cleanup(mut inner) => match inner.poll_unpin(cx) {
+                    Poll::Ready(e) => {
+                        self.inner = ConnectionState::Closed;
+                        return Poll::Ready(Err(e));
+                    }
+                    Poll::Pending => {
+                        self.inner = ConnectionState::Cleanup(inner);
+                        return Poll::Pending;
+                    }
+                },
+                ConnectionState::Closed => {
+                    self.inner = ConnectionState::Closed;
+                    return Poll::Ready(Err(ConnectionError::Closed));
+                }
+                ConnectionState::Poisoned => unreachable!(),
+            }
         }
     }
 
-    /// Get the next incoming stream, opened by the remote.
+    /// Poll for the next inbound stream.
     ///
-    /// This must be called repeatedly in order to make progress.
-    /// Once `Ok(None)` or `Err(_)` is returned the connection is
-    /// considered closed and no further invocation of this method
-    /// must be attempted.
-    ///
-    /// # Cancellation
-    ///
-    /// This function is cancellation-safe.
-    pub async fn next_stream(&mut self) -> Result<Option<Stream>> {
-        future::poll_fn(|cx| self.inner.poll_next(cx))
-            .await
-            .transpose()
+    /// If this function returns `None`, the underlying connection is closed.
+    pub fn poll_next_inbound(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<Stream>>> {
+        loop {
+            match std::mem::replace(&mut self.inner, ConnectionState::Poisoned) {
+                ConnectionState::Active(mut active) => match active.poll(cx) {
+                    Poll::Ready(Ok(stream)) => {
+                        self.inner = ConnectionState::Active(active);
+                        return Poll::Ready(Some(Ok(stream)));
+                    }
+                    Poll::Ready(Err(e)) => {
+                        self.inner = ConnectionState::Cleanup(active.cleanup(e));
+                        continue;
+                    }
+                    Poll::Pending => {
+                        self.inner = ConnectionState::Active(active);
+                        return Poll::Pending;
+                    }
+                },
+                ConnectionState::Closing(mut closing) => match closing.poll_unpin(cx) {
+                    Poll::Ready(Ok(())) => {
+                        self.inner = ConnectionState::Closed;
+                        return Poll::Ready(None);
+                    }
+                    Poll::Ready(Err(e)) => {
+                        self.inner = ConnectionState::Closed;
+                        return Poll::Ready(Some(Err(e)));
+                    }
+                    Poll::Pending => {
+                        self.inner = ConnectionState::Closing(closing);
+                        return Poll::Pending;
+                    }
+                },
+                ConnectionState::Cleanup(mut cleanup) => match cleanup.poll_unpin(cx) {
+                    Poll::Ready(ConnectionError::Closed) => {
+                        self.inner = ConnectionState::Closed;
+                        return Poll::Ready(None);
+                    }
+                    Poll::Ready(other) => {
+                        self.inner = ConnectionState::Closed;
+                        return Poll::Ready(Some(Err(other)));
+                    }
+                    Poll::Pending => {
+                        self.inner = ConnectionState::Cleanup(cleanup);
+                        return Poll::Pending;
+                    }
+                },
+                ConnectionState::Closed => {
+                    self.inner = ConnectionState::Closed;
+                    return Poll::Ready(None);
+                }
+                ConnectionState::Poisoned => unreachable!(),
+            }
+        }
     }
 
-    /// Have the underlying connection make progress.
-    ///
-    /// If this returns `Poll::Ready(None)`, the connection is closed and does no longer
-    /// need to be polled.
-    pub fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<Stream>>> {
-        self.inner.poll_next(cx)
+    /// Close the connection.
+    pub fn poll_close(&mut self, cx: &mut Context<'_>) -> Poll<Result<()>> {
+        loop {
+            match std::mem::replace(&mut self.inner, ConnectionState::Poisoned) {
+                ConnectionState::Active(active) => {
+                    self.inner = ConnectionState::Closing(active.close());
+                }
+                ConnectionState::Closing(mut inner) => match inner.poll_unpin(cx)? {
+                    Poll::Ready(()) => {
+                        self.inner = ConnectionState::Closed;
+                    }
+                    Poll::Pending => {
+                        self.inner = ConnectionState::Closing(inner);
+                        return Poll::Pending;
+                    }
+                },
+                ConnectionState::Cleanup(mut cleanup) => match cleanup.poll_unpin(cx) {
+                    Poll::Ready(reason) => {
+                        log::warn!("Failure while closing connection: {}", reason);
+                        self.inner = ConnectionState::Closed;
+                        return Poll::Ready(Ok(()));
+                    }
+                    Poll::Pending => {
+                        self.inner = ConnectionState::Cleanup(cleanup);
+                        return Poll::Pending;
+                    }
+                },
+                ConnectionState::Closed => {
+                    self.inner = ConnectionState::Closed;
+                    return Poll::Ready(Ok(()));
+                }
+                ConnectionState::Poisoned => {
+                    unreachable!()
+                }
+            }
+        }
     }
 }
 
@@ -209,7 +312,7 @@ impl<T> Drop for Connection<T> {
     fn drop(&mut self) {
         match &mut self.inner {
             ConnectionState::Active(active) => active.drop_all_streams(),
-            ConnectionState::Closing { .. } => {}
+            ConnectionState::Closing(_) => {}
             ConnectionState::Cleanup(_) => {}
             ConnectionState::Closed => {}
             ConnectionState::Poisoned => {}
@@ -221,10 +324,7 @@ enum ConnectionState<T> {
     /// The connection is alive and healthy.
     Active(Active<T>),
     /// Our user requested to shutdown the connection, we are working on it.
-    Closing {
-        inner: Closing<T>,
-        reply: oneshot::Sender<()>,
-    },
+    Closing(Closing<T>),
     /// An error occurred and we are cleaning up our resources.
     Cleanup(Cleanup),
     /// The connection is closed.
@@ -237,90 +337,10 @@ impl<T> fmt::Debug for ConnectionState<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             ConnectionState::Active(_) => write!(f, "Active"),
-            ConnectionState::Closing { .. } => write!(f, "Closing"),
+            ConnectionState::Closing(_) => write!(f, "Closing"),
             ConnectionState::Cleanup(_) => write!(f, "Cleanup"),
             ConnectionState::Closed => write!(f, "Closed"),
             ConnectionState::Poisoned => write!(f, "Poisoned"),
-        }
-    }
-}
-
-impl<T: AsyncRead + AsyncWrite + Unpin> ConnectionState<T> {
-    fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<Stream>>> {
-        loop {
-            match std::mem::replace(self, ConnectionState::Poisoned) {
-                ConnectionState::Active(mut active) => {
-                    match active.control_receiver.poll_next_unpin(cx) {
-                        Poll::Ready(Some(ControlCommand::OpenStream(reply))) => {
-                            active.on_open_stream(reply)?;
-
-                            *self = ConnectionState::Active(active);
-                            continue;
-                        }
-                        Poll::Ready(Some(ControlCommand::CloseConnection(reply))) => {
-                            *self = ConnectionState::Closing {
-                                inner: active.close(),
-                                reply,
-                            };
-                            continue;
-                        }
-                        Poll::Ready(None) => {
-                            debug_assert!(false, "Only closed during shutdown")
-                        }
-                        _ => {}
-                    }
-
-                    match active.poll(cx) {
-                        Poll::Ready(Ok(stream)) => {
-                            *self = ConnectionState::Active(active);
-                            return Poll::Ready(Some(Ok(stream)));
-                        }
-                        Poll::Ready(Err(e)) => *self = ConnectionState::Cleanup(active.cleanup(e)),
-                        Poll::Pending => {
-                            *self = ConnectionState::Active(active);
-                            return Poll::Pending;
-                        }
-                    }
-                }
-                ConnectionState::Closing {
-                    inner: mut closing,
-                    reply,
-                } => match closing.poll_unpin(cx) {
-                    Poll::Ready(Ok(())) => {
-                        let _ = reply.send(());
-                        *self = ConnectionState::Closed;
-                        return Poll::Ready(None);
-                    }
-                    Poll::Ready(Err(e)) => {
-                        let _ = reply.send(());
-                        *self = ConnectionState::Closed;
-                        return Poll::Ready(Some(Err(e)));
-                    }
-                    Poll::Pending => {
-                        *self = ConnectionState::Closing {
-                            inner: closing,
-                            reply,
-                        };
-                        return Poll::Pending;
-                    }
-                },
-                ConnectionState::Cleanup(mut cleanup) => match cleanup.poll_unpin(cx) {
-                    Poll::Ready(ConnectionError::Closed) => {
-                        *self = ConnectionState::Closed;
-                        return Poll::Ready(None);
-                    }
-                    Poll::Ready(other) => {
-                        *self = ConnectionState::Closed;
-                        return Poll::Ready(Some(Err(other)));
-                    }
-                    Poll::Pending => {
-                        *self = ConnectionState::Cleanup(cleanup);
-                        return Poll::Pending;
-                    }
-                },
-                ConnectionState::Closed => return Poll::Ready(None),
-                ConnectionState::Poisoned => unreachable!(),
-            }
         }
     }
 }
@@ -337,22 +357,11 @@ struct Active<T> {
     socket: Fuse<frame::Io<T>>,
     next_id: u32,
     streams: IntMap<StreamId, Stream>,
-    control_sender: mpsc::Sender<ControlCommand>,
-    control_receiver: mpsc::Receiver<ControlCommand>,
     stream_sender: mpsc::Sender<StreamCommand>,
     stream_receiver: mpsc::Receiver<StreamCommand>,
     garbage: Vec<StreamId>,
     // see `Connection::garbage_collect()`
     pending_frames: VecDeque<Frame<()>>,
-}
-
-/// `Control` to `Connection` commands.
-#[derive(Debug)]
-pub(crate) enum ControlCommand {
-    /// Open a new stream to the remote end.
-    OpenStream(oneshot::Sender<Result<Stream>>),
-    /// Close the whole connection.
-    CloseConnection(oneshot::Sender<()>),
 }
 
 /// `Stream` to `Connection` commands.
@@ -410,7 +419,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         let id = Id::random();
         log::debug!("new connection: {} ({:?})", id, mode);
         let (stream_sender, stream_receiver) = mpsc::channel(MAX_COMMAND_BACKLOG);
-        let (control_sender, control_receiver) = mpsc::channel(MAX_COMMAND_BACKLOG);
         let socket = frame::Io::new(id, socket, cfg.max_buffer_size).fuse();
         Active {
             id,
@@ -418,8 +426,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             config: Arc::new(cfg),
             socket,
             streams: IntMap::default(),
-            control_sender,
-            control_receiver,
             stream_sender,
             stream_receiver,
             next_id: match mode {
@@ -431,18 +437,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         }
     }
 
-    fn control(&self) -> Control {
-        Control::new(self.control_sender.clone())
-    }
-
     /// Gracefully close the connection to the remote.
     fn close(self) -> Closing<T> {
-        Closing::new(
-            self.control_receiver,
-            self.stream_receiver,
-            self.pending_frames,
-            self.socket,
-        )
+        Closing::new(self.stream_receiver, self.pending_frames, self.socket)
     }
 
     /// Cleanup all our resources.
@@ -451,7 +448,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     fn cleanup(mut self, error: ConnectionError) -> Cleanup {
         self.drop_all_streams();
 
-        Cleanup::new(self.control_receiver, self.stream_receiver, error)
+        Cleanup::new(self.stream_receiver, error)
     }
 
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Result<Stream>> {
@@ -503,11 +500,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         }
     }
 
-    fn on_open_stream(&mut self, reply: oneshot::Sender<Result<Stream>>) -> Result<()> {
+    fn new_outbound(&mut self) -> Result<Stream> {
         if self.streams.len() >= self.config.max_num_streams {
             log::error!("{}: maximum number of streams reached", self.id);
-            let _ = reply.send(Err(ConnectionError::TooManyStreams));
-            return Ok(());
+            return Err(ConnectionError::TooManyStreams);
         }
 
         log::trace!("{}: creating new outbound stream", self.id);
@@ -533,21 +529,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             stream
         };
 
-        if reply.send(Ok(stream.clone())).is_ok() {
-            log::debug!("{}: new outbound {} of {}", self.id, stream, self);
-            self.streams.insert(id, stream);
-        } else {
-            log::debug!("{}: open stream {} has been cancelled", self.id, id);
-            if extra_credit > 0 {
-                let mut header = Header::data(id, 0);
-                header.rst();
-                let frame = Frame::new(header);
-                log::trace!("{}/{}: sending reset", self.id, id);
-                self.pending_frames.push_back(frame.into());
-            }
-        }
+        log::debug!("{}: new outbound {} of {}", self.id, stream, self);
+        self.streams.insert(id, stream.clone());
 
-        Ok(())
+        Ok(stream)
     }
 
     fn on_send_frame(&mut self, frame: Frame<Either<Data, WindowUpdate>>) {
@@ -958,12 +943,4 @@ impl<T> Active<T> {
             }
         }
     }
-}
-
-/// Turn a Yamux [`Connection`] into a [`futures::Stream`].
-pub fn into_stream<T>(mut c: Connection<T>) -> impl futures::stream::Stream<Item = Result<Stream>>
-where
-    T: AsyncRead + AsyncWrite + Unpin,
-{
-    futures::stream::poll_fn(move |cx| c.poll_next(cx))
 }

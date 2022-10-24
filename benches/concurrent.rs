@@ -13,7 +13,7 @@ use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Through
 use futures::{channel::mpsc, future, io::AsyncReadExt, prelude::*};
 use std::sync::Arc;
 use tokio::{runtime::Runtime, task};
-use yamux::{Config, Connection, Mode};
+use yamux::{Config, Connection, Control, Mode};
 
 criterion_group!(benches, concurrent);
 criterion_main!(benches);
@@ -92,7 +92,10 @@ async fn oneway(
     let server = async move {
         let mut connection = Connection::new(server, config(), Mode::Server);
 
-        while let Some(mut stream) = connection.next_stream().await.unwrap() {
+        while let Some(Ok(mut stream)) = stream::poll_fn(|cx| connection.poll_next_inbound(cx))
+            .next()
+            .await
+        {
             let tx = tx.clone();
 
             task::spawn(async move {
@@ -113,8 +116,9 @@ async fn oneway(
     task::spawn(server);
 
     let conn = Connection::new(client, config(), Mode::Client);
-    let mut ctrl = conn.control().unwrap();
-    task::spawn(yamux::into_stream(conn).for_each(|r| {
+    let (mut ctrl, conn) = Control::new(conn);
+
+    task::spawn(conn.for_each(|r| {
         r.unwrap();
         future::ready(())
     }));

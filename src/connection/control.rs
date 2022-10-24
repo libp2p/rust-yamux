@@ -8,56 +8,40 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-use super::ControlCommand;
-use crate::{error::ConnectionError, Stream};
+use crate::connection::MAX_COMMAND_BACKLOG;
+use crate::{error::ConnectionError, Connection, Stream};
 use futures::{
     channel::{mpsc, oneshot},
     prelude::*,
-    ready,
 };
-use std::{
-    pin::Pin,
-    task::{Context, Poll},
-};
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 type Result<T> = std::result::Result<T, ConnectionError>;
 
-/// The Yamux `Connection` controller.
+/// A Yamux [`Connection`] controller.
 ///
-/// While a Yamux connection makes progress via its `next_stream` method,
-/// this controller can be used to concurrently direct the connection,
-/// e.g. to open a new stream to the remote or to close the connection.
+/// This presents an alternative API for using a yamux [`Connection`].
 ///
-/// The possible operations are implemented as async methods and redundantly
-/// as poll-based variants which may be useful inside of other poll based
-/// environments such as certain trait implementations.
-#[derive(Debug)]
+/// A [`Control`] communicates with a [`ControlledConnection`] via a channel. This allows
+/// a [`Control`] to be cloned and shared between tasks and threads.
+#[derive(Clone, Debug)]
 pub struct Control {
-    /// Command channel to `Connection`.
+    /// Command channel to [`ControlledConnection`].
     sender: mpsc::Sender<ControlCommand>,
-    /// Pending state of `poll_open_stream`.
-    pending_open: Option<oneshot::Receiver<Result<Stream>>>,
-    /// Pending state of `poll_close`.
-    pending_close: Option<oneshot::Receiver<()>>,
-}
-
-impl Clone for Control {
-    fn clone(&self) -> Self {
-        Control {
-            sender: self.sender.clone(),
-            pending_open: None,
-            pending_close: None,
-        }
-    }
 }
 
 impl Control {
-    pub(crate) fn new(sender: mpsc::Sender<ControlCommand>) -> Self {
-        Control {
-            sender,
-            pending_open: None,
-            pending_close: None,
-        }
+    pub fn new<T>(connection: Connection<T>) -> (Self, ControlledConnection<T>) {
+        let (sender, receiver) = mpsc::channel(MAX_COMMAND_BACKLOG);
+
+        let control = Control { sender };
+        let connection = ControlledConnection {
+            state: State::Idle(connection),
+            commands: receiver,
+        };
+
+        (control, connection)
     }
 
     /// Open a new stream to the remote.
@@ -84,66 +68,181 @@ impl Control {
         let _ = rx.await;
         Ok(())
     }
+}
 
-    /// [`Poll`] based alternative to [`Control::open_stream`].
-    pub fn poll_open_stream(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<Stream>> {
+/// Wraps a [`Connection`] which can be controlled with a [`Control`].
+pub struct ControlledConnection<T> {
+    state: State<T>,
+    commands: mpsc::Receiver<ControlCommand>,
+}
+
+impl<T> ControlledConnection<T>
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<Stream>>> {
         loop {
-            match self.pending_open.take() {
-                None => {
-                    ready!(self.sender.poll_ready(cx)?);
-                    let (tx, rx) = oneshot::channel();
-                    self.sender.start_send(ControlCommand::OpenStream(tx))?;
-                    self.pending_open = Some(rx)
-                }
-                Some(mut rx) => match rx.poll_unpin(cx)? {
-                    Poll::Ready(result) => return Poll::Ready(result),
-                    Poll::Pending => {
-                        self.pending_open = Some(rx);
-                        return Poll::Pending;
+            match std::mem::replace(&mut self.state, State::Poisoned) {
+                State::Idle(mut connection) => {
+                    match connection.poll_next_inbound(cx) {
+                        Poll::Ready(maybe_stream) => {
+                            self.state = State::Idle(connection);
+                            return Poll::Ready(maybe_stream);
+                        }
+                        Poll::Pending => {}
                     }
-                },
-            }
-        }
-    }
 
-    /// Abort an ongoing open stream operation started by `poll_open_stream`.
-    pub fn abort_open_stream(&mut self) {
-        self.pending_open = None
-    }
-
-    /// [`Poll`] based alternative to [`Control::close`].
-    pub fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<()>> {
-        loop {
-            match self.pending_close.take() {
-                None => {
-                    if ready!(self.sender.poll_ready(cx)).is_err() {
-                        // The receiver is closed which means the connection is already closed.
-                        return Poll::Ready(Ok(()));
-                    }
-                    let (tx, rx) = oneshot::channel();
-                    if let Err(e) = self.sender.start_send(ControlCommand::CloseConnection(tx)) {
-                        if e.is_full() {
+                    match self.commands.poll_next_unpin(cx) {
+                        Poll::Ready(Some(ControlCommand::OpenStream(reply))) => {
+                            self.state = State::OpeningNewStream { reply, connection };
                             continue;
                         }
-                        debug_assert!(e.is_disconnected());
-                        // The receiver is closed which means the connection is already closed.
-                        return Poll::Ready(Ok(()));
+                        Poll::Ready(Some(ControlCommand::CloseConnection(reply))) => {
+                            self.commands.close();
+
+                            self.state = State::Closing {
+                                reply: Some(reply),
+                                inner: Closing::DrainingControlCommands { connection },
+                            };
+                            continue;
+                        }
+                        Poll::Ready(None) => {
+                            // Last `Control` sender was dropped, close te connection.
+                            self.state = State::Closing {
+                                reply: None,
+                                inner: Closing::ClosingConnection { connection },
+                            };
+                            continue;
+                        }
+                        Poll::Pending => {}
                     }
-                    self.pending_close = Some(rx)
+
+                    self.state = State::Idle(connection);
+                    return Poll::Pending;
                 }
-                Some(mut rx) => match rx.poll_unpin(cx) {
-                    Poll::Ready(Ok(())) => return Poll::Ready(Ok(())),
-                    Poll::Ready(Err(oneshot::Canceled)) => {
-                        // A dropped `oneshot::Sender` means the `Connection` is gone,
-                        // which is `Ok`ay for us here.
-                        return Poll::Ready(Ok(()));
+                State::OpeningNewStream {
+                    reply,
+                    mut connection,
+                } => match connection.poll_new_outbound(cx) {
+                    Poll::Ready(stream) => {
+                        let _ = reply.send(stream);
+
+                        self.state = State::Idle(connection);
+                        continue;
                     }
                     Poll::Pending => {
-                        self.pending_close = Some(rx);
+                        self.state = State::OpeningNewStream { reply, connection };
                         return Poll::Pending;
                     }
                 },
+                State::Closing {
+                    reply,
+                    inner: Closing::DrainingControlCommands { connection },
+                } => match self.commands.poll_next_unpin(cx) {
+                    Poll::Ready(Some(ControlCommand::OpenStream(new_reply))) => {
+                        let _ = new_reply.send(Err(ConnectionError::Closed));
+
+                        self.state = State::Closing {
+                            reply,
+                            inner: Closing::DrainingControlCommands { connection },
+                        };
+                        continue;
+                    }
+                    Poll::Ready(Some(ControlCommand::CloseConnection(new_reply))) => {
+                        let _ = new_reply.send(());
+
+                        self.state = State::Closing {
+                            reply,
+                            inner: Closing::DrainingControlCommands { connection },
+                        };
+                        continue;
+                    }
+                    Poll::Ready(None) => {
+                        self.state = State::Closing {
+                            reply,
+                            inner: Closing::ClosingConnection { connection },
+                        };
+                        continue;
+                    }
+                    Poll::Pending => {
+                        self.state = State::Closing {
+                            reply,
+                            inner: Closing::DrainingControlCommands { connection },
+                        };
+                        return Poll::Pending;
+                    }
+                },
+                State::Closing {
+                    reply,
+                    inner: Closing::ClosingConnection { mut connection },
+                } => match connection.poll_close(cx) {
+                    Poll::Ready(Ok(())) | Poll::Ready(Err(ConnectionError::Closed)) => {
+                        if let Some(reply) = reply {
+                            let _ = reply.send(());
+                        }
+                        return Poll::Ready(None);
+                    }
+                    Poll::Ready(Err(other)) => {
+                        if let Some(reply) = reply {
+                            let _ = reply.send(());
+                        }
+                        return Poll::Ready(Some(Err(other)));
+                    }
+                    Poll::Pending => {
+                        self.state = State::Closing {
+                            reply,
+                            inner: Closing::ClosingConnection { connection },
+                        };
+                        return Poll::Pending;
+                    }
+                },
+                State::Poisoned => unreachable!(),
             }
         }
+    }
+}
+
+#[derive(Debug)]
+enum ControlCommand {
+    /// Open a new stream to the remote end.
+    OpenStream(oneshot::Sender<Result<Stream>>),
+    /// Close the whole connection.
+    CloseConnection(oneshot::Sender<()>),
+}
+
+/// The state of a [`ControlledConnection`].
+enum State<T> {
+    Idle(Connection<T>),
+    OpeningNewStream {
+        reply: oneshot::Sender<Result<Stream>>,
+        connection: Connection<T>,
+    },
+    Closing {
+        /// A channel to the [`Control`] in case the close was requested. `None` if we are closing because the last [`Control`] was dropped.
+        reply: Option<oneshot::Sender<()>>,
+        inner: Closing<T>,
+    },
+    Poisoned,
+}
+
+/// A sub-state of our larger state machine for a [`ControlledConnection`].
+///
+/// Closing connection involves two steps:
+///
+/// 1. Draining and answered all remaining [`ControlCommands`].
+/// 1. Closing the underlying [`Connection`].
+enum Closing<T> {
+    DrainingControlCommands { connection: Connection<T> },
+    ClosingConnection { connection: Connection<T> },
+}
+
+impl<T> futures::Stream for ControlledConnection<T>
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    type Item = Result<Stream>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.get_mut().poll_next(cx)
     }
 }

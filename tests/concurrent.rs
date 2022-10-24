@@ -19,7 +19,9 @@ use std::{
 use tokio::net::{TcpListener, TcpStream};
 use tokio::{net::TcpSocket, runtime::Runtime, task};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
-use yamux::{Config, Connection, ConnectionError, Mode, WindowUpdateMode};
+use yamux::{
+    Config, Connection, ConnectionError, Control, ControlledConnection, Mode, WindowUpdateMode,
+};
 
 const PAYLOAD_SIZE: usize = 128 * 1024;
 
@@ -36,7 +38,7 @@ fn concurrent_streams() {
 
             task::spawn(echo_server(server));
 
-            let mut ctrl = client.control().unwrap();
+            let (mut ctrl, client) = Control::new(client);
             task::spawn(noop_server(client));
 
             let result = (0..n_streams)
@@ -70,11 +72,11 @@ fn concurrent_streams() {
 }
 
 /// For each incoming stream of `c` echo back to the sender.
-async fn echo_server<T>(c: Connection<T>) -> Result<(), ConnectionError>
+async fn echo_server<T>(mut c: Connection<T>) -> Result<(), ConnectionError>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    yamux::into_stream(c)
+    stream::poll_fn(|cx| c.poll_next_inbound(cx))
         .try_for_each_concurrent(None, |mut stream| async move {
             log::debug!("S: accepted new stream");
 
@@ -93,16 +95,15 @@ where
 }
 
 /// For each incoming stream, do nothing.
-async fn noop_server<T>(c: Connection<T>)
+async fn noop_server<T>(c: ControlledConnection<T>)
 where
-    T: AsyncRead + AsyncWrite + Unpin,
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    yamux::into_stream(c)
-        .for_each(|maybe_stream| {
-            drop(maybe_stream);
-            future::ready(())
-        })
-        .await;
+    c.for_each(|maybe_stream| {
+        drop(maybe_stream);
+        future::ready(())
+    })
+    .await;
 }
 
 /// Sends the given data on the provided stream, length-prefixed.

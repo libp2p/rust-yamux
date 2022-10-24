@@ -47,7 +47,7 @@ fn prop_config_send_recv_single() {
 
             let server = echo_server(server);
             let client = async {
-                let control = client.control().unwrap();
+                let (control, client) = Control::new(client);
                 task::spawn(noop_server(client));
                 send_on_single_stream(control, msgs).await?;
 
@@ -78,7 +78,7 @@ fn prop_config_send_recv_multi() {
 
             let server = echo_server(server);
             let client = async {
-                let control = client.control().unwrap();
+                let (control, client) = Control::new(client);
                 task::spawn(noop_server(client));
                 send_on_separate_streams(control, msgs).await?;
 
@@ -107,7 +107,7 @@ fn prop_send_recv() {
 
             let server = echo_server(server);
             let client = async {
-                let control = client.control().unwrap();
+                let (control, client) = Control::new(client);
                 task::spawn(noop_server(client));
                 send_on_separate_streams(control, msgs).await?;
 
@@ -134,7 +134,7 @@ fn prop_max_streams() {
 
             task::spawn(echo_server(server));
 
-            let mut control = client.control().unwrap();
+            let (mut control, client) = Control::new(client);
             task::spawn(noop_server(client));
 
             let mut v = Vec::new();
@@ -161,8 +161,9 @@ fn prop_send_recv_half_closed() {
 
             // Server should be able to write on a stream shutdown by the client.
             let server = async {
-                let mut first_stream =
-                    server.next_stream().await?.ok_or(ConnectionError::Closed)?;
+                let mut server = stream::poll_fn(move |cx| server.poll_next_inbound(cx));
+
+                let mut first_stream = server.next().await.ok_or(ConnectionError::Closed)??;
 
                 task::spawn(noop_server(server));
 
@@ -176,7 +177,7 @@ fn prop_send_recv_half_closed() {
 
             // Client should be able to read after shutting down the stream.
             let client = async {
-                let mut control = client.control().unwrap();
+                let (mut control, client) = Control::new(client);
                 task::spawn(noop_server(client));
 
                 let mut stream = control.open_stream().await?;
@@ -242,7 +243,7 @@ fn write_deadlock() {
     // Create and spawn a "client" that sends messages expected to be echoed
     // by the server.
     let client = Connection::new(client_endpoint, Config::default(), Mode::Client);
-    let mut ctrl = client.control().unwrap();
+    let (mut ctrl, client) = Control::new(client);
 
     // Continuously advance the Yamux connection of the client in a background task.
     pool.spawner()
@@ -346,11 +347,11 @@ async fn bind() -> io::Result<(TcpListener, SocketAddr)> {
 }
 
 /// For each incoming stream of `c` echo back to the sender.
-async fn echo_server<T>(c: Connection<T>) -> Result<(), ConnectionError>
+async fn echo_server<T>(mut c: Connection<T>) -> Result<(), ConnectionError>
 where
     T: AsyncRead + AsyncWrite + Unpin,
 {
-    yamux::into_stream(c)
+    stream::poll_fn(|cx| c.poll_next_inbound(cx))
         .try_for_each_concurrent(None, |mut stream| async move {
             {
                 let (mut r, mut w) = AsyncReadExt::split(&mut stream);
@@ -363,16 +364,12 @@ where
 }
 
 /// For each incoming stream, do nothing.
-async fn noop_server<T>(c: Connection<T>)
-where
-    T: AsyncRead + AsyncWrite + Unpin,
-{
-    yamux::into_stream(c)
-        .for_each(|maybe_stream| {
-            drop(maybe_stream);
-            future::ready(())
-        })
-        .await;
+async fn noop_server(c: impl Stream<Item = Result<yamux::Stream, yamux::ConnectionError>>) {
+    c.for_each(|maybe_stream| {
+        drop(maybe_stream);
+        future::ready(())
+    })
+    .await;
 }
 
 /// Send all messages, opening a new stream for each one.
