@@ -42,15 +42,13 @@ fn prop_config_send_recv_single() {
         msgs.insert(0, Msg(vec![1u8; yamux::DEFAULT_CREDIT as usize]));
 
         Runtime::new().unwrap().block_on(async move {
-            let iter = msgs.into_iter().map(|m| m.0);
-
             let (server, client) = connected_peers(cfg1, cfg2).await;
 
             let server = echo_server(server);
             let client = async {
                 let control = client.control();
                 task::spawn(noop_server(client));
-                send_recv_single(control, iter.clone())
+                send_recv_single(control, msgs.into_iter().map(|m| m.0))
                     .await
                     .expect("send_recv")
             };
@@ -75,15 +73,15 @@ fn prop_config_send_recv_multi() {
         msgs.insert(0, Msg(vec![1u8; yamux::DEFAULT_CREDIT as usize]));
 
         Runtime::new().unwrap().block_on(async move {
-            let iter = msgs.into_iter().map(|m| m.0);
-
             let (server, client) = connected_peers(cfg1, cfg2).await;
 
             let server = echo_server(server);
             let client = async {
                 let control = client.control();
                 task::spawn(noop_server(client));
-                send_recv(control, iter.clone()).await.expect("send_recv")
+                send_recv(control, msgs.into_iter().map(|m| m.0))
+                    .await
+                    .expect("send_recv")
             };
 
             futures::future::join(server, client).await.1;
@@ -104,15 +102,15 @@ fn prop_send_recv() {
         }
 
         Runtime::new().unwrap().block_on(async move {
-            let iter = msgs.into_iter().map(|m| m.0);
-
             let (server, client) = connected_peers(Config::default(), Config::default()).await;
 
             let server = echo_server(server);
             let client = async {
                 let control = client.control();
                 task::spawn(noop_server(client));
-                send_recv(control, iter.clone()).await.expect("send_recv")
+                send_recv(control, msgs.into_iter().map(|m| m.0))
+                    .await
+                    .expect("send_recv")
             };
 
             futures::future::join(server, client).await.1;
