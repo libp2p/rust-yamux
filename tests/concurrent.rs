@@ -52,18 +52,10 @@ async fn roundtrip(nstreams: usize, data: Arc<Vec<u8>>, tcp_buffer_sizes: Option
             let mut ctrl = ctrl.clone();
 
             task::spawn(async move {
-                let mut stream = ctrl.open_stream().await?;
+                let stream = ctrl.open_stream().await?;
                 log::debug!("C: opened new stream {}", stream.id());
-                stream
-                    .write_all(&(data.len() as u32).to_be_bytes()[..])
-                    .await?;
-                stream.write_all(&data).await?;
-                stream.close().await?;
-                log::debug!("C: {}: wrote {} bytes", stream.id(), data.len());
-                let mut frame = vec![0; data.len()];
-                stream.read_exact(&mut frame).await?;
-                log::debug!("C: {}: read {} bytes", stream.id(), frame.len());
-                assert_eq!(&data[..], &frame[..]);
+
+                send_recv_data(stream, &data).await?;
 
                 Ok::<(), ConnectionError>(())
             })
@@ -114,6 +106,25 @@ where
             future::ready(())
         })
         .await;
+}
+
+/// Sends the given data on the provided stream, length-prefixed.
+async fn send_recv_data(mut stream: yamux::Stream, data: &[u8]) -> io::Result<()> {
+    let len = (data.len() as u32).to_be_bytes();
+    stream.write_all(&len).await?;
+    stream.write_all(&data).await?;
+    stream.close().await?;
+
+    log::debug!("C: {}: wrote {} bytes", stream.id(), data.len());
+
+    let mut received = vec![0; data.len()];
+    stream.read_exact(&mut received).await?;
+
+    log::debug!("C: {}: read {} bytes", stream.id(), received.len());
+
+    assert_eq!(&data[..], &received[..]);
+
+    Ok(())
 }
 
 /// Send and receive buffer size for a TCP socket.
