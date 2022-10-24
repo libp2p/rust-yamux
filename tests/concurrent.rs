@@ -18,7 +18,7 @@ use std::{
 use tokio::net::{TcpListener, TcpStream};
 use tokio::{net::TcpSocket, runtime::Runtime, task};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
-use yamux::{Config, Connection, Mode, WindowUpdateMode};
+use yamux::{Config, Connection, ConnectionError, Mode, WindowUpdateMode};
 
 const PAYLOAD_SIZE: usize = 128 * 1024;
 
@@ -40,23 +40,7 @@ fn concurrent_streams() {
 async fn roundtrip(nstreams: usize, data: Arc<Vec<u8>>, tcp_buffer_sizes: Option<TcpBufferSizes>) {
     let (server, client) = connected_peers(tcp_buffer_sizes).await.unwrap();
 
-    let server = async move {
-        yamux::into_stream(server)
-            .try_for_each_concurrent(None, |mut stream| async move {
-                log::debug!("S: accepted new stream");
-                let mut len = [0; 4];
-                stream.read_exact(&mut len).await?;
-                let mut buf = vec![0; u32::from_be_bytes(len) as usize];
-                stream.read_exact(&mut buf).await?;
-                stream.write_all(&buf).await?;
-                stream.close().await?;
-                Ok(())
-            })
-            .await
-            .expect("server works")
-    };
-
-    task::spawn(server);
+    task::spawn(echo_server(server));
 
     let (tx, rx) = mpsc::unbounded();
     let mut ctrl = client.control();
@@ -89,6 +73,29 @@ async fn roundtrip(nstreams: usize, data: Arc<Vec<u8>>, tcp_buffer_sizes: Option
         .await;
     ctrl.close().await.expect("close connection");
     assert_eq!(nstreams, n)
+}
+
+/// For each incoming stream of `c` echo back to the sender.
+async fn echo_server<T>(c: Connection<T>) -> Result<(), ConnectionError>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+{
+    yamux::into_stream(c)
+        .try_for_each_concurrent(None, |mut stream| async move {
+            log::debug!("S: accepted new stream");
+
+            let mut len = [0; 4];
+            stream.read_exact(&mut len).await?;
+
+            let mut buf = vec![0; u32::from_be_bytes(len) as usize];
+
+            stream.read_exact(&mut buf).await?;
+            stream.write_all(&buf).await?;
+            stream.close().await?;
+
+            Ok(())
+        })
+        .await
 }
 
 /// Send and receive buffer size for a TCP socket.
