@@ -29,47 +29,44 @@ fn concurrent_streams() {
 
     fn prop(tcp_buffer_sizes: Option<TcpBufferSizes>) {
         let data = Arc::new(vec![0x42; PAYLOAD_SIZE]);
+        let n_streams = 1000;
 
-        Runtime::new()
-            .expect("new runtime")
-            .block_on(roundtrip(1000, data, tcp_buffer_sizes));
+        Runtime::new().expect("new runtime").block_on(async move {
+            let (server, client) = connected_peers(tcp_buffer_sizes).await.unwrap();
+
+            task::spawn(echo_server(server));
+
+            let mut ctrl = client.control();
+            task::spawn(noop_server(client));
+
+            let result = (0..n_streams)
+                .map(|_| {
+                    let data = data.clone();
+                    let mut ctrl = ctrl.clone();
+
+                    task::spawn(async move {
+                        let stream = ctrl.open_stream().await?;
+                        log::debug!("C: opened new stream {}", stream.id());
+
+                        send_recv_data(stream, &data).await?;
+
+                        Ok::<(), ConnectionError>(())
+                    })
+                })
+                .collect::<FuturesUnordered<_>>()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap()
+                .into_iter()
+                .collect::<Result<Vec<_>, ConnectionError>>();
+
+            ctrl.close().await.expect("close connection");
+
+            assert_eq!(result.unwrap().len(), n_streams);
+        });
     }
 
     QuickCheck::new().tests(3).quickcheck(prop as fn(_) -> _)
-}
-
-async fn roundtrip(nstreams: usize, data: Arc<Vec<u8>>, tcp_buffer_sizes: Option<TcpBufferSizes>) {
-    let (server, client) = connected_peers(tcp_buffer_sizes).await.unwrap();
-
-    task::spawn(echo_server(server));
-
-    let mut ctrl = client.control();
-    task::spawn(noop_server(client));
-
-    let result = (0..nstreams)
-        .map(|_| {
-            let data = data.clone();
-            let mut ctrl = ctrl.clone();
-
-            task::spawn(async move {
-                let stream = ctrl.open_stream().await?;
-                log::debug!("C: opened new stream {}", stream.id());
-
-                send_recv_data(stream, &data).await?;
-
-                Ok::<(), ConnectionError>(())
-            })
-        })
-        .collect::<FuturesUnordered<_>>()
-        .try_collect::<Vec<_>>()
-        .await
-        .unwrap()
-        .into_iter()
-        .collect::<Result<Vec<_>, ConnectionError>>();
-
-    ctrl.close().await.expect("close connection");
-
-    assert_eq!(result.unwrap().len(), nstreams);
 }
 
 /// For each incoming stream of `c` echo back to the sender.
