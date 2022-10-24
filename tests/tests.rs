@@ -379,10 +379,10 @@ async fn noop_server(c: Connection<Compat<TcpStream>>) {
 
 /// For each message in `iter`, open a new stream, send the message and
 /// collect the response. The sequence of responses will be returned.
-async fn send_recv<I>(mut control: Control, iter: I) -> Result<(), ConnectionError>
-where
-    I: Iterator<Item = Vec<u8>>,
-{
+async fn send_recv(
+    mut control: Control,
+    iter: impl Iterator<Item = Vec<u8>>,
+) -> Result<(), ConnectionError> {
     for msg in iter {
         let stream = control.open_stream().await?;
         log::debug!("C: new stream: {}", stream);
@@ -411,10 +411,10 @@ where
 
 /// Open a stream, send all messages and collect the responses. The
 /// sequence of responses will be returned.
-async fn send_recv_single<I>(mut control: Control, iter: I) -> Result<(), ConnectionError>
-where
-    I: Iterator<Item = Vec<u8>>,
-{
+async fn send_recv_single(
+    mut control: Control,
+    iter: impl Iterator<Item = Vec<u8>>,
+) -> Result<(), ConnectionError> {
     let stream = control.open_stream().await?;
     log::debug!("C: new stream: {}", stream);
     let id = stream.id();
