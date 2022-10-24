@@ -381,7 +381,7 @@ async fn noop_server(c: Connection<Compat<TcpStream>>) {
 /// collect the response. The sequence of responses will be returned.
 async fn send_recv(
     mut control: Control,
-    iter: impl Iterator<Item = Vec<u8>>,
+    iter: impl IntoIterator<Item = Vec<u8>>,
 ) -> Result<(), ConnectionError> {
     for msg in iter {
         let stream = control.open_stream().await?;
@@ -413,7 +413,7 @@ async fn send_recv(
 /// sequence of responses will be returned.
 async fn send_recv_single(
     mut control: Control,
-    iter: impl Iterator<Item = Vec<u8>>,
+    iter: impl IntoIterator<Item = Vec<u8>>,
 ) -> Result<(), ConnectionError> {
     let stream = control.open_stream().await?;
     log::debug!("C: new stream: {}", stream);
