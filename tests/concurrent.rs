@@ -44,7 +44,7 @@ async fn roundtrip(nstreams: usize, data: Arc<Vec<u8>>, tcp_buffer_sizes: Option
 
     let (tx, rx) = mpsc::unbounded();
     let mut ctrl = client.control();
-    task::spawn(yamux::into_stream(client).for_each(|_| future::ready(())));
+    task::spawn(noop_server(client));
 
     for _ in 0..nstreams {
         let data = data.clone();
@@ -96,6 +96,19 @@ async fn echo_server<T>(c: Connection<T>) -> Result<(), ConnectionError>
             Ok(())
         })
         .await
+}
+
+/// For each incoming stream, do nothing.
+async fn noop_server<T>(c: Connection<T>)
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+{
+    yamux::into_stream(c)
+        .for_each(|maybe_stream| {
+            drop(maybe_stream);
+            future::ready(())
+        })
+        .await;
 }
 
 /// Send and receive buffer size for a TCP socket.
