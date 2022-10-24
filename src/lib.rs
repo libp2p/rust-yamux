@@ -29,9 +29,6 @@ mod error;
 mod frame;
 mod pause;
 
-#[cfg(test)]
-mod tests;
-
 pub(crate) mod connection;
 
 pub use crate::connection::{into_stream, Connection, Control, Mode, Packet, Stream};
@@ -41,7 +38,7 @@ pub use crate::frame::{
     FrameDecodeError,
 };
 
-const DEFAULT_CREDIT: u32 = 256 * 1024; // as per yamux specification
+pub const DEFAULT_CREDIT: u32 = 256 * 1024; // as per yamux specification
 
 /// Default maximum number of bytes a Yamux data frame might carry as its
 /// payload when being send. Larger Payloads will be split.

@@ -131,14 +131,17 @@ impl Stream {
         self.id
     }
 
+    pub fn is_write_closed(&self) -> bool {
+        matches!(self.shared().state(), State::SendClosed)
+    }
+
+    pub fn is_closed(&self) -> bool {
+        matches!(self.shared().state(), State::Closed)
+    }
+
     /// Set the flag that should be set on the next outbound frame header.
     pub(crate) fn set_flag(&mut self, flag: Flag) {
         self.flag = flag
-    }
-
-    /// Get this stream's state.
-    pub(crate) fn state(&self) -> State {
-        self.shared().state()
     }
 
     pub(crate) fn strong_count(&self) -> usize {
@@ -368,7 +371,7 @@ impl AsyncWrite for Stream {
     }
 
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
-        if self.state() == State::Closed {
+        if self.is_closed() {
             return Poll::Ready(Ok(()));
         }
         ready!(self
