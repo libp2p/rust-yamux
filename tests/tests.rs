@@ -38,22 +38,24 @@ fn prop_config_send_recv_single() {
         mut msgs: Vec<Msg>,
         TestConfig(cfg1): TestConfig,
         TestConfig(cfg2): TestConfig,
-    ) -> TestResult {
+    ) -> Result<(), ConnectionError> {
         msgs.insert(0, Msg(vec![1u8; yamux::DEFAULT_CREDIT as usize]));
 
         Runtime::new().unwrap().block_on(async move {
-            let (server, client) = connected_peers(cfg1, cfg2).await;
+            let (server, client) = connected_peers(cfg1, cfg2).await?;
 
             let server = echo_server(server);
             let client = async {
                 let control = client.control();
                 task::spawn(noop_server(client));
-                send_recv_single(control, msgs).await.expect("send_recv")
+                send_recv_single(control, msgs).await?;
+
+                Ok(())
             };
 
-            futures::future::join(server, client).await.1;
+            futures::future::try_join(server, client).await?;
 
-            TestResult::passed()
+            Ok(())
         })
     }
     QuickCheck::new()
@@ -67,22 +69,24 @@ fn prop_config_send_recv_multi() {
         mut msgs: Vec<Msg>,
         TestConfig(cfg1): TestConfig,
         TestConfig(cfg2): TestConfig,
-    ) -> TestResult {
+    ) -> Result<(), ConnectionError> {
         msgs.insert(0, Msg(vec![1u8; yamux::DEFAULT_CREDIT as usize]));
 
         Runtime::new().unwrap().block_on(async move {
-            let (server, client) = connected_peers(cfg1, cfg2).await;
+            let (server, client) = connected_peers(cfg1, cfg2).await?;
 
             let server = echo_server(server);
             let client = async {
                 let control = client.control();
                 task::spawn(noop_server(client));
-                send_recv(control, msgs).await.expect("send_recv")
+                send_recv(control, msgs).await?;
+
+                Ok(())
             };
 
-            futures::future::join(server, client).await.1;
+            futures::future::try_join(server, client).await?;
 
-            TestResult::passed()
+            Ok(())
         })
     }
     QuickCheck::new()
@@ -92,24 +96,26 @@ fn prop_config_send_recv_multi() {
 
 #[test]
 fn prop_send_recv() {
-    fn prop(msgs: Vec<Msg>) -> TestResult {
+    fn prop(msgs: Vec<Msg>) -> Result<TestResult, ConnectionError> {
         if msgs.is_empty() {
-            return TestResult::discard();
+            return Ok(TestResult::discard());
         }
 
         Runtime::new().unwrap().block_on(async move {
-            let (server, client) = connected_peers(Config::default(), Config::default()).await;
+            let (server, client) = connected_peers(Config::default(), Config::default()).await?;
 
             let server = echo_server(server);
             let client = async {
                 let control = client.control();
                 task::spawn(noop_server(client));
-                send_recv(control, msgs).await.expect("send_recv")
+                send_recv(control, msgs).await?;
+
+                Ok(())
             };
 
-            futures::future::join(server, client).await.1;
+            futures::future::try_join(server, client).await?;
 
-            TestResult::passed()
+            Ok(TestResult::passed())
         })
     }
     QuickCheck::new().tests(1).quickcheck(prop as fn(_) -> _)
@@ -117,26 +123,28 @@ fn prop_send_recv() {
 
 #[test]
 fn prop_max_streams() {
-    fn prop(n: usize) -> bool {
+    fn prop(n: usize) -> Result<bool, ConnectionError> {
         let max_streams = n % 100;
         let mut cfg = Config::default();
         cfg.set_max_num_streams(max_streams);
 
         Runtime::new().unwrap().block_on(async move {
-            let (server, client) = connected_peers(cfg.clone(), cfg).await;
+            let (server, client) = connected_peers(cfg.clone(), cfg).await?;
 
             task::spawn(echo_server(server));
 
             let mut control = client.control();
             task::spawn(noop_server(client));
+
             let mut v = Vec::new();
             for _ in 0..max_streams {
-                v.push(control.open_stream().await.expect("open_stream"))
+                v.push(control.open_stream().await?)
             }
+
             if let Err(ConnectionError::TooManyStreams) = control.open_stream().await {
-                true
+                Ok(true)
             } else {
-                false
+                Ok(false)
             }
         })
     }
@@ -145,45 +153,55 @@ fn prop_max_streams() {
 
 #[test]
 fn prop_send_recv_half_closed() {
-    fn prop(msg: Msg) {
+    fn prop(msg: Msg) -> Result<(), ConnectionError> {
         let msg_len = msg.0.len();
 
         Runtime::new().unwrap().block_on(async move {
-            let (mut server, client) = connected_peers(Config::default(), Config::default()).await;
+            let (mut server, client) =
+                connected_peers(Config::default(), Config::default()).await?;
 
             // Server should be able to write on a stream shutdown by the client.
             let server = async {
-                let mut stream = server
-                    .next_stream()
-                    .await
-                    .expect("S: next_stream")
-                    .expect("S: some stream");
+                let mut first_stream =
+                    server.next_stream().await?.ok_or(ConnectionError::Closed)?;
+
                 task::spawn(noop_server(server));
+
                 let mut buf = vec![0; msg_len];
-                stream.read_exact(&mut buf).await.expect("S: read_exact");
-                stream.write_all(&buf).await.expect("S: send");
-                stream.close().await.expect("S: close")
+                first_stream.read_exact(&mut buf).await?;
+                first_stream.write_all(&buf).await?;
+                first_stream.close().await?;
+
+                Result::<(), ConnectionError>::Ok(())
             };
 
             // Client should be able to read after shutting down the stream.
             let client = async {
                 let mut control = client.control();
                 task::spawn(noop_server(client));
-                let mut stream = control.open_stream().await.expect("C: open_stream");
-                stream.write_all(&msg.0).await.expect("C: send");
-                stream.close().await.expect("C: close");
+
+                let mut stream = control.open_stream().await?;
+                stream.write_all(&msg.0).await?;
+                stream.close().await?;
+
                 assert!(stream.is_write_closed());
+
                 let mut buf = vec![0; msg_len];
-                stream.read_exact(&mut buf).await.expect("C: read_exact");
+                stream.read_exact(&mut buf).await?;
+
                 assert_eq!(buf, msg.0);
                 assert_eq!(Some(0), stream.read(&mut buf).await.ok());
                 assert!(stream.is_closed());
+
+                Result::<(), ConnectionError>::Ok(())
             };
 
-            futures::future::join(server, client).await;
+            futures::future::try_join(server, client).await?;
+
+            Ok(())
         })
     }
-    QuickCheck::new().tests(7).quickcheck(prop as fn(_))
+    QuickCheck::new().tests(7).quickcheck(prop as fn(_) -> _)
 }
 
 /// This test simulates two endpoints of a Yamux connection which may be unable to
@@ -323,19 +341,27 @@ impl Arbitrary for TestConfig {
 async fn connected_peers(
     server_config: Config,
     client_config: Config,
-) -> (Connection<Compat<TcpStream>>, Connection<Compat<TcpStream>>) {
-    let (listener, addr) = bind().await.unwrap();
+) -> io::Result<(Connection<Compat<TcpStream>>, Connection<Compat<TcpStream>>)> {
+    let (listener, addr) = bind().await?;
 
     let server = async {
-        let (stream, _) = listener.accept().await.unwrap();
-        Connection::new(stream.compat(), server_config, Mode::Server)
+        let (stream, _) = listener.accept().await?;
+        Ok(Connection::new(
+            stream.compat(),
+            server_config,
+            Mode::Server,
+        ))
     };
     let client = async {
-        let stream = TcpStream::connect(addr).await.unwrap();
-        Connection::new(stream.compat(), client_config, Mode::Client)
+        let stream = TcpStream::connect(addr).await?;
+        Ok(Connection::new(
+            stream.compat(),
+            client_config,
+            Mode::Client,
+        ))
     };
 
-    futures::future::join(server, client).await
+    futures::future::try_join(server, client).await
 }
 
 async fn bind() -> io::Result<(TcpListener, SocketAddr)> {
@@ -347,7 +373,7 @@ async fn bind() -> io::Result<(TcpListener, SocketAddr)> {
 }
 
 /// For each incoming stream of `c` echo back to the sender.
-async fn echo_server(c: Connection<Compat<TcpStream>>) {
+async fn echo_server(c: Connection<Compat<TcpStream>>) -> Result<(), ConnectionError> {
     yamux::into_stream(c)
         .try_for_each_concurrent(None, |mut stream| async move {
             {
@@ -358,7 +384,6 @@ async fn echo_server(c: Connection<Compat<TcpStream>>) {
             Ok(())
         })
         .await
-        .unwrap()
 }
 
 /// For each incoming stream, do nothing.
