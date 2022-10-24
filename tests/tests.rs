@@ -46,7 +46,7 @@ fn prop_config_send_recv_single() {
             let server = async {
                 let socket = listener.accept().await.expect("accept").0.compat();
                 let connection = Connection::new(socket, cfg1.0, Mode::Server);
-                repeat_echo(connection).await.expect("repeat_echo")
+                echo_server(connection).await
             };
 
             let client = async {
@@ -82,7 +82,7 @@ fn prop_config_send_recv_multi() {
             let server = async {
                 let socket = listener.accept().await.expect("accept").0.compat();
                 let connection = Connection::new(socket, cfg1.0, Mode::Server);
-                repeat_echo(connection).await.expect("repeat_echo")
+                echo_server(connection).await
             };
 
             let client = async {
@@ -118,7 +118,7 @@ fn prop_send_recv() {
             let server = async {
                 let socket = listener.accept().await.expect("accept").0.compat();
                 let connection = Connection::new(socket, Config::default(), Mode::Server);
-                repeat_echo(connection).await.expect("repeat_echo")
+                echo_server(connection).await
             };
 
             let client = async {
@@ -150,7 +150,7 @@ fn prop_max_streams() {
             let server = async move {
                 let socket = listener.accept().await.expect("accept").0.compat();
                 let connection = Connection::new(socket, cfg_s, Mode::Server);
-                repeat_echo(connection).await
+                echo_server(connection).await
             };
 
             task::spawn(server);
@@ -363,17 +363,18 @@ async fn bind() -> io::Result<(TcpListener, SocketAddr)> {
 }
 
 /// For each incoming stream of `c` echo back to the sender.
-async fn repeat_echo(c: Connection<Compat<TcpStream>>) -> Result<(), ConnectionError> {
-    let c = yamux::into_stream(c);
-    c.try_for_each_concurrent(None, |mut stream| async move {
-        {
-            let (mut r, mut w) = futures::io::AsyncReadExt::split(&mut stream);
-            futures::io::copy(&mut r, &mut w).await?;
-        }
-        stream.close().await?;
-        Ok(())
-    })
-    .await
+async fn echo_server(c: Connection<Compat<TcpStream>>) {
+    yamux::into_stream(c)
+        .try_for_each_concurrent(None, |mut stream| async move {
+            {
+                let (mut r, mut w) = futures::io::AsyncReadExt::split(&mut stream);
+                futures::io::copy(&mut r, &mut w).await?;
+            }
+            stream.close().await?;
+            Ok(())
+        })
+        .await
+        .unwrap()
 }
 
 /// For each message in `iter`, open a new stream, send the message and
