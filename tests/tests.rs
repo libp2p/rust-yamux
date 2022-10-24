@@ -50,7 +50,7 @@ fn prop_config_send_recv_single() {
             let server = echo_server(server);
             let client = async {
                 let control = client.control();
-                task::spawn(yamux::into_stream(client).for_each(|_| future::ready(())));
+                task::spawn(noop_server(client));
                 send_recv_single(control, iter.clone())
                     .await
                     .expect("send_recv")
@@ -83,7 +83,7 @@ fn prop_config_send_recv_multi() {
             let server = echo_server(server);
             let client = async {
                 let control = client.control();
-                task::spawn(yamux::into_stream(client).for_each(|_| future::ready(())));
+                task::spawn(noop_server(client));
                 send_recv(control, iter.clone()).await.expect("send_recv")
             };
 
@@ -112,7 +112,7 @@ fn prop_send_recv() {
             let server = echo_server(server);
             let client = async {
                 let control = client.control();
-                task::spawn(yamux::into_stream(client).for_each(|_| future::ready(())));
+                task::spawn(noop_server(client));
                 send_recv(control, iter.clone()).await.expect("send_recv")
             };
 
@@ -136,7 +136,7 @@ fn prop_max_streams() {
             task::spawn(echo_server(server));
 
             let mut control = client.control();
-            task::spawn(yamux::into_stream(client).for_each(|_| future::ready(())));
+            task::spawn(noop_server(client));
             let mut v = Vec::new();
             for _ in 0..max_streams {
                 v.push(control.open_stream().await.expect("open_stream"))
@@ -166,7 +166,7 @@ fn prop_send_recv_half_closed() {
                     .await
                     .expect("S: next_stream")
                     .expect("S: some stream");
-                task::spawn(yamux::into_stream(server).for_each(|_| future::ready(())));
+                task::spawn(noop_server(server));
                 let mut buf = vec![0; msg_len];
                 stream.read_exact(&mut buf).await.expect("S: read_exact");
                 stream.write_all(&buf).await.expect("S: send");
@@ -176,7 +176,7 @@ fn prop_send_recv_half_closed() {
             // Client should be able to read after shutting down the stream.
             let client = async {
                 let mut control = client.control();
-                task::spawn(yamux::into_stream(client).for_each(|_| future::ready(())));
+                task::spawn(noop_server(client));
                 let mut stream = control.open_stream().await.expect("C: open_stream");
                 stream.write_all(&msg.0).await.expect("C: send");
                 stream.close().await.expect("C: close");
@@ -242,8 +242,8 @@ fn write_deadlock() {
                     .await
                     .expect("server failed")
             }
-            .boxed()
-            .into(),
+                .boxed()
+                .into(),
         )
         .unwrap();
 
@@ -281,13 +281,13 @@ fn write_deadlock() {
                         writer.write_all(msg.as_ref()).map_err(|e| panic!(e)),
                         reader.read_exact(&mut b[..]).map_err(|e| panic!(e)),
                     )
-                    .await;
+                        .await;
                     let mut stream = reader.reunite(writer).unwrap();
                     stream.close().await.unwrap();
                     log::debug!("C: Stream {} done.", stream.id());
                     assert_eq!(b, msg);
                 }
-                .boxed(),
+                    .boxed(),
             )
             .unwrap(),
     );
@@ -306,7 +306,7 @@ impl Arbitrary for Msg {
         msg
     }
 
-    fn shrink(&self) -> Box<dyn Iterator<Item = Self>> {
+    fn shrink(&self) -> Box<dyn Iterator<Item=Self>> {
         Box::new(self.0.shrink().filter(|v| !v.is_empty()).map(|v| Msg(v)))
     }
 }
@@ -369,11 +369,21 @@ async fn echo_server(c: Connection<Compat<TcpStream>>) {
         .unwrap()
 }
 
+/// For each incoming stream, do nothing.
+async fn noop_server(c: Connection<Compat<TcpStream>>) {
+    yamux::into_stream(c)
+        .for_each(|maybe_stream| {
+            drop(maybe_stream);
+            future::ready(())
+        })
+        .await;
+}
+
 /// For each message in `iter`, open a new stream, send the message and
 /// collect the response. The sequence of responses will be returned.
 async fn send_recv<I>(mut control: Control, iter: I) -> Result<Vec<Vec<u8>>, ConnectionError>
-where
-    I: Iterator<Item = Vec<u8>>,
+    where
+        I: Iterator<Item=Vec<u8>>,
 {
     let mut result = Vec::new();
 
@@ -405,8 +415,8 @@ where
 /// Open a stream, send all messages and collect the responses. The
 /// sequence of responses will be returned.
 async fn send_recv_single<I>(mut control: Control, iter: I) -> Result<Vec<Vec<u8>>, ConnectionError>
-where
-    I: Iterator<Item = Vec<u8>>,
+    where
+        I: Iterator<Item=Vec<u8>>,
 {
     let stream = control.open_stream().await?;
     log::debug!("C: new stream: {}", stream);
