@@ -35,9 +35,9 @@ use yamux::{Config, Connection, ConnectionError, Control, Mode};
 #[test]
 fn prop_config_send_recv_single() {
     fn prop(mut msgs: Vec<Msg>, cfg1: TestConfig, cfg2: TestConfig) -> TestResult {
-        let rt = Runtime::new().unwrap();
         msgs.insert(0, Msg(vec![1u8; yamux::DEFAULT_CREDIT as usize]));
-        rt.block_on(async move {
+
+        Runtime::new().unwrap().block_on(async move {
             let num_requests = msgs.len();
             let iter = msgs.into_iter().map(|m| m.0);
 
@@ -71,9 +71,9 @@ fn prop_config_send_recv_single() {
 #[test]
 fn prop_config_send_recv_multi() {
     fn prop(mut msgs: Vec<Msg>, cfg1: TestConfig, cfg2: TestConfig) -> TestResult {
-        let rt = Runtime::new().unwrap();
         msgs.insert(0, Msg(vec![1u8; yamux::DEFAULT_CREDIT as usize]));
-        rt.block_on(async move {
+
+        Runtime::new().unwrap().block_on(async move {
             let num_requests = msgs.len();
             let iter = msgs.into_iter().map(|m| m.0);
 
@@ -108,8 +108,8 @@ fn prop_send_recv() {
         if msgs.is_empty() {
             return TestResult::discard();
         }
-        let rt = Runtime::new().unwrap();
-        rt.block_on(async move {
+
+        Runtime::new().unwrap().block_on(async move {
             let num_requests = msgs.len();
             let iter = msgs.into_iter().map(|m| m.0);
 
@@ -143,8 +143,7 @@ fn prop_max_streams() {
         let mut cfg = Config::default();
         cfg.set_max_num_streams(max_streams);
 
-        let rt = Runtime::new().unwrap();
-        rt.block_on(async move {
+        Runtime::new().unwrap().block_on(async move {
             let (listener, address) = bind().await.expect("bind");
 
             let cfg_s = cfg.clone();
@@ -178,8 +177,8 @@ fn prop_max_streams() {
 fn prop_send_recv_half_closed() {
     fn prop(msg: Msg) {
         let msg_len = msg.0.len();
-        let rt = Runtime::new().unwrap();
-        rt.block_on(async move {
+
+        Runtime::new().unwrap().block_on(async move {
             let (listener, address) = bind().await.expect("bind");
 
             // Server should be able to write on a stream shutdown by the client.
