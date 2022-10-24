@@ -383,29 +383,17 @@ async fn send_recv(
     mut control: Control,
     iter: impl IntoIterator<Item = Msg>,
 ) -> Result<(), ConnectionError> {
-    for Msg(msg) in iter {
-        let stream = control.open_stream().await?;
+    for msg in iter {
+        let mut stream = control.open_stream().await?;
         log::debug!("C: new stream: {}", stream);
-        let id = stream.id();
-        let len = msg.len();
-        let (mut reader, mut writer) = AsyncReadExt::split(stream);
-        let write_fut = async {
-            writer.write_all(&msg).await.unwrap();
-            log::debug!("C: {}: sent {} bytes", id, len);
-            writer.close().await.unwrap();
-        };
-        let mut data = Vec::new();
-        let read_fut = async {
-            reader.read_to_end(&mut data).await.unwrap();
-            log::debug!("C: {}: received {} bytes", id, data.len());
-        };
-        futures::future::join(write_fut, read_fut).await;
 
-        assert_eq!(data, msg);
+        send_recv_message(&mut stream, msg).await?;
+        stream.close().await?;
     }
 
     log::debug!("C: closing connection");
     control.close().await?;
+
     Ok(())
 }
 
@@ -415,27 +403,38 @@ async fn send_recv_single(
     mut control: Control,
     iter: impl IntoIterator<Item = Msg>,
 ) -> Result<(), ConnectionError> {
-    let stream = control.open_stream().await?;
+    let mut stream = control.open_stream().await?;
     log::debug!("C: new stream: {}", stream);
-    let id = stream.id();
-    let (mut reader, mut writer) = AsyncReadExt::split(stream);
-    for Msg(msg) in iter {
-        let len = msg.len();
-        let write_fut = async {
-            writer.write_all(&msg).await.unwrap();
-            log::debug!("C: {}: sent {} bytes", id, len);
-        };
-        let mut data = vec![0; msg.len()];
-        let read_fut = async {
-            reader.read_exact(&mut data).await.unwrap();
-            log::debug!("C: {}: received {} bytes", id, data.len());
-        };
-        futures::future::join(write_fut, read_fut).await;
-        assert_eq!(data, msg);
+
+    for msg in iter {
+        send_recv_message(&mut stream, msg).await?;
     }
-    writer.close().await?;
+
+    stream.close().await?;
+
     log::debug!("C: closing connection");
     control.close().await?;
+
+    Ok(())
+}
+
+async fn send_recv_message(stream: &mut yamux::Stream, Msg(msg): Msg) -> io::Result<()> {
+    let id = stream.id();
+    let (mut reader, mut writer) = AsyncReadExt::split(stream);
+
+    let len = msg.len();
+    let write_fut = async {
+        writer.write_all(&msg).await.unwrap();
+        log::debug!("C: {}: sent {} bytes", id, len);
+    };
+    let mut data = vec![0; msg.len()];
+    let read_fut = async {
+        reader.read_exact(&mut data).await.unwrap();
+        log::debug!("C: {}: received {} bytes", id, data.len());
+    };
+    futures::future::join(write_fut, read_fut).await;
+    assert_eq!(data, msg);
+
     Ok(())
 }
 
