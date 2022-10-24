@@ -56,7 +56,7 @@ fn prop_config_send_recv_single() {
                     .expect("send_recv")
             };
 
-            let result = futures::join!(server, client).1;
+            let result = futures::future::join(server, client).await.1;
             TestResult::from_bool(result.len() == num_requests && result.into_iter().eq(iter))
         })
     }
@@ -87,7 +87,7 @@ fn prop_config_send_recv_multi() {
                 send_recv(control, iter.clone()).await.expect("send_recv")
             };
 
-            let result = futures::join!(server, client).1;
+            let result = futures::future::join(server, client).await.1;
             TestResult::from_bool(result.len() == num_requests && result.into_iter().eq(iter))
         })
     }
@@ -116,7 +116,7 @@ fn prop_send_recv() {
                 send_recv(control, iter.clone()).await.expect("send_recv")
             };
 
-            let result = futures::join!(server, client).1;
+            let result = futures::future::join(server, client).await.1;
             TestResult::from_bool(result.len() == num_requests && result.into_iter().eq(iter))
         })
     }
@@ -188,7 +188,7 @@ fn prop_send_recv_half_closed() {
                 assert!(stream.is_closed());
             };
 
-            futures::join!(server, client);
+            futures::future::join(server, client).await;
         })
     }
     QuickCheck::new().tests(7).quickcheck(prop as fn(_))
@@ -242,8 +242,8 @@ fn write_deadlock() {
                     .await
                     .expect("server failed")
             }
-                .boxed()
-                .into(),
+            .boxed()
+            .into(),
         )
         .unwrap();
 
@@ -281,13 +281,13 @@ fn write_deadlock() {
                         writer.write_all(msg.as_ref()).map_err(|e| panic!(e)),
                         reader.read_exact(&mut b[..]).map_err(|e| panic!(e)),
                     )
-                        .await;
+                    .await;
                     let mut stream = reader.reunite(writer).unwrap();
                     stream.close().await.unwrap();
                     log::debug!("C: Stream {} done.", stream.id());
                     assert_eq!(b, msg);
                 }
-                    .boxed(),
+                .boxed(),
             )
             .unwrap(),
     );
@@ -306,7 +306,7 @@ impl Arbitrary for Msg {
         msg
     }
 
-    fn shrink(&self) -> Box<dyn Iterator<Item=Self>> {
+    fn shrink(&self) -> Box<dyn Iterator<Item = Self>> {
         Box::new(self.0.shrink().filter(|v| !v.is_empty()).map(|v| Msg(v)))
     }
 }
@@ -382,8 +382,8 @@ async fn noop_server(c: Connection<Compat<TcpStream>>) {
 /// For each message in `iter`, open a new stream, send the message and
 /// collect the response. The sequence of responses will be returned.
 async fn send_recv<I>(mut control: Control, iter: I) -> Result<Vec<Vec<u8>>, ConnectionError>
-    where
-        I: Iterator<Item=Vec<u8>>,
+where
+    I: Iterator<Item = Vec<u8>>,
 {
     let mut result = Vec::new();
 
@@ -415,8 +415,8 @@ async fn send_recv<I>(mut control: Control, iter: I) -> Result<Vec<Vec<u8>>, Con
 /// Open a stream, send all messages and collect the responses. The
 /// sequence of responses will be returned.
 async fn send_recv_single<I>(mut control: Control, iter: I) -> Result<Vec<Vec<u8>>, ConnectionError>
-    where
-        I: Iterator<Item=Vec<u8>>,
+where
+    I: Iterator<Item = Vec<u8>>,
 {
     let stream = control.open_stream().await?;
     log::debug!("C: new stream: {}", stream);
