@@ -19,6 +19,26 @@ use tokio_util::compat::TokioAsyncReadCompatExt;
 use yamux::{Config, Connection, Mode, WindowUpdateMode};
 
 const PAYLOAD_SIZE: usize = 128 * 1024;
+
+#[test]
+fn concurrent_streams() {
+    let _ = env_logger::try_init();
+
+    fn prop(tcp_buffer_sizes: Option<TcpBufferSizes>) {
+        let data = Arc::new(vec![0x42; PAYLOAD_SIZE]);
+        let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
+
+        Runtime::new().expect("new runtime").block_on(roundtrip(
+            addr,
+            1000,
+            data,
+            tcp_buffer_sizes,
+        ));
+    }
+
+    QuickCheck::new().tests(3).quickcheck(prop as fn(_) -> _)
+}
+
 async fn roundtrip(
     address: SocketAddr,
     nstreams: usize,
@@ -141,23 +161,4 @@ impl Arbitrary for TcpBufferSizes {
 
         TcpBufferSizes { send, recv }
     }
-}
-
-#[test]
-fn concurrent_streams() {
-    let _ = env_logger::try_init();
-
-    fn prop(tcp_buffer_sizes: Option<TcpBufferSizes>) {
-        let data = Arc::new(vec![0x42; PAYLOAD_SIZE]);
-        let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
-
-        Runtime::new().expect("new runtime").block_on(roundtrip(
-            addr,
-            1000,
-            data,
-            tcp_buffer_sizes,
-        ));
-    }
-
-    QuickCheck::new().tests(3).quickcheck(prop as fn(_) -> _)
 }
