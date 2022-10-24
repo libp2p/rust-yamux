@@ -11,11 +11,13 @@
 use futures::{channel::mpsc, prelude::*};
 use quickcheck::{Arbitrary, Gen, QuickCheck};
 use std::{
+    io,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     sync::Arc,
 };
+use tokio::net::{TcpListener, TcpStream};
 use tokio::{net::TcpSocket, runtime::Runtime, task};
-use tokio_util::compat::TokioAsyncReadCompatExt;
+use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 use yamux::{Config, Connection, Mode, WindowUpdateMode};
 
 const PAYLOAD_SIZE: usize = 128 * 1024;
@@ -26,56 +28,20 @@ fn concurrent_streams() {
 
     fn prop(tcp_buffer_sizes: Option<TcpBufferSizes>) {
         let data = Arc::new(vec![0x42; PAYLOAD_SIZE]);
-        let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 0));
 
-        Runtime::new().expect("new runtime").block_on(roundtrip(
-            addr,
-            1000,
-            data,
-            tcp_buffer_sizes,
-        ));
+        Runtime::new()
+            .expect("new runtime")
+            .block_on(roundtrip(1000, data, tcp_buffer_sizes));
     }
 
     QuickCheck::new().tests(3).quickcheck(prop as fn(_) -> _)
 }
 
-async fn roundtrip(
-    address: SocketAddr,
-    nstreams: usize,
-    data: Arc<Vec<u8>>,
-    tcp_buffer_sizes: Option<TcpBufferSizes>,
-) {
-    let listener = {
-        let socket = TcpSocket::new_v4().expect("new_v4");
-        if let Some(size) = tcp_buffer_sizes {
-            socket
-                .set_send_buffer_size(size.send)
-                .expect("send size set");
-            socket
-                .set_recv_buffer_size(size.recv)
-                .expect("recv size set");
-        }
-        socket.bind(address).expect("bind");
-        socket.listen(1024).expect("listen")
-    };
-    let address = listener.local_addr().expect("local address");
-
-    let mut server_cfg = Config::default();
-    // Use a large frame size to speed up the test.
-    server_cfg.set_split_send_size(PAYLOAD_SIZE);
-    // Use `WindowUpdateMode::OnRead` so window updates are sent by the
-    // `Stream`s and subject to backpressure from the stream command channel. Thus
-    // the `Connection` I/O loop will not need to send window updates
-    // directly as a result of reading a frame, which can otherwise
-    // lead to mutual write deadlocks if the socket send buffers are too small.
-    // With `OnRead` the socket send buffer can even be smaller than the size
-    // of a single frame for this test.
-    server_cfg.set_window_update_mode(WindowUpdateMode::OnRead);
-    let client_cfg = server_cfg.clone();
+async fn roundtrip(nstreams: usize, data: Arc<Vec<u8>>, tcp_buffer_sizes: Option<TcpBufferSizes>) {
+    let (server, client) = connected_peers(tcp_buffer_sizes).await.unwrap();
 
     let server = async move {
-        let stream = listener.accept().await.expect("accept").0.compat();
-        yamux::into_stream(Connection::new(stream, server_cfg, Mode::Server))
+        yamux::into_stream(server)
             .try_for_each_concurrent(None, |mut stream| async move {
                 log::debug!("S: accepted new stream");
                 let mut len = [0; 4];
@@ -92,22 +58,10 @@ async fn roundtrip(
 
     task::spawn(server);
 
-    let conn = {
-        let socket = TcpSocket::new_v4().expect("new_v4");
-        if let Some(size) = tcp_buffer_sizes {
-            socket
-                .set_send_buffer_size(size.send)
-                .expect("send size set");
-            socket
-                .set_recv_buffer_size(size.recv)
-                .expect("recv size set");
-        }
-        let stream = socket.connect(address).await.expect("connect").compat();
-        Connection::new(stream, client_cfg, Mode::Client)
-    };
     let (tx, rx) = mpsc::unbounded();
-    let mut ctrl = conn.control();
-    task::spawn(yamux::into_stream(conn).for_each(|_| future::ready(())));
+    let mut ctrl = client.control();
+    task::spawn(yamux::into_stream(client).for_each(|_| future::ready(())));
+
     for _ in 0..nstreams {
         let data = data.clone();
         let tx = tx.clone();
@@ -161,4 +115,60 @@ impl Arbitrary for TcpBufferSizes {
 
         TcpBufferSizes { send, recv }
     }
+}
+
+async fn connected_peers(
+    buffer_sizes: Option<TcpBufferSizes>,
+) -> io::Result<(Connection<Compat<TcpStream>>, Connection<Compat<TcpStream>>)> {
+    let (listener, addr) = bind(buffer_sizes).await?;
+
+    let server = async {
+        let (stream, _) = listener.accept().await?;
+        Ok(Connection::new(stream.compat(), config(), Mode::Server))
+    };
+    let client = async {
+        let stream = new_socket(buffer_sizes)?.connect(addr).await?;
+
+        Ok(Connection::new(stream.compat(), config(), Mode::Client))
+    };
+
+    futures::future::try_join(server, client).await
+}
+
+async fn bind(buffer_sizes: Option<TcpBufferSizes>) -> io::Result<(TcpListener, SocketAddr)> {
+    let socket = new_socket(buffer_sizes)?;
+    socket.bind(SocketAddr::V4(SocketAddrV4::new(
+        Ipv4Addr::new(127, 0, 0, 1),
+        0,
+    )))?;
+
+    let listener = socket.listen(1024)?;
+    let address = listener.local_addr()?;
+
+    Ok((listener, address))
+}
+
+fn new_socket(buffer_sizes: Option<TcpBufferSizes>) -> io::Result<TcpSocket> {
+    let socket = TcpSocket::new_v4()?;
+    if let Some(size) = buffer_sizes {
+        socket.set_send_buffer_size(size.send)?;
+        socket.set_recv_buffer_size(size.recv)?;
+    }
+
+    Ok(socket)
+}
+
+fn config() -> Config {
+    let mut server_cfg = Config::default();
+    // Use a large frame size to speed up the test.
+    server_cfg.set_split_send_size(PAYLOAD_SIZE);
+    // Use `WindowUpdateMode::OnRead` so window updates are sent by the
+    // `Stream`s and subject to backpressure from the stream command channel. Thus
+    // the `Connection` I/O loop will not need to send window updates
+    // directly as a result of reading a frame, which can otherwise
+    // lead to mutual write deadlocks if the socket send buffers are too small.
+    // With `OnRead` the socket send buffer can even be smaller than the size
+    // of a single frame for this test.
+    server_cfg.set_window_update_mode(WindowUpdateMode::OnRead);
+    server_cfg
 }
