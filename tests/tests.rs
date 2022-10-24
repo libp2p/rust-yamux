@@ -42,7 +42,6 @@ fn prop_config_send_recv_single() {
         msgs.insert(0, Msg(vec![1u8; yamux::DEFAULT_CREDIT as usize]));
 
         Runtime::new().unwrap().block_on(async move {
-            let num_requests = msgs.len();
             let iter = msgs.into_iter().map(|m| m.0);
 
             let (server, client) = connected_peers(cfg1, cfg2).await;
@@ -56,8 +55,9 @@ fn prop_config_send_recv_single() {
                     .expect("send_recv")
             };
 
-            let result = futures::future::join(server, client).await.1;
-            TestResult::from_bool(result.len() == num_requests && result.into_iter().eq(iter))
+            futures::future::join(server, client).await.1;
+
+            TestResult::passed()
         })
     }
     QuickCheck::new()
@@ -75,7 +75,6 @@ fn prop_config_send_recv_multi() {
         msgs.insert(0, Msg(vec![1u8; yamux::DEFAULT_CREDIT as usize]));
 
         Runtime::new().unwrap().block_on(async move {
-            let num_requests = msgs.len();
             let iter = msgs.into_iter().map(|m| m.0);
 
             let (server, client) = connected_peers(cfg1, cfg2).await;
@@ -87,8 +86,9 @@ fn prop_config_send_recv_multi() {
                 send_recv(control, iter.clone()).await.expect("send_recv")
             };
 
-            let result = futures::future::join(server, client).await.1;
-            TestResult::from_bool(result.len() == num_requests && result.into_iter().eq(iter))
+            futures::future::join(server, client).await.1;
+
+            TestResult::passed()
         })
     }
     QuickCheck::new()
@@ -104,7 +104,6 @@ fn prop_send_recv() {
         }
 
         Runtime::new().unwrap().block_on(async move {
-            let num_requests = msgs.len();
             let iter = msgs.into_iter().map(|m| m.0);
 
             let (server, client) = connected_peers(Config::default(), Config::default()).await;
@@ -116,8 +115,9 @@ fn prop_send_recv() {
                 send_recv(control, iter.clone()).await.expect("send_recv")
             };
 
-            let result = futures::future::join(server, client).await.1;
-            TestResult::from_bool(result.len() == num_requests && result.into_iter().eq(iter))
+            futures::future::join(server, client).await.1;
+
+            TestResult::passed()
         })
     }
     QuickCheck::new().tests(1).quickcheck(prop as fn(_) -> _)
@@ -381,12 +381,10 @@ async fn noop_server(c: Connection<Compat<TcpStream>>) {
 
 /// For each message in `iter`, open a new stream, send the message and
 /// collect the response. The sequence of responses will be returned.
-async fn send_recv<I>(mut control: Control, iter: I) -> Result<Vec<Vec<u8>>, ConnectionError>
+async fn send_recv<I>(mut control: Control, iter: I) -> Result<(), ConnectionError>
 where
     I: Iterator<Item = Vec<u8>>,
 {
-    let mut result = Vec::new();
-
     for msg in iter {
         let stream = control.open_stream().await?;
         log::debug!("C: new stream: {}", stream);
@@ -404,17 +402,18 @@ where
             log::debug!("C: {}: received {} bytes", id, data.len());
         };
         futures::future::join(write_fut, read_fut).await;
-        result.push(data);
+
+        assert_eq!(data, msg);
     }
 
     log::debug!("C: closing connection");
     control.close().await?;
-    Ok(result)
+    Ok(())
 }
 
 /// Open a stream, send all messages and collect the responses. The
 /// sequence of responses will be returned.
-async fn send_recv_single<I>(mut control: Control, iter: I) -> Result<Vec<Vec<u8>>, ConnectionError>
+async fn send_recv_single<I>(mut control: Control, iter: I) -> Result<(), ConnectionError>
 where
     I: Iterator<Item = Vec<u8>>,
 {
@@ -422,7 +421,6 @@ where
     log::debug!("C: new stream: {}", stream);
     let id = stream.id();
     let (mut reader, mut writer) = AsyncReadExt::split(stream);
-    let mut result = Vec::new();
     for msg in iter {
         let len = msg.len();
         let write_fut = async {
@@ -435,12 +433,12 @@ where
             log::debug!("C: {}: received {} bytes", id, data.len());
         };
         futures::future::join(write_fut, read_fut).await;
-        result.push(data)
+        assert_eq!(data, msg);
     }
     writer.close().await?;
     log::debug!("C: closing connection");
     control.close().await?;
-    Ok(result)
+    Ok(())
 }
 
 /// This module implements a duplex connection via channels with bounded
