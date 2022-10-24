@@ -48,9 +48,7 @@ fn prop_config_send_recv_single() {
             let client = async {
                 let control = client.control();
                 task::spawn(noop_server(client));
-                send_recv_single(control, msgs.into_iter().map(|m| m.0))
-                    .await
-                    .expect("send_recv")
+                send_recv_single(control, msgs).await.expect("send_recv")
             };
 
             futures::future::join(server, client).await.1;
@@ -79,9 +77,7 @@ fn prop_config_send_recv_multi() {
             let client = async {
                 let control = client.control();
                 task::spawn(noop_server(client));
-                send_recv(control, msgs.into_iter().map(|m| m.0))
-                    .await
-                    .expect("send_recv")
+                send_recv(control, msgs).await.expect("send_recv")
             };
 
             futures::future::join(server, client).await.1;
@@ -108,9 +104,7 @@ fn prop_send_recv() {
             let client = async {
                 let control = client.control();
                 task::spawn(noop_server(client));
-                send_recv(control, msgs.into_iter().map(|m| m.0))
-                    .await
-                    .expect("send_recv")
+                send_recv(control, msgs).await.expect("send_recv")
             };
 
             futures::future::join(server, client).await.1;
@@ -381,9 +375,9 @@ async fn noop_server(c: Connection<Compat<TcpStream>>) {
 /// collect the response. The sequence of responses will be returned.
 async fn send_recv(
     mut control: Control,
-    iter: impl IntoIterator<Item = Vec<u8>>,
+    iter: impl IntoIterator<Item = Msg>,
 ) -> Result<(), ConnectionError> {
-    for msg in iter {
+    for Msg(msg) in iter {
         let stream = control.open_stream().await?;
         log::debug!("C: new stream: {}", stream);
         let id = stream.id();
@@ -413,13 +407,13 @@ async fn send_recv(
 /// sequence of responses will be returned.
 async fn send_recv_single(
     mut control: Control,
-    iter: impl IntoIterator<Item = Vec<u8>>,
+    iter: impl IntoIterator<Item = Msg>,
 ) -> Result<(), ConnectionError> {
     let stream = control.open_stream().await?;
     log::debug!("C: new stream: {}", stream);
     let id = stream.id();
     let (mut reader, mut writer) = AsyncReadExt::split(stream);
-    for msg in iter {
+    for Msg(msg) in iter {
         let len = msg.len();
         let write_fut = async {
             writer.write_all(&msg).await.unwrap();
