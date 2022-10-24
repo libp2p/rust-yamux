@@ -250,16 +250,7 @@ fn write_deadlock() {
 
     // Continuously advance the Yamux connection of the client in a background task.
     pool.spawner()
-        .spawn_obj(
-            yamux::into_stream(client)
-                .for_each(|_| {
-                    panic!("Unexpected inbound stream for client");
-                    #[allow(unreachable_code)]
-                    future::ready(())
-                })
-                .boxed()
-                .into(),
-        )
+        .spawn_obj(noop_server(client).boxed().into())
         .unwrap();
 
     // Send the message, expecting it to be echo'd.
@@ -376,7 +367,10 @@ where
 }
 
 /// For each incoming stream, do nothing.
-async fn noop_server(c: Connection<Compat<TcpStream>>) {
+async fn noop_server<T>(c: Connection<T>)
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
     yamux::into_stream(c)
         .for_each(|maybe_stream| {
             drop(maybe_stream);
