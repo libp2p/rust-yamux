@@ -8,7 +8,8 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-use futures::{channel::mpsc, prelude::*};
+use futures::prelude::*;
+use futures::stream::FuturesUnordered;
 use quickcheck::{Arbitrary, Gen, QuickCheck};
 use std::{
     io,
@@ -42,43 +43,47 @@ async fn roundtrip(nstreams: usize, data: Arc<Vec<u8>>, tcp_buffer_sizes: Option
 
     task::spawn(echo_server(server));
 
-    let (tx, rx) = mpsc::unbounded();
     let mut ctrl = client.control();
     task::spawn(noop_server(client));
 
-    for _ in 0..nstreams {
-        let data = data.clone();
-        let tx = tx.clone();
-        let mut ctrl = ctrl.clone();
-        task::spawn(async move {
-            let mut stream = ctrl.open_stream().await?;
-            log::debug!("C: opened new stream {}", stream.id());
-            stream
-                .write_all(&(data.len() as u32).to_be_bytes()[..])
-                .await?;
-            stream.write_all(&data).await?;
-            stream.close().await?;
-            log::debug!("C: {}: wrote {} bytes", stream.id(), data.len());
-            let mut frame = vec![0; data.len()];
-            stream.read_exact(&mut frame).await?;
-            log::debug!("C: {}: read {} bytes", stream.id(), frame.len());
-            assert_eq!(&data[..], &frame[..]);
-            tx.unbounded_send(1).expect("unbounded_send");
-            Ok::<(), yamux::ConnectionError>(())
-        });
-    }
-    let n = rx
-        .take(nstreams)
-        .fold(0, |acc, n| future::ready(acc + n))
-        .await;
+    let result = (0..nstreams)
+        .map(|_| {
+            let data = data.clone();
+            let mut ctrl = ctrl.clone();
+
+            task::spawn(async move {
+                let mut stream = ctrl.open_stream().await?;
+                log::debug!("C: opened new stream {}", stream.id());
+                stream
+                    .write_all(&(data.len() as u32).to_be_bytes()[..])
+                    .await?;
+                stream.write_all(&data).await?;
+                stream.close().await?;
+                log::debug!("C: {}: wrote {} bytes", stream.id(), data.len());
+                let mut frame = vec![0; data.len()];
+                stream.read_exact(&mut frame).await?;
+                log::debug!("C: {}: read {} bytes", stream.id(), frame.len());
+                assert_eq!(&data[..], &frame[..]);
+
+                Ok::<(), ConnectionError>(())
+            })
+        })
+        .collect::<FuturesUnordered<_>>()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap()
+        .into_iter()
+        .collect::<Result<Vec<_>, ConnectionError>>();
+
     ctrl.close().await.expect("close connection");
-    assert_eq!(nstreams, n)
+
+    assert_eq!(result.unwrap().len(), nstreams);
 }
 
 /// For each incoming stream of `c` echo back to the sender.
 async fn echo_server<T>(c: Connection<T>) -> Result<(), ConnectionError>
-    where
-        T: AsyncRead + AsyncWrite + Unpin,
+where
+    T: AsyncRead + AsyncWrite + Unpin,
 {
     yamux::into_stream(c)
         .try_for_each_concurrent(None, |mut stream| async move {
@@ -100,8 +105,8 @@ async fn echo_server<T>(c: Connection<T>) -> Result<(), ConnectionError>
 
 /// For each incoming stream, do nothing.
 async fn noop_server<T>(c: Connection<T>)
-    where
-        T: AsyncRead + AsyncWrite + Unpin,
+where
+    T: AsyncRead + AsyncWrite + Unpin,
 {
     yamux::into_stream(c)
         .for_each(|maybe_stream| {
