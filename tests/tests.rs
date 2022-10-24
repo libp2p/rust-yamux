@@ -34,26 +34,23 @@ use yamux::{Config, Connection, ConnectionError, Control, Mode};
 
 #[test]
 fn prop_config_send_recv_single() {
-    fn prop(mut msgs: Vec<Msg>, cfg1: TestConfig, cfg2: TestConfig) -> TestResult {
+    fn prop(
+        mut msgs: Vec<Msg>,
+        TestConfig(cfg1): TestConfig,
+        TestConfig(cfg2): TestConfig,
+    ) -> TestResult {
         msgs.insert(0, Msg(vec![1u8; yamux::DEFAULT_CREDIT as usize]));
 
         Runtime::new().unwrap().block_on(async move {
             let num_requests = msgs.len();
             let iter = msgs.into_iter().map(|m| m.0);
 
-            let (listener, address) = bind().await.expect("bind");
+            let (server, client) = connected_peers(cfg1, cfg2).await;
 
-            let server = async {
-                let socket = listener.accept().await.expect("accept").0.compat();
-                let connection = Connection::new(socket, cfg1.0, Mode::Server);
-                echo_server(connection).await
-            };
-
+            let server = echo_server(server);
             let client = async {
-                let socket = TcpStream::connect(address).await.expect("connect").compat();
-                let connection = Connection::new(socket, cfg2.0, Mode::Client);
-                let control = connection.control();
-                task::spawn(yamux::into_stream(connection).for_each(|_| future::ready(())));
+                let control = client.control();
+                task::spawn(yamux::into_stream(client).for_each(|_| future::ready(())));
                 send_recv_single(control, iter.clone())
                     .await
                     .expect("send_recv")
@@ -70,26 +67,23 @@ fn prop_config_send_recv_single() {
 
 #[test]
 fn prop_config_send_recv_multi() {
-    fn prop(mut msgs: Vec<Msg>, cfg1: TestConfig, cfg2: TestConfig) -> TestResult {
+    fn prop(
+        mut msgs: Vec<Msg>,
+        TestConfig(cfg1): TestConfig,
+        TestConfig(cfg2): TestConfig,
+    ) -> TestResult {
         msgs.insert(0, Msg(vec![1u8; yamux::DEFAULT_CREDIT as usize]));
 
         Runtime::new().unwrap().block_on(async move {
             let num_requests = msgs.len();
             let iter = msgs.into_iter().map(|m| m.0);
 
-            let (listener, address) = bind().await.expect("bind");
+            let (server, client) = connected_peers(cfg1, cfg2).await;
 
-            let server = async {
-                let socket = listener.accept().await.expect("accept").0.compat();
-                let connection = Connection::new(socket, cfg1.0, Mode::Server);
-                echo_server(connection).await
-            };
-
+            let server = echo_server(server);
             let client = async {
-                let socket = TcpStream::connect(address).await.expect("connect").compat();
-                let connection = Connection::new(socket, cfg2.0, Mode::Client);
-                let control = connection.control();
-                task::spawn(yamux::into_stream(connection).for_each(|_| future::ready(())));
+                let control = client.control();
+                task::spawn(yamux::into_stream(client).for_each(|_| future::ready(())));
                 send_recv(control, iter.clone()).await.expect("send_recv")
             };
 
@@ -113,19 +107,12 @@ fn prop_send_recv() {
             let num_requests = msgs.len();
             let iter = msgs.into_iter().map(|m| m.0);
 
-            let (listener, address) = bind().await.expect("bind");
+            let (server, client) = connected_peers(Config::default(), Config::default()).await;
 
-            let server = async {
-                let socket = listener.accept().await.expect("accept").0.compat();
-                let connection = Connection::new(socket, Config::default(), Mode::Server);
-                echo_server(connection).await
-            };
-
+            let server = echo_server(server);
             let client = async {
-                let socket = TcpStream::connect(address).await.expect("connect").compat();
-                let connection = Connection::new(socket, Config::default(), Mode::Client);
-                let control = connection.control();
-                task::spawn(yamux::into_stream(connection).for_each(|_| future::ready(())));
+                let control = client.control();
+                task::spawn(yamux::into_stream(client).for_each(|_| future::ready(())));
                 send_recv(control, iter.clone()).await.expect("send_recv")
             };
 
@@ -144,21 +131,12 @@ fn prop_max_streams() {
         cfg.set_max_num_streams(max_streams);
 
         Runtime::new().unwrap().block_on(async move {
-            let (listener, address) = bind().await.expect("bind");
+            let (server, client) = connected_peers(cfg.clone(), cfg).await;
 
-            let cfg_s = cfg.clone();
-            let server = async move {
-                let socket = listener.accept().await.expect("accept").0.compat();
-                let connection = Connection::new(socket, cfg_s, Mode::Server);
-                echo_server(connection).await
-            };
+            task::spawn(echo_server(server));
 
-            task::spawn(server);
-
-            let socket = TcpStream::connect(address).await.expect("connect").compat();
-            let connection = Connection::new(socket, cfg, Mode::Client);
-            let mut control = connection.control();
-            task::spawn(yamux::into_stream(connection).for_each(|_| future::ready(())));
+            let mut control = client.control();
+            task::spawn(yamux::into_stream(client).for_each(|_| future::ready(())));
             let mut v = Vec::new();
             for _ in 0..max_streams {
                 v.push(control.open_stream().await.expect("open_stream"))
@@ -179,18 +157,16 @@ fn prop_send_recv_half_closed() {
         let msg_len = msg.0.len();
 
         Runtime::new().unwrap().block_on(async move {
-            let (listener, address) = bind().await.expect("bind");
+            let (mut server, client) = connected_peers(Config::default(), Config::default()).await;
 
             // Server should be able to write on a stream shutdown by the client.
             let server = async {
-                let socket = listener.accept().await.expect("accept").0.compat();
-                let mut connection = Connection::new(socket, Config::default(), Mode::Server);
-                let mut stream = connection
+                let mut stream = server
                     .next_stream()
                     .await
                     .expect("S: next_stream")
                     .expect("S: some stream");
-                task::spawn(yamux::into_stream(connection).for_each(|_| future::ready(())));
+                task::spawn(yamux::into_stream(server).for_each(|_| future::ready(())));
                 let mut buf = vec![0; msg_len];
                 stream.read_exact(&mut buf).await.expect("S: read_exact");
                 stream.write_all(&buf).await.expect("S: send");
@@ -199,10 +175,8 @@ fn prop_send_recv_half_closed() {
 
             // Client should be able to read after shutting down the stream.
             let client = async {
-                let socket = TcpStream::connect(address).await.expect("connect").compat();
-                let connection = Connection::new(socket, Config::default(), Mode::Client);
-                let mut control = connection.control();
-                task::spawn(yamux::into_stream(connection).for_each(|_| future::ready(())));
+                let mut control = client.control();
+                task::spawn(yamux::into_stream(client).for_each(|_| future::ready(())));
                 let mut stream = control.open_stream().await.expect("C: open_stream");
                 stream.write_all(&msg.0).await.expect("C: send");
                 stream.close().await.expect("C: close");
@@ -352,6 +326,24 @@ impl Arbitrary for TestConfig {
         c.set_receive_window(256 * 1024 + u32::arbitrary(g) % (768 * 1024));
         TestConfig(c)
     }
+}
+
+async fn connected_peers(
+    server_config: Config,
+    client_config: Config,
+) -> (Connection<Compat<TcpStream>>, Connection<Compat<TcpStream>>) {
+    let (listener, addr) = bind().await.unwrap();
+
+    let server = async {
+        let (stream, _) = listener.accept().await.unwrap();
+        Connection::new(stream.compat(), server_config, Mode::Server)
+    };
+    let client = async {
+        let stream = TcpStream::connect(addr).await.unwrap();
+        Connection::new(stream.compat(), client_config, Mode::Client)
+    };
+
+    futures::future::join(server, client).await
 }
 
 async fn bind() -> io::Result<(TcpListener, SocketAddr)> {
