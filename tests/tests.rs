@@ -237,23 +237,9 @@ fn write_deadlock() {
     let server = Connection::new(server_endpoint, Config::default(), Mode::Server);
     pool.spawner()
         .spawn_obj(
-            async move {
-                yamux::into_stream(server)
-                    .try_for_each_concurrent(None, |mut stream| async move {
-                        {
-                            let (mut r, mut w) = AsyncReadExt::split(&mut stream);
-                            // Write back the bytes received. This may buffer internally.
-                            futures::io::copy(&mut r, &mut w).await?;
-                        }
-                        log::debug!("S: stream {} done.", stream.id());
-                        stream.close().await?;
-                        Ok(())
-                    })
-                    .await
-                    .expect("server failed")
-            }
-            .boxed()
-            .into(),
+            async move { echo_server(server).await.unwrap() }
+                .boxed()
+                .into(),
         )
         .unwrap();
 
@@ -373,7 +359,10 @@ async fn bind() -> io::Result<(TcpListener, SocketAddr)> {
 }
 
 /// For each incoming stream of `c` echo back to the sender.
-async fn echo_server(c: Connection<Compat<TcpStream>>) -> Result<(), ConnectionError> {
+async fn echo_server<T>(c: Connection<T>) -> Result<(), ConnectionError>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
     yamux::into_stream(c)
         .try_for_each_concurrent(None, |mut stream| async move {
             {
