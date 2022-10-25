@@ -87,6 +87,7 @@
 //   command processing instead of having to scan the whole collection of
 //   `Stream`s on each loop iteration, which is not great.
 
+mod cleanup;
 mod closing;
 mod control;
 mod stream;
@@ -97,19 +98,19 @@ use crate::{
     frame::{self, Frame},
     Config, WindowUpdateMode, DEFAULT_CREDIT,
 };
-use futures::future::BoxFuture;
 use futures::{
     channel::{mpsc, oneshot},
     future::{self, Either},
     prelude::*,
     sink::SinkExt,
-    stream::{Fuse, FusedStream},
+    stream::Fuse,
 };
 use nohash_hasher::IntMap;
 use std::collections::VecDeque;
 use std::task::Context;
 use std::{fmt, sync::Arc, task::Poll};
 
+use crate::connection::cleanup::Cleanup;
 use crate::connection::closing::Closing;
 pub use control::Control;
 pub use stream::{Packet, State, Stream};
@@ -225,7 +226,7 @@ enum ConnectionState<T> {
         reply: oneshot::Sender<()>,
     },
     /// An error occurred and we are cleaning up our resources.
-    Cleanup(BoxFuture<'static, Result<()>>),
+    Cleanup(Cleanup),
     /// The connection is closed.
     Closed,
     /// Something went wrong during our state transitions. Should never happen unless there is a bug.
@@ -274,16 +275,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionState<T> {
                             *self = ConnectionState::Active(active);
                             return Poll::Ready(Some(Ok(stream)));
                         }
-                        Poll::Ready(Err(e)) => {
-                            *self = ConnectionState::Cleanup(
-                                async move {
-                                    active.cleanup().await;
-
-                                    Err(e)
-                                }
-                                .boxed(),
-                            )
-                        }
+                        Poll::Ready(Err(e)) => *self = ConnectionState::Cleanup(active.cleanup(e)),
                         Poll::Pending => {
                             *self = ConnectionState::Active(active);
                             return Poll::Pending;
@@ -313,20 +305,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionState<T> {
                     }
                 },
                 ConnectionState::Cleanup(mut cleanup) => match cleanup.poll_unpin(cx) {
-                    Poll::Ready(Ok(())) => {
+                    Poll::Ready(ConnectionError::Closed) => {
                         *self = ConnectionState::Closed;
                         return Poll::Ready(None);
                     }
-                    Poll::Ready(Err(e)) => {
+                    Poll::Ready(other) => {
                         *self = ConnectionState::Closed;
-
-                        let maybe_error = if matches!(e, ConnectionError::Closed) {
-                            None
-                        } else {
-                            Some(Err(e))
-                        };
-
-                        return Poll::Ready(maybe_error);
+                        return Poll::Ready(Some(Err(other)));
                     }
                     Poll::Pending => {
                         *self = ConnectionState::Cleanup(cleanup);
@@ -463,31 +448,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     /// Cleanup all our resources.
     ///
     /// This should be called in the context of an unrecoverable error on the connection.
-    async fn cleanup(mut self) {
-        // Close and drain the control command receiver.
-        if !self.control_receiver.is_terminated() {
-            self.control_receiver.close();
-            while let Some(cmd) = self.control_receiver.next().await {
-                match cmd {
-                    ControlCommand::OpenStream(reply) => {
-                        let _ = reply.send(Err(ConnectionError::Closed));
-                    }
-                    ControlCommand::CloseConnection(reply) => {
-                        let _ = reply.send(());
-                    }
-                }
-            }
-        }
-
+    fn cleanup(mut self, error: ConnectionError) -> Cleanup {
         self.drop_all_streams();
 
-        // Close and drain the stream command receiver.
-        if !self.stream_receiver.is_terminated() {
-            self.stream_receiver.close();
-            while let Some(_cmd) = self.stream_receiver.next().await {
-                // drop it
-            }
-        }
+        Cleanup::new(self.control_receiver, self.stream_receiver, error)
     }
 
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Result<Stream>> {
