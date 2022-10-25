@@ -89,14 +89,14 @@
 
 mod cleanup;
 mod closing;
-mod control;
 mod stream;
 
+use crate::Result;
 use crate::{
     error::ConnectionError,
     frame::header::{self, Data, GoAway, Header, Ping, StreamId, Tag, WindowUpdate, CONNECTION_ID},
     frame::{self, Frame},
-    Config, WindowUpdateMode, DEFAULT_CREDIT,
+    Config, WindowUpdateMode, DEFAULT_CREDIT, MAX_COMMAND_BACKLOG,
 };
 use cleanup::Cleanup;
 use closing::Closing;
@@ -106,16 +106,7 @@ use std::collections::VecDeque;
 use std::task::Context;
 use std::{fmt, sync::Arc, task::Poll};
 
-pub use control::{Control, ControlledConnection};
 pub use stream::{Packet, State, Stream};
-
-/// Arbitrary limit of our internal command channels.
-///
-/// Since each `mpsc::Sender` gets a guaranteed slot in a channel the
-/// actual upper bound is this value + number of clones.
-const MAX_COMMAND_BACKLOG: usize = 32;
-
-type Result<T> = std::result::Result<T, ConnectionError>;
 
 /// How the connection is used.
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]

@@ -1,7 +1,7 @@
-use crate::connection::Result;
 use crate::connection::StreamCommand;
 use crate::frame;
 use crate::frame::Frame;
+use crate::Result;
 use futures::channel::mpsc;
 use futures::stream::Fuse;
 use futures::{ready, AsyncRead, AsyncWrite, SinkExt, StreamExt};
