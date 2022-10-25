@@ -109,7 +109,7 @@ where
 async fn send_recv_data(mut stream: yamux::Stream, data: &[u8]) -> io::Result<()> {
     let len = (data.len() as u32).to_be_bytes();
     stream.write_all(&len).await?;
-    stream.write_all(&data).await?;
+    stream.write_all(data).await?;
     stream.close().await?;
 
     log::debug!("C: {}: wrote {} bytes", stream.id(), data.len());
@@ -119,7 +119,7 @@ async fn send_recv_data(mut stream: yamux::Stream, data: &[u8]) -> io::Result<()
 
     log::debug!("C: {}: read {} bytes", stream.id(), received.len());
 
-    assert_eq!(&data[..], &received[..]);
+    assert_eq!(data, &received[..]);
 
     Ok(())
 }

@@ -15,6 +15,7 @@ use futures::io::AsyncReadExt;
 use futures::task::{Spawn, SpawnExt};
 use futures::{future, prelude::*};
 use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};
+use std::panic::panic_any;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
@@ -141,11 +142,9 @@ fn prop_max_streams() {
                 v.push(control.open_stream().await?)
             }
 
-            if let Err(ConnectionError::TooManyStreams) = control.open_stream().await {
-                Ok(true)
-            } else {
-                Ok(false)
-            }
+            let open_result = control.open_stream().await;
+
+            Ok(matches!(open_result, Err(ConnectionError::TooManyStreams)))
         })
     }
     QuickCheck::new().tests(7).quickcheck(prop as fn(_) -> _)
@@ -263,8 +262,8 @@ fn write_deadlock() {
                     // to start reading the echo'd bytes before it even finished
                     // sending them all.
                     let _ = join(
-                        writer.write_all(msg.as_ref()).map_err(|e| panic!(e)),
-                        reader.read_exact(&mut b[..]).map_err(|e| panic!(e)),
+                        writer.write_all(msg.as_ref()).map_err(|e| panic_any(e)),
+                        reader.read_exact(&mut b[..]).map_err(|e| panic_any(e)),
                     )
                     .await;
                     let mut stream = reader.reunite(writer).unwrap();
@@ -292,7 +291,7 @@ impl Arbitrary for Msg {
     }
 
     fn shrink(&self) -> Box<dyn Iterator<Item = Self>> {
-        Box::new(self.0.shrink().filter(|v| !v.is_empty()).map(|v| Msg(v)))
+        Box::new(self.0.shrink().filter(|v| !v.is_empty()).map(Msg))
     }
 }
 
@@ -544,7 +543,7 @@ mod bounded {
             cx: &mut Context<'_>,
             buf: &[u8],
         ) -> Poll<Result<usize>> {
-            debug_assert!(buf.len() > 0);
+            debug_assert!(!buf.is_empty());
             let mut guard = self.send_guard.lock().unwrap();
             let n = std::cmp::min(self.capacity - guard.size, buf.len());
             if n == 0 {

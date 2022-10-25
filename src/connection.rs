@@ -222,27 +222,15 @@ enum Shutdown {
 
 impl Shutdown {
     fn has_not_started(&self) -> bool {
-        if let Shutdown::NotStarted = self {
-            true
-        } else {
-            false
-        }
+        matches!(self, Shutdown::NotStarted)
     }
 
     fn is_in_progress(&self) -> bool {
-        if let Shutdown::InProgress(_) = self {
-            true
-        } else {
-            false
-        }
+        matches!(self, Shutdown::InProgress(_))
     }
 
     fn is_complete(&self) -> bool {
-        if let Shutdown::Complete = self {
-            true
-        } else {
-            false
-        }
+        matches!(self, Shutdown::Complete)
     }
 }
 
