@@ -162,7 +162,7 @@ pub struct Connection<T> {
     inner: ConnectionState<T>,
 }
 
-impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Connection<T> {
+impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     pub fn new(socket: T, cfg: Config, mode: Mode) -> Self {
         Self {
             inner: ConnectionState::Active(Active::new(socket, cfg, mode)),
@@ -245,7 +245,7 @@ impl<T> fmt::Debug for ConnectionState<T> {
     }
 }
 
-impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> ConnectionState<T> {
+impl<T: AsyncRead + AsyncWrite + Unpin> ConnectionState<T> {
     fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<Stream>>> {
         loop {
             match std::mem::replace(self, ConnectionState::Poisoned) {
@@ -963,7 +963,7 @@ impl<T> Active<T> {
 /// Turn a Yamux [`Connection`] into a [`futures::Stream`].
 pub fn into_stream<T>(mut c: Connection<T>) -> impl futures::stream::Stream<Item = Result<Stream>>
 where
-    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    T: AsyncRead + AsyncWrite + Unpin,
 {
     futures::stream::poll_fn(move |cx| c.poll_next(cx))
 }
