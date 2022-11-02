@@ -8,8 +8,6 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-use crate::WindowUpdateMode;
-use crate::{connection::State, Config, Connection, ConnectionError, Control, Mode};
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures::executor::LocalPool;
 use futures::future::join;
@@ -31,36 +29,33 @@ use tokio::{
     task,
 };
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
+use yamux::WindowUpdateMode;
+use yamux::{Config, Connection, ConnectionError, Control, Mode};
 
 #[test]
 fn prop_config_send_recv_single() {
-    fn prop(mut msgs: Vec<Msg>, cfg1: TestConfig, cfg2: TestConfig) -> TestResult {
-        let rt = Runtime::new().unwrap();
-        msgs.insert(0, Msg(vec![1u8; crate::DEFAULT_CREDIT as usize]));
-        rt.block_on(async move {
-            let num_requests = msgs.len();
-            let iter = msgs.into_iter().map(|m| m.0);
+    fn prop(
+        mut msgs: Vec<Msg>,
+        TestConfig(cfg1): TestConfig,
+        TestConfig(cfg2): TestConfig,
+    ) -> Result<(), ConnectionError> {
+        msgs.insert(0, Msg(vec![1u8; yamux::DEFAULT_CREDIT as usize]));
 
-            let (listener, address) = bind().await.expect("bind");
+        Runtime::new().unwrap().block_on(async move {
+            let (server, client) = connected_peers(cfg1, cfg2).await?;
 
-            let server = async {
-                let socket = listener.accept().await.expect("accept").0.compat();
-                let connection = Connection::new(socket, cfg1.0, Mode::Server);
-                repeat_echo(connection).await.expect("repeat_echo")
-            };
-
+            let server = echo_server(server);
             let client = async {
-                let socket = TcpStream::connect(address).await.expect("connect").compat();
-                let connection = Connection::new(socket, cfg2.0, Mode::Client);
-                let control = connection.control();
-                task::spawn(crate::into_stream(connection).for_each(|_| future::ready(())));
-                send_recv_single(control, iter.clone())
-                    .await
-                    .expect("send_recv")
+                let control = client.control();
+                task::spawn(noop_server(client));
+                send_on_single_stream(control, msgs).await?;
+
+                Ok(())
             };
 
-            let result = futures::join!(server, client).1;
-            TestResult::from_bool(result.len() == num_requests && result.into_iter().eq(iter))
+            futures::future::try_join(server, client).await?;
+
+            Ok(())
         })
     }
     QuickCheck::new()
@@ -70,31 +65,28 @@ fn prop_config_send_recv_single() {
 
 #[test]
 fn prop_config_send_recv_multi() {
-    fn prop(mut msgs: Vec<Msg>, cfg1: TestConfig, cfg2: TestConfig) -> TestResult {
-        let rt = Runtime::new().unwrap();
-        msgs.insert(0, Msg(vec![1u8; crate::DEFAULT_CREDIT as usize]));
-        rt.block_on(async move {
-            let num_requests = msgs.len();
-            let iter = msgs.into_iter().map(|m| m.0);
+    fn prop(
+        mut msgs: Vec<Msg>,
+        TestConfig(cfg1): TestConfig,
+        TestConfig(cfg2): TestConfig,
+    ) -> Result<(), ConnectionError> {
+        msgs.insert(0, Msg(vec![1u8; yamux::DEFAULT_CREDIT as usize]));
 
-            let (listener, address) = bind().await.expect("bind");
+        Runtime::new().unwrap().block_on(async move {
+            let (server, client) = connected_peers(cfg1, cfg2).await?;
 
-            let server = async {
-                let socket = listener.accept().await.expect("accept").0.compat();
-                let connection = Connection::new(socket, cfg1.0, Mode::Server);
-                repeat_echo(connection).await.expect("repeat_echo")
-            };
-
+            let server = echo_server(server);
             let client = async {
-                let socket = TcpStream::connect(address).await.expect("connect").compat();
-                let connection = Connection::new(socket, cfg2.0, Mode::Client);
-                let control = connection.control();
-                task::spawn(crate::into_stream(connection).for_each(|_| future::ready(())));
-                send_recv(control, iter.clone()).await.expect("send_recv")
+                let control = client.control();
+                task::spawn(noop_server(client));
+                send_on_separate_streams(control, msgs).await?;
+
+                Ok(())
             };
 
-            let result = futures::join!(server, client).1;
-            TestResult::from_bool(result.len() == num_requests && result.into_iter().eq(iter))
+            futures::future::try_join(server, client).await?;
+
+            Ok(())
         })
     }
     QuickCheck::new()
@@ -104,33 +96,26 @@ fn prop_config_send_recv_multi() {
 
 #[test]
 fn prop_send_recv() {
-    fn prop(msgs: Vec<Msg>) -> TestResult {
+    fn prop(msgs: Vec<Msg>) -> Result<TestResult, ConnectionError> {
         if msgs.is_empty() {
-            return TestResult::discard();
+            return Ok(TestResult::discard());
         }
-        let rt = Runtime::new().unwrap();
-        rt.block_on(async move {
-            let num_requests = msgs.len();
-            let iter = msgs.into_iter().map(|m| m.0);
 
-            let (listener, address) = bind().await.expect("bind");
+        Runtime::new().unwrap().block_on(async move {
+            let (server, client) = connected_peers(Config::default(), Config::default()).await?;
 
-            let server = async {
-                let socket = listener.accept().await.expect("accept").0.compat();
-                let connection = Connection::new(socket, Config::default(), Mode::Server);
-                repeat_echo(connection).await.expect("repeat_echo")
-            };
-
+            let server = echo_server(server);
             let client = async {
-                let socket = TcpStream::connect(address).await.expect("connect").compat();
-                let connection = Connection::new(socket, Config::default(), Mode::Client);
-                let control = connection.control();
-                task::spawn(crate::into_stream(connection).for_each(|_| future::ready(())));
-                send_recv(control, iter.clone()).await.expect("send_recv")
+                let control = client.control();
+                task::spawn(noop_server(client));
+                send_on_separate_streams(control, msgs).await?;
+
+                Ok(())
             };
 
-            let result = futures::join!(server, client).1;
-            TestResult::from_bool(result.len() == num_requests && result.into_iter().eq(iter))
+            futures::future::try_join(server, client).await?;
+
+            Ok(TestResult::passed())
         })
     }
     QuickCheck::new().tests(1).quickcheck(prop as fn(_) -> _)
@@ -138,36 +123,28 @@ fn prop_send_recv() {
 
 #[test]
 fn prop_max_streams() {
-    fn prop(n: usize) -> bool {
+    fn prop(n: usize) -> Result<bool, ConnectionError> {
         let max_streams = n % 100;
         let mut cfg = Config::default();
         cfg.set_max_num_streams(max_streams);
 
-        let rt = Runtime::new().unwrap();
-        rt.block_on(async move {
-            let (listener, address) = bind().await.expect("bind");
+        Runtime::new().unwrap().block_on(async move {
+            let (server, client) = connected_peers(cfg.clone(), cfg).await?;
 
-            let cfg_s = cfg.clone();
-            let server = async move {
-                let socket = listener.accept().await.expect("accept").0.compat();
-                let connection = Connection::new(socket, cfg_s, Mode::Server);
-                repeat_echo(connection).await
-            };
+            task::spawn(echo_server(server));
 
-            task::spawn(server);
+            let mut control = client.control();
+            task::spawn(noop_server(client));
 
-            let socket = TcpStream::connect(address).await.expect("connect").compat();
-            let connection = Connection::new(socket, cfg, Mode::Client);
-            let mut control = connection.control();
-            task::spawn(crate::into_stream(connection).for_each(|_| future::ready(())));
             let mut v = Vec::new();
             for _ in 0..max_streams {
-                v.push(control.open_stream().await.expect("open_stream"))
+                v.push(control.open_stream().await?)
             }
+
             if let Err(ConnectionError::TooManyStreams) = control.open_stream().await {
-                true
+                Ok(true)
             } else {
-                false
+                Ok(false)
             }
         })
     }
@@ -176,56 +153,60 @@ fn prop_max_streams() {
 
 #[test]
 fn prop_send_recv_half_closed() {
-    fn prop(msg: Msg) {
+    fn prop(msg: Msg) -> Result<(), ConnectionError> {
         let msg_len = msg.0.len();
-        let rt = Runtime::new().unwrap();
-        rt.block_on(async move {
-            let (listener, address) = bind().await.expect("bind");
+
+        Runtime::new().unwrap().block_on(async move {
+            let (mut server, client) =
+                connected_peers(Config::default(), Config::default()).await?;
 
             // Server should be able to write on a stream shutdown by the client.
             let server = async {
-                let socket = listener.accept().await.expect("accept").0.compat();
-                let mut connection = Connection::new(socket, Config::default(), Mode::Server);
-                let mut stream = connection
-                    .next_stream()
-                    .await
-                    .expect("S: next_stream")
-                    .expect("S: some stream");
-                task::spawn(crate::into_stream(connection).for_each(|_| future::ready(())));
+                let mut first_stream =
+                    server.next_stream().await?.ok_or(ConnectionError::Closed)?;
+
+                task::spawn(noop_server(server));
+
                 let mut buf = vec![0; msg_len];
-                stream.read_exact(&mut buf).await.expect("S: read_exact");
-                stream.write_all(&buf).await.expect("S: send");
-                stream.close().await.expect("S: close")
+                first_stream.read_exact(&mut buf).await?;
+                first_stream.write_all(&buf).await?;
+                first_stream.close().await?;
+
+                Result::<(), ConnectionError>::Ok(())
             };
 
             // Client should be able to read after shutting down the stream.
             let client = async {
-                let socket = TcpStream::connect(address).await.expect("connect").compat();
-                let connection = Connection::new(socket, Config::default(), Mode::Client);
-                let mut control = connection.control();
-                task::spawn(crate::into_stream(connection).for_each(|_| future::ready(())));
-                let mut stream = control.open_stream().await.expect("C: open_stream");
-                stream.write_all(&msg.0).await.expect("C: send");
-                stream.close().await.expect("C: close");
-                assert_eq!(State::SendClosed, stream.state());
+                let mut control = client.control();
+                task::spawn(noop_server(client));
+
+                let mut stream = control.open_stream().await?;
+                stream.write_all(&msg.0).await?;
+                stream.close().await?;
+
+                assert!(stream.is_write_closed());
+
                 let mut buf = vec![0; msg_len];
-                stream.read_exact(&mut buf).await.expect("C: read_exact");
+                stream.read_exact(&mut buf).await?;
+
                 assert_eq!(buf, msg.0);
                 assert_eq!(Some(0), stream.read(&mut buf).await.ok());
-                assert_eq!(State::Closed, stream.state());
+                assert!(stream.is_closed());
+
+                Result::<(), ConnectionError>::Ok(())
             };
 
-            futures::join!(server, client);
+            futures::future::try_join(server, client).await?;
+
+            Ok(())
         })
     }
-    QuickCheck::new().tests(7).quickcheck(prop as fn(_))
+    QuickCheck::new().tests(7).quickcheck(prop as fn(_) -> _)
 }
 
 /// This test simulates two endpoints of a Yamux connection which may be unable to
 /// write simultaneously but can make progress by reading. If both endpoints
 /// don't read in-between trying to finish their writes, a deadlock occurs.
-//
-// Ignored for now as the current implementation is prone to the deadlock tested below.
 #[test]
 fn write_deadlock() {
     let _ = env_logger::try_init();
@@ -254,23 +235,9 @@ fn write_deadlock() {
     let server = Connection::new(server_endpoint, Config::default(), Mode::Server);
     pool.spawner()
         .spawn_obj(
-            async move {
-                crate::into_stream(server)
-                    .try_for_each_concurrent(None, |mut stream| async move {
-                        {
-                            let (mut r, mut w) = AsyncReadExt::split(&mut stream);
-                            // Write back the bytes received. This may buffer internally.
-                            futures::io::copy(&mut r, &mut w).await?;
-                        }
-                        log::debug!("S: stream {} done.", stream.id());
-                        stream.close().await?;
-                        Ok(())
-                    })
-                    .await
-                    .expect("server failed")
-            }
-            .boxed()
-            .into(),
+            async move { echo_server(server).await.unwrap() }
+                .boxed()
+                .into(),
         )
         .unwrap();
 
@@ -281,16 +248,7 @@ fn write_deadlock() {
 
     // Continuously advance the Yamux connection of the client in a background task.
     pool.spawner()
-        .spawn_obj(
-            crate::into_stream(client)
-                .for_each(|_| {
-                    panic!("Unexpected inbound stream for client");
-                    #[allow(unreachable_code)]
-                    future::ready(())
-                })
-                .boxed()
-                .into(),
-        )
+        .spawn_obj(noop_server(client).boxed().into())
         .unwrap();
 
     // Send the message, expecting it to be echo'd.
@@ -355,6 +313,32 @@ impl Arbitrary for TestConfig {
     }
 }
 
+async fn connected_peers(
+    server_config: Config,
+    client_config: Config,
+) -> io::Result<(Connection<Compat<TcpStream>>, Connection<Compat<TcpStream>>)> {
+    let (listener, addr) = bind().await?;
+
+    let server = async {
+        let (stream, _) = listener.accept().await?;
+        Ok(Connection::new(
+            stream.compat(),
+            server_config,
+            Mode::Server,
+        ))
+    };
+    let client = async {
+        let stream = TcpStream::connect(addr).await?;
+        Ok(Connection::new(
+            stream.compat(),
+            client_config,
+            Mode::Client,
+        ))
+    };
+
+    futures::future::try_join(server, client).await
+}
+
 async fn bind() -> io::Result<(TcpListener, SocketAddr)> {
     let i = Ipv4Addr::new(127, 0, 0, 1);
     let s = SocketAddr::V4(SocketAddrV4::new(i, 0));
@@ -364,81 +348,92 @@ async fn bind() -> io::Result<(TcpListener, SocketAddr)> {
 }
 
 /// For each incoming stream of `c` echo back to the sender.
-async fn repeat_echo(c: Connection<Compat<TcpStream>>) -> Result<(), ConnectionError> {
-    let c = crate::into_stream(c);
-    c.try_for_each_concurrent(None, |mut stream| async move {
-        {
-            let (mut r, mut w) = futures::io::AsyncReadExt::split(&mut stream);
-            futures::io::copy(&mut r, &mut w).await?;
-        }
-        stream.close().await?;
-        Ok(())
-    })
-    .await
+async fn echo_server<T>(c: Connection<T>) -> Result<(), ConnectionError>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    yamux::into_stream(c)
+        .try_for_each_concurrent(None, |mut stream| async move {
+            {
+                let (mut r, mut w) = AsyncReadExt::split(&mut stream);
+                futures::io::copy(&mut r, &mut w).await?;
+            }
+            stream.close().await?;
+            Ok(())
+        })
+        .await
 }
 
-/// For each message in `iter`, open a new stream, send the message and
-/// collect the response. The sequence of responses will be returned.
-async fn send_recv<I>(mut control: Control, iter: I) -> Result<Vec<Vec<u8>>, ConnectionError>
+/// For each incoming stream, do nothing.
+async fn noop_server<T>(c: Connection<T>)
 where
-    I: Iterator<Item = Vec<u8>>,
+    T: AsyncRead + AsyncWrite + Unpin,
 {
-    let mut result = Vec::new();
+    yamux::into_stream(c)
+        .for_each(|maybe_stream| {
+            drop(maybe_stream);
+            future::ready(())
+        })
+        .await;
+}
 
+/// Send all messages, opening a new stream for each one.
+async fn send_on_separate_streams(
+    mut control: Control,
+    iter: impl IntoIterator<Item = Msg>,
+) -> Result<(), ConnectionError> {
     for msg in iter {
-        let stream = control.open_stream().await?;
+        let mut stream = control.open_stream().await?;
         log::debug!("C: new stream: {}", stream);
-        let id = stream.id();
-        let len = msg.len();
-        let (mut reader, mut writer) = AsyncReadExt::split(stream);
-        let write_fut = async {
-            writer.write_all(&msg).await.unwrap();
-            log::debug!("C: {}: sent {} bytes", id, len);
-            writer.close().await.unwrap();
-        };
-        let mut data = Vec::new();
-        let read_fut = async {
-            reader.read_to_end(&mut data).await.unwrap();
-            log::debug!("C: {}: received {} bytes", id, data.len());
-        };
-        futures::future::join(write_fut, read_fut).await;
-        result.push(data);
+
+        send_recv_message(&mut stream, msg).await?;
+        stream.close().await?;
     }
 
     log::debug!("C: closing connection");
     control.close().await?;
-    Ok(result)
+
+    Ok(())
 }
 
-/// Open a stream, send all messages and collect the responses. The
-/// sequence of responses will be returned.
-async fn send_recv_single<I>(mut control: Control, iter: I) -> Result<Vec<Vec<u8>>, ConnectionError>
-where
-    I: Iterator<Item = Vec<u8>>,
-{
-    let stream = control.open_stream().await?;
+/// Send all messages, using only a single stream.
+async fn send_on_single_stream(
+    mut control: Control,
+    iter: impl IntoIterator<Item = Msg>,
+) -> Result<(), ConnectionError> {
+    let mut stream = control.open_stream().await?;
     log::debug!("C: new stream: {}", stream);
+
+    for msg in iter {
+        send_recv_message(&mut stream, msg).await?;
+    }
+
+    stream.close().await?;
+
+    log::debug!("C: closing connection");
+    control.close().await?;
+
+    Ok(())
+}
+
+async fn send_recv_message(stream: &mut yamux::Stream, Msg(msg): Msg) -> io::Result<()> {
     let id = stream.id();
     let (mut reader, mut writer) = AsyncReadExt::split(stream);
-    let mut result = Vec::new();
-    for msg in iter {
-        let len = msg.len();
-        let write_fut = async {
-            writer.write_all(&msg).await.unwrap();
-            log::debug!("C: {}: sent {} bytes", id, len);
-        };
-        let mut data = vec![0; msg.len()];
-        let read_fut = async {
-            reader.read_exact(&mut data).await.unwrap();
-            log::debug!("C: {}: received {} bytes", id, data.len());
-        };
-        futures::future::join(write_fut, read_fut).await;
-        result.push(data)
-    }
-    writer.close().await?;
-    log::debug!("C: closing connection");
-    control.close().await?;
-    Ok(result)
+
+    let len = msg.len();
+    let write_fut = async {
+        writer.write_all(&msg).await.unwrap();
+        log::debug!("C: {}: sent {} bytes", id, len);
+    };
+    let mut data = vec![0; msg.len()];
+    let read_fut = async {
+        reader.read_exact(&mut data).await.unwrap();
+        log::debug!("C: {}: received {} bytes", id, data.len());
+    };
+    futures::future::join(write_fut, read_fut).await;
+    assert_eq!(data, msg);
+
+    Ok(())
 }
 
 /// This module implements a duplex connection via channels with bounded
