@@ -8,22 +8,18 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-#[allow(dead_code)]
-mod harness;
-
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures::executor::LocalPool;
 use futures::future::join;
 use futures::io::AsyncReadExt;
 use futures::prelude::*;
 use futures::task::{Spawn, SpawnExt};
-use harness::*;
-use harness::{Msg, TestConfig};
 use quickcheck::{QuickCheck, TestResult};
 use std::panic::panic_any;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
+use test_harness::*;
 use tokio::{runtime::Runtime, task};
 use yamux::{Config, Connection, ConnectionError, Control, Mode};
 

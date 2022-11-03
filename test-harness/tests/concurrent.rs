@@ -8,17 +8,14 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-#[allow(dead_code)]
-mod harness;
-
 use futures::prelude::*;
 use futures::stream::FuturesUnordered;
-use harness::*;
 use quickcheck::{Arbitrary, Gen, QuickCheck};
 use std::{
     io,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
 };
+use test_harness::*;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::{net::TcpSocket, runtime::Runtime, task};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};

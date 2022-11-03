@@ -1,14 +1,11 @@
-#[allow(dead_code)]
-mod harness;
-
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
 use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, FutureExt, StreamExt};
-use harness::*;
 use quickcheck::QuickCheck;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use test_harness::*;
 use tokio::net::TcpStream;
 use tokio::runtime::Runtime;
 use tokio_util::compat::TokioAsyncReadCompatExt;
