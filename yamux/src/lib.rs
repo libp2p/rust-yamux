@@ -45,7 +45,7 @@ pub type Result<T> = std::result::Result<T, ConnectionError>;
 
 /// Arbitrary limit of our internal command channels.
 ///
-/// Since each `mpsc::Sender` gets a guaranteed slot in a channel the
+/// Since each [`mpsc::Sender`] gets a guaranteed slot in a channel the
 /// actual upper bound is this value + number of clones.
 const MAX_COMMAND_BACKLOG: usize = 32;
 
