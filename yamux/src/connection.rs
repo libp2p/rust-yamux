@@ -350,8 +350,7 @@ struct Active<T> {
     streams: IntMap<StreamId, Stream>,
     stream_sender: mpsc::Sender<StreamCommand>,
     stream_receiver: mpsc::Receiver<StreamCommand>,
-    garbage: Vec<StreamId>,
-    // see `Connection::garbage_collect()`
+    dropped_streams: Vec<StreamId>,
     pending_frames: VecDeque<Frame<()>>,
 }
 
@@ -423,7 +422,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 Mode::Client => 1,
                 Mode::Server => 2,
             },
-            garbage: Vec::new(),
+            dropped_streams: Vec::new(),
             pending_frames: VecDeque::default(),
         }
     }
@@ -912,9 +911,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 log::trace!("{}/{}: sending: {}", self.id, stream_id, f.header());
                 self.pending_frames.push_back(f.into());
             }
-            self.garbage.push(stream_id)
+            self.dropped_streams.push(stream_id)
         }
-        for id in self.garbage.drain(..) {
+        for id in self.dropped_streams.drain(..) {
             self.streams.remove(&id);
         }
     }
