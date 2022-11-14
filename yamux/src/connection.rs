@@ -485,7 +485,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 _ => {}
             }
 
-            // If we make it this far, at least once of the above must have registered a waker.
+            // If we make it this far, at least one of the above must have registered a waker.
             return Poll::Pending;
         }
     }
