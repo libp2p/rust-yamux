@@ -469,7 +469,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 Poll::Ready(None) => {
                     debug_assert!(false, "Only closed during shutdown")
                 }
-                _ => {}
+                Poll::Pending => {}
             }
 
             match self.socket.poll_next_unpin(cx) {
@@ -482,7 +482,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 Poll::Ready(None) => {
                     return Poll::Ready(Err(ConnectionError::Closed));
                 }
-                _ => {}
+                Poll::Pending => {}
             }
 
             // If we make it this far, at least one of the above must have registered a waker.
