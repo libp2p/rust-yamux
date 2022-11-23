@@ -1,3 +1,11 @@
+# 0.11.0 [unreleased]
+
+- Remove `Connection::control` in favor of `Control::new`.
+  Remove `Connection::next_stream` in favor of `Connection::poll_next_inbound`.
+  See [PR 142].
+
+[PR 142]: https://github.com/libp2p/rust-yamux/pull/142
+
 # 0.10.2
 
 - Process command or socket result immediately and thereby no longer accessing
