@@ -98,6 +98,16 @@ impl Frame<Data> {
         })
     }
 
+    pub fn close_stream(id: StreamId, ack: bool) -> Self {
+        let mut header = Header::data(id, 0);
+        header.fin();
+        if ack {
+            header.ack()
+        }
+
+        Frame::new(header)
+    }
+
     pub fn body(&self) -> &[u8] {
         &self.body
     }

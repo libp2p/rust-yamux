@@ -14,12 +14,12 @@ use quickcheck::{Arbitrary, Gen, QuickCheck};
 use std::{
     io,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-    sync::Arc,
 };
+use test_harness::*;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::{net::TcpSocket, runtime::Runtime, task};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
-use yamux::{Config, Connection, ConnectionError, Mode, WindowUpdateMode};
+use yamux::{Config, Connection, ConnectionError, Control, Mode, WindowUpdateMode};
 
 const PAYLOAD_SIZE: usize = 128 * 1024;
 
@@ -28,7 +28,7 @@ fn concurrent_streams() {
     let _ = env_logger::try_init();
 
     fn prop(tcp_buffer_sizes: Option<TcpBufferSizes>) {
-        let data = Arc::new(vec![0x42; PAYLOAD_SIZE]);
+        let data = Msg(vec![0x42; PAYLOAD_SIZE]);
         let n_streams = 1000;
 
         Runtime::new().expect("new runtime").block_on(async move {
@@ -36,7 +36,7 @@ fn concurrent_streams() {
 
             task::spawn(echo_server(server));
 
-            let mut ctrl = client.control();
+            let (mut ctrl, client) = Control::new(client);
             task::spawn(noop_server(client));
 
             let result = (0..n_streams)
@@ -45,10 +45,11 @@ fn concurrent_streams() {
                     let mut ctrl = ctrl.clone();
 
                     task::spawn(async move {
-                        let stream = ctrl.open_stream().await?;
+                        let mut stream = ctrl.open_stream().await?;
                         log::debug!("C: opened new stream {}", stream.id());
 
-                        send_recv_data(stream, &data).await?;
+                        send_recv_message(&mut stream, data).await?;
+                        stream.close().await?;
 
                         Ok::<(), ConnectionError>(())
                     })
@@ -67,61 +68,6 @@ fn concurrent_streams() {
     }
 
     QuickCheck::new().tests(3).quickcheck(prop as fn(_) -> _)
-}
-
-/// For each incoming stream of `c` echo back to the sender.
-async fn echo_server<T>(c: Connection<T>) -> Result<(), ConnectionError>
-where
-    T: AsyncRead + AsyncWrite + Unpin,
-{
-    yamux::into_stream(c)
-        .try_for_each_concurrent(None, |mut stream| async move {
-            log::debug!("S: accepted new stream");
-
-            let mut len = [0; 4];
-            stream.read_exact(&mut len).await?;
-
-            let mut buf = vec![0; u32::from_be_bytes(len) as usize];
-
-            stream.read_exact(&mut buf).await?;
-            stream.write_all(&buf).await?;
-            stream.close().await?;
-
-            Ok(())
-        })
-        .await
-}
-
-/// For each incoming stream, do nothing.
-async fn noop_server<T>(c: Connection<T>)
-where
-    T: AsyncRead + AsyncWrite + Unpin,
-{
-    yamux::into_stream(c)
-        .for_each(|maybe_stream| {
-            drop(maybe_stream);
-            future::ready(())
-        })
-        .await;
-}
-
-/// Sends the given data on the provided stream, length-prefixed.
-async fn send_recv_data(mut stream: yamux::Stream, data: &[u8]) -> io::Result<()> {
-    let len = (data.len() as u32).to_be_bytes();
-    stream.write_all(&len).await?;
-    stream.write_all(&data).await?;
-    stream.close().await?;
-
-    log::debug!("C: {}: wrote {} bytes", stream.id(), data.len());
-
-    let mut received = vec![0; data.len()];
-    stream.read_exact(&mut received).await?;
-
-    log::debug!("C: {}: read {} bytes", stream.id(), received.len());
-
-    assert_eq!(&data[..], &received[..]);
-
-    Ok(())
 }
 
 /// Send and receive buffer size for a TCP socket.

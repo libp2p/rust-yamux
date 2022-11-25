@@ -25,13 +25,14 @@
 #![forbid(unsafe_code)]
 
 mod chunks;
+mod control;
 mod error;
 mod frame;
-mod pause;
 
 pub(crate) mod connection;
 
-pub use crate::connection::{into_stream, Connection, Control, Mode, Packet, Stream};
+pub use crate::connection::{Connection, Mode, Packet, Stream};
+pub use crate::control::{Control, ControlledConnection};
 pub use crate::error::ConnectionError;
 pub use crate::frame::{
     header::{HeaderDecodeError, StreamId},
@@ -39,6 +40,14 @@ pub use crate::frame::{
 };
 
 pub const DEFAULT_CREDIT: u32 = 256 * 1024; // as per yamux specification
+
+pub type Result<T> = std::result::Result<T, ConnectionError>;
+
+/// Arbitrary limit of our internal command channels.
+///
+/// Since each [`mpsc::Sender`] gets a guaranteed slot in a channel the
+/// actual upper bound is this value + number of clones.
+const MAX_COMMAND_BACKLOG: usize = 32;
 
 /// Default maximum number of bytes a Yamux data frame might carry as its
 /// payload when being send. Larger Payloads will be split.

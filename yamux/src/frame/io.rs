@@ -97,7 +97,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Sink<Frame<()>> for Io<T> {
                         }
                         *offset += n;
                         if *offset == header.len() {
-                            if buffer.len() > 0 {
+                            if !buffer.is_empty() {
                                 let buffer = std::mem::take(buffer);
                                 this.write_state = WriteState::Body { buffer, offset: 0 };
                             } else {
@@ -186,7 +186,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                     ref mut buffer,
                 } => {
                     if *offset == header::HEADER_SIZE {
-                        let header = match header::decode(&buffer) {
+                        let header = match header::decode(buffer) {
                             Ok(hd) => hd,
                             Err(e) => return Poll::Ready(Some(Err(e.into()))),
                         };

@@ -48,20 +48,12 @@ pub enum State {
 impl State {
     /// Can we receive messages over this stream?
     pub fn can_read(self) -> bool {
-        if let State::RecvClosed | State::Closed = self {
-            false
-        } else {
-            true
-        }
+        !matches!(self, State::RecvClosed | State::Closed)
     }
 
     /// Can we send messages over this stream?
     pub fn can_write(self) -> bool {
-        if let State::SendClosed | State::Closed = self {
-            false
-        } else {
-            true
-        }
+        !matches!(self, State::SendClosed | State::Closed)
     }
 }
 
@@ -302,7 +294,7 @@ impl AsyncRead for Stream {
                 continue;
             }
             let k = std::cmp::min(chunk.len(), buf.len() - n);
-            (&mut buf[n..n + k]).copy_from_slice(&chunk.as_ref()[..k]);
+            buf[n..n + k].copy_from_slice(&chunk.as_ref()[..k]);
             n += k;
             chunk.advance(k);
             if n == buf.len() {
@@ -474,15 +466,15 @@ impl Shared {
         let new_credit = match self.config.window_update_mode {
             WindowUpdateMode::OnReceive => {
                 debug_assert!(self.config.receive_window >= self.window);
-                let bytes_received = self.config.receive_window.saturating_sub(self.window);
-                bytes_received
+
+                self.config.receive_window.saturating_sub(self.window)
             }
             WindowUpdateMode::OnRead => {
                 debug_assert!(self.config.receive_window >= self.window);
                 let bytes_received = self.config.receive_window.saturating_sub(self.window);
                 let buffer_len: u32 = self.buffer.len().try_into().unwrap_or(std::u32::MAX);
-                let bytes_read = bytes_received.saturating_sub(buffer_len);
-                bytes_read
+
+                bytes_received.saturating_sub(buffer_len)
             }
         };
 

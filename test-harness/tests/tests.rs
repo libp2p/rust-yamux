@@ -12,24 +12,15 @@ use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures::executor::LocalPool;
 use futures::future::join;
 use futures::io::AsyncReadExt;
+use futures::prelude::*;
 use futures::task::{Spawn, SpawnExt};
-use futures::{future, prelude::*};
-use quickcheck::{Arbitrary, Gen, QuickCheck, TestResult};
+use quickcheck::{QuickCheck, TestResult};
+use std::panic::panic_any;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
-use std::{
-    fmt::Debug,
-    io,
-    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
-};
-use tokio::{
-    net::{TcpListener, TcpStream},
-    runtime::Runtime,
-    task,
-};
-use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
-use yamux::WindowUpdateMode;
+use test_harness::*;
+use tokio::{runtime::Runtime, task};
 use yamux::{Config, Connection, ConnectionError, Control, Mode};
 
 #[test]
@@ -46,7 +37,7 @@ fn prop_config_send_recv_single() {
 
             let server = echo_server(server);
             let client = async {
-                let control = client.control();
+                let (control, client) = Control::new(client);
                 task::spawn(noop_server(client));
                 send_on_single_stream(control, msgs).await?;
 
@@ -77,7 +68,7 @@ fn prop_config_send_recv_multi() {
 
             let server = echo_server(server);
             let client = async {
-                let control = client.control();
+                let (control, client) = Control::new(client);
                 task::spawn(noop_server(client));
                 send_on_separate_streams(control, msgs).await?;
 
@@ -106,7 +97,7 @@ fn prop_send_recv() {
 
             let server = echo_server(server);
             let client = async {
-                let control = client.control();
+                let (control, client) = Control::new(client);
                 task::spawn(noop_server(client));
                 send_on_separate_streams(control, msgs).await?;
 
@@ -133,7 +124,7 @@ fn prop_max_streams() {
 
             task::spawn(echo_server(server));
 
-            let mut control = client.control();
+            let (mut control, client) = Control::new(client);
             task::spawn(noop_server(client));
 
             let mut v = Vec::new();
@@ -141,11 +132,9 @@ fn prop_max_streams() {
                 v.push(control.open_stream().await?)
             }
 
-            if let Err(ConnectionError::TooManyStreams) = control.open_stream().await {
-                Ok(true)
-            } else {
-                Ok(false)
-            }
+            let open_result = control.open_stream().await;
+
+            Ok(matches!(open_result, Err(ConnectionError::TooManyStreams)))
         })
     }
     QuickCheck::new().tests(7).quickcheck(prop as fn(_) -> _)
@@ -162,8 +151,9 @@ fn prop_send_recv_half_closed() {
 
             // Server should be able to write on a stream shutdown by the client.
             let server = async {
-                let mut first_stream =
-                    server.next_stream().await?.ok_or(ConnectionError::Closed)?;
+                let mut server = stream::poll_fn(move |cx| server.poll_next_inbound(cx));
+
+                let mut first_stream = server.next().await.ok_or(ConnectionError::Closed)??;
 
                 task::spawn(noop_server(server));
 
@@ -177,7 +167,7 @@ fn prop_send_recv_half_closed() {
 
             // Client should be able to read after shutting down the stream.
             let client = async {
-                let mut control = client.control();
+                let (mut control, client) = Control::new(client);
                 task::spawn(noop_server(client));
 
                 let mut stream = control.open_stream().await?;
@@ -185,7 +175,6 @@ fn prop_send_recv_half_closed() {
                 stream.close().await?;
 
                 assert!(stream.is_write_closed());
-
                 let mut buf = vec![0; msg_len];
                 stream.read_exact(&mut buf).await?;
 
@@ -244,7 +233,7 @@ fn write_deadlock() {
     // Create and spawn a "client" that sends messages expected to be echoed
     // by the server.
     let client = Connection::new(client_endpoint, Config::default(), Mode::Client);
-    let mut ctrl = client.control();
+    let (mut ctrl, client) = Control::new(client);
 
     // Continuously advance the Yamux connection of the client in a background task.
     pool.spawner()
@@ -263,8 +252,8 @@ fn write_deadlock() {
                     // to start reading the echo'd bytes before it even finished
                     // sending them all.
                     let _ = join(
-                        writer.write_all(msg.as_ref()).map_err(|e| panic!(e)),
-                        reader.read_exact(&mut b[..]).map_err(|e| panic!(e)),
+                        writer.write_all(msg.as_ref()).map_err(|e| panic_any(e)),
+                        reader.read_exact(&mut b[..]).map_err(|e| panic_any(e)),
                     )
                     .await;
                     let mut stream = reader.reunite(writer).unwrap();
@@ -276,105 +265,6 @@ fn write_deadlock() {
             )
             .unwrap(),
     );
-}
-
-#[derive(Clone, Debug)]
-struct Msg(Vec<u8>);
-
-impl Arbitrary for Msg {
-    fn arbitrary(g: &mut Gen) -> Msg {
-        let mut msg = Msg(Arbitrary::arbitrary(g));
-        if msg.0.is_empty() {
-            msg.0.push(Arbitrary::arbitrary(g));
-        }
-
-        msg
-    }
-
-    fn shrink(&self) -> Box<dyn Iterator<Item = Self>> {
-        Box::new(self.0.shrink().filter(|v| !v.is_empty()).map(|v| Msg(v)))
-    }
-}
-
-#[derive(Clone, Debug)]
-struct TestConfig(Config);
-
-impl Arbitrary for TestConfig {
-    fn arbitrary(g: &mut Gen) -> Self {
-        let mut c = Config::default();
-        c.set_window_update_mode(if bool::arbitrary(g) {
-            WindowUpdateMode::OnRead
-        } else {
-            WindowUpdateMode::OnReceive
-        });
-        c.set_read_after_close(Arbitrary::arbitrary(g));
-        c.set_receive_window(256 * 1024 + u32::arbitrary(g) % (768 * 1024));
-        TestConfig(c)
-    }
-}
-
-async fn connected_peers(
-    server_config: Config,
-    client_config: Config,
-) -> io::Result<(Connection<Compat<TcpStream>>, Connection<Compat<TcpStream>>)> {
-    let (listener, addr) = bind().await?;
-
-    let server = async {
-        let (stream, _) = listener.accept().await?;
-        Ok(Connection::new(
-            stream.compat(),
-            server_config,
-            Mode::Server,
-        ))
-    };
-    let client = async {
-        let stream = TcpStream::connect(addr).await?;
-        Ok(Connection::new(
-            stream.compat(),
-            client_config,
-            Mode::Client,
-        ))
-    };
-
-    futures::future::try_join(server, client).await
-}
-
-async fn bind() -> io::Result<(TcpListener, SocketAddr)> {
-    let i = Ipv4Addr::new(127, 0, 0, 1);
-    let s = SocketAddr::V4(SocketAddrV4::new(i, 0));
-    let l = TcpListener::bind(&s).await?;
-    let a = l.local_addr()?;
-    Ok((l, a))
-}
-
-/// For each incoming stream of `c` echo back to the sender.
-async fn echo_server<T>(c: Connection<T>) -> Result<(), ConnectionError>
-where
-    T: AsyncRead + AsyncWrite + Unpin,
-{
-    yamux::into_stream(c)
-        .try_for_each_concurrent(None, |mut stream| async move {
-            {
-                let (mut r, mut w) = AsyncReadExt::split(&mut stream);
-                futures::io::copy(&mut r, &mut w).await?;
-            }
-            stream.close().await?;
-            Ok(())
-        })
-        .await
-}
-
-/// For each incoming stream, do nothing.
-async fn noop_server<T>(c: Connection<T>)
-where
-    T: AsyncRead + AsyncWrite + Unpin,
-{
-    yamux::into_stream(c)
-        .for_each(|maybe_stream| {
-            drop(maybe_stream);
-            future::ready(())
-        })
-        .await;
 }
 
 /// Send all messages, opening a new stream for each one.
@@ -412,26 +302,6 @@ async fn send_on_single_stream(
 
     log::debug!("C: closing connection");
     control.close().await?;
-
-    Ok(())
-}
-
-async fn send_recv_message(stream: &mut yamux::Stream, Msg(msg): Msg) -> io::Result<()> {
-    let id = stream.id();
-    let (mut reader, mut writer) = AsyncReadExt::split(stream);
-
-    let len = msg.len();
-    let write_fut = async {
-        writer.write_all(&msg).await.unwrap();
-        log::debug!("C: {}: sent {} bytes", id, len);
-    };
-    let mut data = vec![0; msg.len()];
-    let read_fut = async {
-        reader.read_exact(&mut data).await.unwrap();
-        log::debug!("C: {}: received {} bytes", id, data.len());
-    };
-    futures::future::join(write_fut, read_fut).await;
-    assert_eq!(data, msg);
 
     Ok(())
 }
@@ -544,7 +414,7 @@ mod bounded {
             cx: &mut Context<'_>,
             buf: &[u8],
         ) -> Poll<Result<usize>> {
-            debug_assert!(buf.len() > 0);
+            debug_assert!(!buf.is_empty());
             let mut guard = self.send_guard.lock().unwrap();
             let n = std::cmp::min(self.capacity - guard.size, buf.len());
             if n == 0 {

@@ -1,0 +1,19 @@
+[package]
+name = "test-harness"
+version = "0.1.0"
+edition = "2018"
+publish = false
+
+[dependencies]
+yamux = { path = "../yamux" }
+futures = "0.3.4"
+quickcheck = "1.0"
+tokio = { version = "1.0", features = ["net", "rt-multi-thread", "macros", "time"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+anyhow = "1"
+log = "0.4.17"
+
+[dev-dependencies]
+env_logger = "0.9"
+constrained-connection = "0.1"
+
