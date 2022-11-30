@@ -1,4 +1,4 @@
-# 0.11.0 [unreleased]
+# 0.11.0
 
 - Remove `Connection::control` in favor of `Control::new`.
   Remove `Connection::next_stream` in favor of `Connection::poll_next_inbound`.
