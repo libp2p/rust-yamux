@@ -91,19 +91,19 @@ mod cleanup;
 mod closing;
 mod stream;
 
-use crate::Result;
 use crate::{
     error::ConnectionError,
     frame::header::{self, Data, GoAway, Header, Ping, StreamId, Tag, WindowUpdate, CONNECTION_ID},
     frame::{self, Frame},
     Config, WindowUpdateMode, DEFAULT_CREDIT, MAX_COMMAND_BACKLOG,
 };
+use crate::{Result, MAX_ACK_BACKLOG};
 use cleanup::Cleanup;
 use closing::Closing;
 use futures::{channel::mpsc, future::Either, prelude::*, sink::SinkExt, stream::Fuse};
 use nohash_hasher::IntMap;
-use std::collections::VecDeque;
-use std::task::Context;
+use std::collections::{HashSet, VecDeque};
+use std::task::{Context, Waker};
 use std::{fmt, sync::Arc, task::Poll};
 
 pub use stream::{Packet, State, Stream};
@@ -160,12 +160,16 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     pub fn poll_new_outbound(&mut self, cx: &mut Context<'_>) -> Poll<Result<Stream>> {
         loop {
             match std::mem::replace(&mut self.inner, ConnectionState::Poisoned) {
-                ConnectionState::Active(mut active) => match active.new_outbound() {
-                    Ok(stream) => {
+                ConnectionState::Active(mut active) => match active.poll_new_outbound(cx) {
+                    Poll::Ready(Ok(stream)) => {
                         self.inner = ConnectionState::Active(active);
                         return Poll::Ready(Ok(stream));
                     }
-                    Err(e) => {
+                    Poll::Pending => {
+                        self.inner = ConnectionState::Active(active);
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(Err(e)) => {
                         self.inner = ConnectionState::Cleanup(active.cleanup(e));
                         continue;
                     }
@@ -352,6 +356,8 @@ struct Active<T> {
     stream_receiver: mpsc::Receiver<StreamCommand>,
     dropped_streams: Vec<StreamId>,
     pending_frames: VecDeque<Frame<()>>,
+    pending_acks: HashSet<StreamId>,
+    new_outbound_stream_waker: Option<Waker>,
 }
 
 /// `Stream` to `Connection` commands.
@@ -424,6 +430,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             },
             dropped_streams: Vec::new(),
             pending_frames: VecDeque::default(),
+            pending_acks: HashSet::default(),
+            new_outbound_stream_waker: None,
         }
     }
 
@@ -490,10 +498,16 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         }
     }
 
-    fn new_outbound(&mut self) -> Result<Stream> {
+    fn poll_new_outbound(&mut self, cx: &mut Context<'_>) -> Poll<Result<Stream>> {
         if self.streams.len() >= self.config.max_num_streams {
             log::error!("{}: maximum number of streams reached", self.id);
-            return Err(ConnectionError::TooManyStreams);
+            return Poll::Ready(Err(ConnectionError::TooManyStreams));
+        }
+
+        if self.pending_acks.len() >= MAX_ACK_BACKLOG {
+            log::debug!("{MAX_ACK_BACKLOG} streams waiting for ACK, parking task until remote acknowledges at least one stream");
+            self.new_outbound_stream_waker = Some(cx.waker().clone());
+            return Poll::Pending;
         }
 
         log::trace!("{}: creating new outbound stream", self.id);
@@ -522,7 +536,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         log::debug!("{}: new outbound {} of {}", self.id, stream, self);
         self.streams.insert(id, stream.clone());
 
-        Ok(stream)
+        self.pending_acks.insert(id);
+
+        Poll::Ready(Ok(stream))
     }
 
     fn on_send_frame(&mut self, frame: Frame<Either<Data, WindowUpdate>>) {
@@ -549,6 +565,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     /// if one was opened by the remote.
     fn on_frame(&mut self, frame: Frame<()>) -> Result<Option<Stream>> {
         log::trace!("{}: received: {}", self.id, frame.header());
+
+        if frame.header().flags().contains(header::ACK) {
+            self.pending_acks.remove(&frame.header().stream_id());
+            if let Some(waker) = self.new_outbound_stream_waker.take() {
+                waker.wake();
+            }
+        }
+
         let action = match frame.header().tag() {
             Tag::Data => self.on_data(frame.into_data()),
             Tag::WindowUpdate => self.on_window_update(&frame.into_window_update()),

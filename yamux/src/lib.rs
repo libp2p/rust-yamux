@@ -49,6 +49,11 @@ pub type Result<T> = std::result::Result<T, ConnectionError>;
 /// actual upper bound is this value + number of clones.
 const MAX_COMMAND_BACKLOG: usize = 32;
 
+/// The maximum number of streams we will open without an acknowledgement from the other peer.
+///
+/// This enables a very basic form of backpressure.
+const MAX_ACK_BACKLOG: usize = 256;
+
 /// Default maximum number of bytes a Yamux data frame might carry as its
 /// payload when being send. Larger Payloads will be split.
 ///
