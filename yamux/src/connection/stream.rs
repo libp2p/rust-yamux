@@ -8,6 +8,7 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
+use crate::frame::header::ACK;
 use crate::{
     chunks::Chunks,
     connection::{self, StreamCommand},
@@ -133,6 +134,10 @@ impl Stream {
 
     pub fn is_acknowledged(&self) -> bool {
         self.shared().acknowledged
+    }
+
+    pub(crate) fn set_acknowledged(&self) {
+        self.shared().acknowledged = true;
     }
 
     /// Set the flag that should be set on the next outbound frame header.
@@ -355,6 +360,12 @@ impl AsyncWrite for Stream {
         let mut frame = Frame::data(self.id, body).expect("body <= u32::MAX").left();
         self.add_flag(frame.header_mut());
         log::trace!("{}/{}: write {} bytes", self.conn, self.id, n);
+
+        // technically, the frame hasn't been sent yet on the wire but from the perspective of this data structure, we've queued the frame for sending
+        if frame.header().flags().contains(ACK) {
+            self.set_acknowledged();
+        }
+
         let cmd = StreamCommand::SendFrame(frame);
         self.sender
             .start_send(cmd)

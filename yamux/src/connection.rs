@@ -567,7 +567,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         log::trace!("{}: received: {}", self.id, frame.header());
 
         if frame.header().flags().contains(header::ACK) {
-            self.pending_acks.remove(&frame.header().stream_id());
+            let id = frame.header().stream_id();
+            self.pending_acks.remove(&id);
+            if let Some(stream) = self.streams.get(&id) {
+                stream.set_acknowledged();
+            }
             if let Some(waker) = self.new_outbound_stream_waker.take() {
                 waker.wake();
             }
