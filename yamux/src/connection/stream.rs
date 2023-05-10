@@ -131,6 +131,10 @@ impl Stream {
         matches!(self.shared().state(), State::Closed)
     }
 
+    pub fn is_acknowledged(&self) -> bool {
+        self.shared().acknowledged
+    }
+
     /// Set the flag that should be set on the next outbound frame header.
     pub(crate) fn set_flag(&mut self, flag: Flag) {
         self.flag = flag
@@ -396,6 +400,9 @@ pub(crate) struct Shared {
     pub(crate) reader: Option<Waker>,
     pub(crate) writer: Option<Waker>,
     config: Arc<Config>,
+
+    /// Whether the stream has been acknowledged by the remote.
+    acknowledged: bool,
 }
 
 impl Shared {
@@ -408,6 +415,7 @@ impl Shared {
             reader: None,
             writer: None,
             config,
+            acknowledged: false,
         }
     }
 
