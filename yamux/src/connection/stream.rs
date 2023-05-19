@@ -363,6 +363,10 @@ impl AsyncWrite for Stream {
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
+        if self.is_closed() {
+            return Poll::Ready(Ok(()));
+        }
+
         let num_frames = {
             let shared = self.shared();
 
