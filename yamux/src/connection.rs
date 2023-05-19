@@ -102,8 +102,9 @@ use cleanup::Cleanup;
 use closing::Closing;
 use futures::{channel::mpsc, future::Either, prelude::*, sink::SinkExt, stream::Fuse};
 use nohash_hasher::IntMap;
+use std::collections::hash_map::Entry;
 use std::collections::VecDeque;
-use std::task::Context;
+use std::task::{Context, Waker};
 use std::{fmt, sync::Arc, task::Poll};
 
 pub use stream::{Packet, State, Stream};
@@ -348,6 +349,8 @@ struct Active<T> {
     socket: Fuse<frame::Io<T>>,
     next_id: u32,
     streams: IntMap<StreamId, Stream>,
+    /// Stores the "marks" at which we need to notify a waiting flush task of a [`Stream`].
+    flush_marks: IntMap<StreamId, (u64, Waker)>,
     stream_sender: mpsc::Sender<StreamCommand>,
     stream_receiver: mpsc::Receiver<StreamCommand>,
     dropped_streams: Vec<StreamId>,
@@ -359,6 +362,13 @@ struct Active<T> {
 pub(crate) enum StreamCommand {
     /// A new frame should be sent to the remote.
     SendFrame(Frame<Either<Data, WindowUpdate>>),
+    Flush {
+        id: StreamId,
+        /// How many frames we've queued for sending at the time the flush was requested.
+        num_frames: u64,
+        /// The waker to wake once the flush is complete.
+        waker: Waker,
+    },
     /// Close a stream.
     CloseStream { id: StreamId, ack: bool },
 }
@@ -416,6 +426,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             config: Arc::new(cfg),
             socket,
             streams: IntMap::default(),
+            flush_marks: Default::default(),
             stream_sender,
             stream_receiver,
             next_id: match mode {
@@ -464,6 +475,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 }
                 Poll::Ready(Some(StreamCommand::CloseStream { id, ack })) => {
                     self.on_close_stream(id, ack);
+                    continue;
+                }
+                Poll::Ready(Some(StreamCommand::Flush {
+                    id,
+                    num_frames,
+                    waker,
+                })) => {
+                    self.on_flush_stream(id, num_frames, waker);
                     continue;
                 }
                 Poll::Ready(None) => {
@@ -526,13 +545,36 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     }
 
     fn on_send_frame(&mut self, frame: Frame<Either<Data, WindowUpdate>>) {
-        log::trace!(
-            "{}/{}: sending: {}",
-            self.id,
-            frame.header().stream_id(),
-            frame.header()
-        );
+        let stream_id = frame.header().stream_id();
+
+        log::trace!("{}/{}: sending: {}", self.id, stream_id, frame.header());
         self.pending_frames.push_back(frame.into());
+
+        if let Some(stream) = self.streams.get(&stream_id) {
+            let mut shared = stream.shared();
+
+            shared.inc_sent();
+
+            if let Entry::Occupied(entry) = self.flush_marks.entry(stream_id) {
+                if shared.num_sent() >= entry.get().0 {
+                    entry.remove().1.wake();
+                }
+            }
+        }
+    }
+
+    fn on_flush_stream(&mut self, id: StreamId, new_flush_mark: u64, waker: Waker) {
+        if let Some(stream) = self.streams.get(&id) {
+            let shared = stream.shared();
+
+            // Check if we have already reached the requested flush mark:
+            if shared.num_sent() >= new_flush_mark {
+                waker.wake();
+                return;
+            }
+
+            self.flush_marks.insert(id, (new_flush_mark, waker));
+        }
     }
 
     fn on_close_stream(&mut self, id: StreamId, ack: bool) {
@@ -937,13 +979,13 @@ impl<T> Active<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::mem;
-    use std::pin::Pin;
-    use futures::AsyncReadExt;
+    use super::*;
     use futures::future::BoxFuture;
     use futures::stream::FuturesUnordered;
+    use futures::AsyncReadExt;
     use futures_ringbuf::Endpoint;
-    use super::*;
+    use std::mem;
+    use std::pin::Pin;
 
     #[tokio::test]
     async fn poll_flush_on_stream_only_returns_ok_if_frame_is_queued_for_sending() {
@@ -983,9 +1025,7 @@ mod tests {
 
     impl Client {
         fn new(connection: Connection<Endpoint>) -> Self {
-            Self::Initial {
-                connection
-            }
+            Self::Initial { connection }
         }
     }
 
@@ -998,7 +1038,10 @@ mod tests {
             loop {
                 match mem::replace(this, Client::Poisoned) {
                     // This state matching is out of order to have the interesting one at the top.
-                    Client::Testing { worker_stream: StreamState::Flushing(mut stream), mut connection } => {
+                    Client::Testing {
+                        worker_stream: StreamState::Flushing(mut stream),
+                        mut connection,
+                    } => {
                         match Pin::new(&mut stream).poll_flush(cx)? {
                             Poll::Ready(()) => {
                                 // Here is the actual test:
@@ -1009,9 +1052,14 @@ mod tests {
                                     panic!("Connection is not active")
                                 };
 
-                                active.stream_receiver.try_next().expect_err("expected no pending frames in the channel after flushing");
+                                active.stream_receiver.try_next().expect_err(
+                                    "expected no pending frames in the channel after flushing",
+                                );
 
-                                *this = Client::Testing { worker_stream: StreamState::Receiving(stream), connection };
+                                *this = Client::Testing {
+                                    worker_stream: StreamState::Receiving(stream),
+                                    connection,
+                                };
                                 continue;
                             }
                             Poll::Pending => {}
@@ -1020,7 +1068,10 @@ mod tests {
                         drive_connection(this, connection, StreamState::Flushing(stream), cx);
                         return Poll::Pending;
                     }
-                    Client::Testing { worker_stream: StreamState::Receiving(mut stream), connection } => {
+                    Client::Testing {
+                        worker_stream: StreamState::Receiving(mut stream),
+                        connection,
+                    } => {
                         let mut buffer = [0u8; 5];
 
                         match Pin::new(&mut stream).poll_read(cx, &mut buffer)? {
@@ -1028,7 +1079,10 @@ mod tests {
                                 assert_eq!(num_bytes, 5);
                                 assert_eq!(&buffer, b"hello");
 
-                                *this = Client::Testing { worker_stream: StreamState::Closing(stream), connection };
+                                *this = Client::Testing {
+                                    worker_stream: StreamState::Closing(stream),
+                                    connection,
+                                };
                                 continue;
                             }
                             Poll::Pending => {}
@@ -1037,7 +1091,10 @@ mod tests {
                         drive_connection(this, connection, StreamState::Closing(stream), cx);
                         return Poll::Pending;
                     }
-                    Client::Testing { worker_stream: StreamState::Closing(mut stream), connection } => {
+                    Client::Testing {
+                        worker_stream: StreamState::Closing(mut stream),
+                        connection,
+                    } => {
                         match Pin::new(&mut stream).poll_close(cx)? {
                             Poll::Ready(()) => {
                                 *this = Client::Closing { connection };
@@ -1052,7 +1109,10 @@ mod tests {
                     Client::Initial { mut connection } => {
                         match connection.poll_new_outbound(cx)? {
                             Poll::Ready(stream) => {
-                                *this = Client::Testing { connection, worker_stream: StreamState::Sending(stream) };
+                                *this = Client::Testing {
+                                    connection,
+                                    worker_stream: StreamState::Sending(stream),
+                                };
                                 continue;
                             }
                             Poll::Pending => {
@@ -1061,11 +1121,17 @@ mod tests {
                             }
                         }
                     }
-                    Client::Testing { worker_stream: StreamState::Sending(mut stream), connection } => {
+                    Client::Testing {
+                        worker_stream: StreamState::Sending(mut stream),
+                        connection,
+                    } => {
                         match Pin::new(&mut stream).poll_write(cx, b"hello")? {
                             Poll::Ready(written) => {
                                 assert_eq!(written, 5);
-                                *this = Client::Testing { worker_stream: StreamState::Flushing(stream), connection };
+                                *this = Client::Testing {
+                                    worker_stream: StreamState::Flushing(stream),
+                                    connection,
+                                };
                                 continue;
                             }
                             Poll::Pending => {}
@@ -1074,17 +1140,15 @@ mod tests {
                         drive_connection(this, connection, StreamState::Flushing(stream), cx);
                         return Poll::Pending;
                     }
-                    Client::Closing { mut connection } => {
-                        match connection.poll_close(cx)? {
-                            Poll::Ready(()) => {
-                                return Poll::Ready(Ok(()));
-                            }
-                            Poll::Pending => {
-                                *this = Client::Closing { connection };
-                                return Poll::Pending;
-                            }
+                    Client::Closing { mut connection } => match connection.poll_close(cx)? {
+                        Poll::Ready(()) => {
+                            return Poll::Ready(Ok(()));
                         }
-                    }
+                        Poll::Pending => {
+                            *this = Client::Closing { connection };
+                            return Poll::Pending;
+                        }
+                    },
                     Client::Poisoned => {
                         unreachable!()
                     }
@@ -1093,7 +1157,12 @@ mod tests {
         }
     }
 
-    fn drive_connection(this: &mut Client, mut connection: Connection<futures_ringbuf::Endpoint>, state: StreamState, cx: &mut Context) {
+    fn drive_connection(
+        this: &mut Client,
+        mut connection: Connection<futures_ringbuf::Endpoint>,
+        state: StreamState,
+        cx: &mut Context,
+    ) {
         match connection.poll_next_inbound(cx) {
             Poll::Ready(Some(_)) => {
                 panic!("Unexpected inbound stream")
@@ -1102,7 +1171,10 @@ mod tests {
                 panic!("Unexpected connection close")
             }
             Poll::Pending => {
-                *this = Client::Testing { worker_stream: state, connection };
+                *this = Client::Testing {
+                    worker_stream: state,
+                    connection,
+                };
             }
         }
     }
@@ -1125,8 +1197,7 @@ mod tests {
         }
     }
 
-    impl Future for EchoServer
-    {
+    impl Future for EchoServer {
         type Output = Result<usize>;
 
         fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -1161,7 +1232,7 @@ mod tests {
                                 stream.close().await?;
                                 Ok(())
                             }
-                                .boxed(),
+                            .boxed(),
                         );
                         continue;
                     }

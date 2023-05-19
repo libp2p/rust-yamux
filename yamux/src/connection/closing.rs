@@ -7,8 +7,9 @@ use futures::stream::Fuse;
 use futures::{ready, AsyncRead, AsyncWrite, SinkExt, StreamExt};
 use std::collections::VecDeque;
 use std::future::Future;
+use std::mem;
 use std::pin::Pin;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
 /// A [`Future`] that gracefully closes the yamux connection.
 #[must_use]
@@ -16,6 +17,7 @@ pub struct Closing<T> {
     state: State,
     stream_receiver: mpsc::Receiver<StreamCommand>,
     pending_frames: VecDeque<Frame<()>>,
+    pending_flush_wakers: Vec<Waker>,
     socket: Fuse<frame::Io<T>>,
 }
 
@@ -32,6 +34,7 @@ where
             state: State::ClosingStreamReceiver,
             stream_receiver,
             pending_frames,
+            pending_flush_wakers: vec![],
             socket,
         }
     }
@@ -60,10 +63,22 @@ where
                         Some(StreamCommand::SendFrame(frame)) => {
                             this.pending_frames.push_back(frame.into())
                         }
-                        Some(StreamCommand::CloseStream { id, ack }) => this
-                            .pending_frames
-                            .push_back(Frame::close_stream(id, ack).into()),
-                        None => this.state = State::SendingTermFrame,
+                        Some(StreamCommand::CloseStream { id, ack }) => {
+                            this.pending_frames
+                                .push_back(Frame::close_stream(id, ack).into());
+                        }
+                        Some(StreamCommand::Flush { waker, .. }) => {
+                            this.pending_flush_wakers.push(waker);
+                        }
+                        None => {
+                            // Receiver is closed, meaning we have queued all frames for sending.
+                            // Notify all pending flush tasks.
+                            for waker in mem::take(&mut this.pending_flush_wakers) {
+                                waker.wake();
+                            }
+
+                            this.state = State::SendingTermFrame;
+                        }
                     }
                 }
                 State::SendingTermFrame => {
