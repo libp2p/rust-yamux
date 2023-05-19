@@ -16,4 +16,3 @@ log = "0.4.17"
 [dev-dependencies]
 env_logger = "0.10"
 constrained-connection = "0.1"
-

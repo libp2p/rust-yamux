@@ -934,3 +934,246 @@ impl<T> Active<T> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::mem;
+    use std::pin::Pin;
+    use futures::AsyncReadExt;
+    use futures::future::BoxFuture;
+    use futures::stream::FuturesUnordered;
+    use futures_ringbuf::Endpoint;
+    use super::*;
+
+    #[tokio::test]
+    async fn poll_flush_on_stream_only_returns_ok_if_frame_is_queued_for_sending() {
+        let (client, server) = Endpoint::pair(1000, 1000);
+
+        let client = Client::new(Connection::new(client, Config::default(), Mode::Client));
+        let server = EchoServer::new(Connection::new(server, Config::default(), Mode::Server));
+
+        let ((), processed) = futures::future::try_join(client, server).await.unwrap();
+
+        assert_eq!(processed, 1);
+    }
+
+    /// Our testing client.
+    ///
+    /// This struct will open a single outbound stream, send a message, attempt to flush it and assert the internal state of [`Connection`] after it.
+    enum Client {
+        Initial {
+            connection: Connection<Endpoint>,
+        },
+        Testing {
+            connection: Connection<Endpoint>,
+            worker_stream: StreamState,
+        },
+        Closing {
+            connection: Connection<Endpoint>,
+        },
+        Poisoned,
+    }
+
+    enum StreamState {
+        Sending(Stream),
+        Flushing(Stream),
+        Receiving(Stream),
+        Closing(Stream),
+    }
+
+    impl Client {
+        fn new(connection: Connection<Endpoint>) -> Self {
+            Self::Initial {
+                connection
+            }
+        }
+    }
+
+    impl Future for Client {
+        type Output = Result<()>;
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            let this = self.get_mut();
+
+            loop {
+                match mem::replace(this, Client::Poisoned) {
+                    // This state matching is out of order to have the interesting one at the top.
+                    Client::Testing { worker_stream: StreamState::Flushing(mut stream), mut connection } => {
+                        match Pin::new(&mut stream).poll_flush(cx)? {
+                            Poll::Ready(()) => {
+                                // Here is the actual test:
+                                // If the stream reports that it successfully flushed, we expect the connection to have queued the frames for sending.
+                                // Because we only have a single stream, this means we can simply assert that there are no pending frames in the channel.
+
+                                let ConnectionState::Active(active) = &mut connection.inner else {
+                                    panic!("Connection is not active")
+                                };
+
+                                active.stream_receiver.try_next().expect_err("expected no pending frames in the channel after flushing");
+
+                                *this = Client::Testing { worker_stream: StreamState::Receiving(stream), connection };
+                                continue;
+                            }
+                            Poll::Pending => {}
+                        }
+
+                        drive_connection(this, connection, StreamState::Flushing(stream), cx);
+                        return Poll::Pending;
+                    }
+                    Client::Testing { worker_stream: StreamState::Receiving(mut stream), connection } => {
+                        let mut buffer = [0u8; 5];
+
+                        match Pin::new(&mut stream).poll_read(cx, &mut buffer)? {
+                            Poll::Ready(num_bytes) => {
+                                assert_eq!(num_bytes, 5);
+                                assert_eq!(&buffer, b"hello");
+
+                                *this = Client::Testing { worker_stream: StreamState::Closing(stream), connection };
+                                continue;
+                            }
+                            Poll::Pending => {}
+                        }
+
+                        drive_connection(this, connection, StreamState::Closing(stream), cx);
+                        return Poll::Pending;
+                    }
+                    Client::Testing { worker_stream: StreamState::Closing(mut stream), connection } => {
+                        match Pin::new(&mut stream).poll_close(cx)? {
+                            Poll::Ready(()) => {
+                                *this = Client::Closing { connection };
+                                continue;
+                            }
+                            Poll::Pending => {}
+                        }
+
+                        drive_connection(this, connection, StreamState::Closing(stream), cx);
+                        return Poll::Pending;
+                    }
+                    Client::Initial { mut connection } => {
+                        match connection.poll_new_outbound(cx)? {
+                            Poll::Ready(stream) => {
+                                *this = Client::Testing { connection, worker_stream: StreamState::Sending(stream) };
+                                continue;
+                            }
+                            Poll::Pending => {
+                                *this = Client::Initial { connection };
+                                return Poll::Pending;
+                            }
+                        }
+                    }
+                    Client::Testing { worker_stream: StreamState::Sending(mut stream), connection } => {
+                        match Pin::new(&mut stream).poll_write(cx, b"hello")? {
+                            Poll::Ready(written) => {
+                                assert_eq!(written, 5);
+                                *this = Client::Testing { worker_stream: StreamState::Flushing(stream), connection };
+                                continue;
+                            }
+                            Poll::Pending => {}
+                        }
+
+                        drive_connection(this, connection, StreamState::Flushing(stream), cx);
+                        return Poll::Pending;
+                    }
+                    Client::Closing { mut connection } => {
+                        match connection.poll_close(cx)? {
+                            Poll::Ready(()) => {
+                                return Poll::Ready(Ok(()));
+                            }
+                            Poll::Pending => {
+                                *this = Client::Closing { connection };
+                                return Poll::Pending;
+                            }
+                        }
+                    }
+                    Client::Poisoned => {
+                        unreachable!()
+                    }
+                }
+            }
+        }
+    }
+
+    fn drive_connection(this: &mut Client, mut connection: Connection<futures_ringbuf::Endpoint>, state: StreamState, cx: &mut Context) {
+        match connection.poll_next_inbound(cx) {
+            Poll::Ready(Some(_)) => {
+                panic!("Unexpected inbound stream")
+            }
+            Poll::Ready(None) => {
+                panic!("Unexpected connection close")
+            }
+            Poll::Pending => {
+                *this = Client::Testing { worker_stream: state, connection };
+            }
+        }
+    }
+
+    struct EchoServer {
+        connection: Connection<Endpoint>,
+        worker_streams: FuturesUnordered<BoxFuture<'static, Result<()>>>,
+        streams_processed: usize,
+        connection_closed: bool,
+    }
+
+    impl EchoServer {
+        fn new(connection: Connection<Endpoint>) -> Self {
+            Self {
+                connection,
+                worker_streams: FuturesUnordered::default(),
+                streams_processed: 0,
+                connection_closed: false,
+            }
+        }
+    }
+
+    impl Future for EchoServer
+    {
+        type Output = Result<usize>;
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            let this = self.get_mut();
+
+            loop {
+                match this.worker_streams.poll_next_unpin(cx) {
+                    Poll::Ready(Some(Ok(()))) => {
+                        this.streams_processed += 1;
+                        continue;
+                    }
+                    Poll::Ready(Some(Err(e))) => {
+                        eprintln!("A stream failed: {}", e);
+                        continue;
+                    }
+                    Poll::Ready(None) => {
+                        if this.connection_closed {
+                            return Poll::Ready(Ok(this.streams_processed));
+                        }
+                    }
+                    Poll::Pending => {}
+                }
+
+                match this.connection.poll_next_inbound(cx) {
+                    Poll::Ready(Some(Ok(mut stream))) => {
+                        this.worker_streams.push(
+                            async move {
+                                {
+                                    let (mut r, mut w) = AsyncReadExt::split(&mut stream);
+                                    futures::io::copy(&mut r, &mut w).await?;
+                                }
+                                stream.close().await?;
+                                Ok(())
+                            }
+                                .boxed(),
+                        );
+                        continue;
+                    }
+                    Poll::Ready(None) | Poll::Ready(Some(Err(_))) => {
+                        this.connection_closed = true;
+                        continue;
+                    }
+                    Poll::Pending => {}
+                }
+
+                return Poll::Pending;
+            }
+        }
+    }
+}
