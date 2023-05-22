@@ -106,7 +106,7 @@ use nohash_hasher::IntMap;
 use std::collections::VecDeque;
 use std::iter::FromIterator;
 use std::task::{Context, Waker};
-use std::{fmt, mem, sync::Arc, task::Poll};
+use std::{fmt, sync::Arc, task::Poll};
 
 pub use stream::{Packet, State, Stream};
 
@@ -471,23 +471,16 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 Poll::Pending => {}
             }
 
-            for (id, mut stream) in mem::take(&mut self.stream_receivers) {
-                match stream.poll_next_unpin(cx) {
-                    Poll::Ready(Some(StreamCommand::SendFrame(frame))) => {
-                        self.on_send_frame(frame);
-                        self.stream_receivers.push((id, stream));
-                    }
-                    Poll::Ready(Some(StreamCommand::CloseStream { id, ack })) => {
-                        self.on_close_stream(id, ack);
-                        self.stream_receivers.push((id, stream));
-                    }
-                    Poll::Ready(None) => {
-                        self.on_drop_stream(id);
-                    }
-                    Poll::Pending => {
-                        self.stream_receivers.push((id, stream));
-                    }
+            match self.poll_stream_receivers(cx) {
+                Poll::Ready(StreamCommand::SendFrame(frame)) => {
+                    self.on_send_frame(frame.into());
+                    continue;
                 }
+                Poll::Ready(StreamCommand::CloseStream { id, ack }) => {
+                    self.on_close_stream(id, ack);
+                    continue;
+                }
+                Poll::Pending => {}
             }
 
             match self.socket.poll_next_unpin(cx) {
@@ -503,13 +496,35 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 Poll::Pending => {}
             }
 
-            if self.stream_receivers.is_empty() {
-                self.no_streams_waker = Some(cx.waker().clone());
-            }
-
             // If we make it this far, at least one of the above must have registered a waker.
             return Poll::Pending;
         }
+    }
+
+    fn poll_stream_receivers(&mut self, cx: &mut Context) -> Poll<StreamCommand> {
+        for i in (0..self.stream_receivers.len()).rev() {
+            let (id, mut receiver) = self.stream_receivers.swap_remove(i);
+
+            match receiver.poll_next_unpin(cx) {
+                Poll::Ready(Some(command)) => {
+                    self.stream_receivers.push((id, receiver));
+                    return Poll::Ready(command);
+                }
+                Poll::Ready(None) => {
+                    self.on_drop_stream(id);
+                }
+                Poll::Pending => {
+                    self.stream_receivers.push((id, receiver));
+                }
+            }
+        }
+
+        if self.stream_receivers.is_empty() {
+            self.no_streams_waker = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
+
+        Poll::Pending
     }
 
     fn new_outbound(&mut self) -> Result<Stream> {
