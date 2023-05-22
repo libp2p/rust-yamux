@@ -517,9 +517,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     }
 
     fn on_send_frame(&mut self, frame: Frame<Either<Data, WindowUpdate>>) {
-        let stream_id = frame.header().stream_id();
-
-        log::trace!("{}/{}: sending: {}", self.id, stream_id, frame.header());
+        log::trace!(
+            "{}/{}: sending: {}",
+            self.id,
+            frame.header().stream_id(),
+            frame.header()
+        );
         self.pending_frames.push_back(frame.into());
     }
 

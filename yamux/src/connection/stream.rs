@@ -331,7 +331,6 @@ impl AsyncWrite for Stream {
             .sender
             .poll_ready(cx)
             .map_err(|_| self.write_zero_err())?);
-
         let body = {
             let mut shared = self.shared();
             if !shared.state().can_write() {
@@ -346,7 +345,6 @@ impl AsyncWrite for Stream {
             let k = std::cmp::min(shared.credit as usize, buf.len());
             let k = std::cmp::min(k, self.config.split_send_size);
             shared.credit = shared.credit.saturating_sub(k as u32);
-
             Vec::from(&buf[..k])
         };
         let n = body.len();
@@ -357,7 +355,6 @@ impl AsyncWrite for Stream {
         self.sender
             .start_send(cmd)
             .map_err(|_| self.write_zero_err())?;
-
         Poll::Ready(Ok(n))
     }
 
