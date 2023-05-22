@@ -998,24 +998,14 @@ mod tests {
                     } => {
                         match Pin::new(&mut stream).poll_flush(cx)? {
                             Poll::Ready(()) => {
-                                // Here is the actual test:
-                                // If the stream reports that it successfully flushed, we expect the connection to have queued the frames for sending.
-                                // Because we only have a single stream, this means we can simply assert that there are no pending frames in the channel.
-
                                 let ConnectionState::Active(active) = &mut connection.inner else {
                                     panic!("Connection is not active")
                                 };
 
-                                assert_eq!(active.stream_receivers.len(), 1);
-                                active
-                                    .stream_receivers
-                                    .iter_mut()
-                                    .next()
-                                    .unwrap()
-                                    .try_next()
-                                    .expect_err(
-                                        "expected no pending frames in the channel after flushing",
-                                    );
+                                // Here is the actual test:
+                                // If the stream reports that it successfully flushed, we expect the connection to have queued the frames for sending
+                                // and thus not have any more `StreamCommand`s.
+                                assert!(active.stream_receivers.poll_next(cx).is_pending());
 
                                 *this = Client::Testing {
                                     worker_stream: StreamState::Receiving(stream),
