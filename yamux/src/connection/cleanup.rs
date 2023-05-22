@@ -1,8 +1,5 @@
-use crate::connection::StreamCommand;
+use crate::connection::command_receivers::CommandReceivers;
 use crate::ConnectionError;
-use futures::channel::mpsc;
-use futures::stream::SelectAll;
-use futures::{ready, StreamExt};
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -11,15 +8,12 @@ use std::task::{Context, Poll};
 #[must_use]
 pub struct Cleanup {
     state: State,
-    stream_receivers: SelectAll<mpsc::Receiver<StreamCommand>>,
+    stream_receivers: CommandReceivers,
     error: Option<ConnectionError>,
 }
 
 impl Cleanup {
-    pub(crate) fn new(
-        stream_receivers: SelectAll<mpsc::Receiver<StreamCommand>>,
-        error: ConnectionError,
-    ) -> Self {
+    pub(crate) fn new(stream_receivers: CommandReceivers, error: ConnectionError) -> Self {
         Self {
             state: State::ClosingStreamReceiver,
             stream_receivers,
@@ -37,26 +31,26 @@ impl Future for Cleanup {
         loop {
             match this.state {
                 State::ClosingStreamReceiver => {
-                    for stream in this.stream_receivers.iter_mut() {
-                        stream.close();
-                    }
+                    this.stream_receivers.close();
                     this.state = State::DrainingStreamReceiver;
                 }
 
-                State::DrainingStreamReceiver => {
-                    match ready!(this.stream_receivers.poll_next_unpin(cx)) {
-                        Some(cmd) => {
-                            drop(cmd);
-                        }
-                        None => {
+                State::DrainingStreamReceiver => match this.stream_receivers.poll_next(cx) {
+                    Poll::Ready(cmd) => {
+                        drop(cmd);
+                    }
+                    Poll::Pending => {
+                        if this.stream_receivers.is_empty() {
                             return Poll::Ready(
                                 this.error
                                     .take()
                                     .expect("to not be called after completion"),
                             );
                         }
+
+                        return Poll::Pending;
                     }
-                }
+                },
             }
         }
     }

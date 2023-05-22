@@ -89,6 +89,7 @@
 
 mod cleanup;
 mod closing;
+mod command_receivers;
 mod stream;
 
 use crate::Result;
@@ -100,13 +101,13 @@ use crate::{
 };
 use cleanup::Cleanup;
 use closing::Closing;
-use futures::stream::SelectAll;
 use futures::{channel::mpsc, future::Either, prelude::*, sink::SinkExt, stream::Fuse};
 use nohash_hasher::IntMap;
 use std::collections::VecDeque;
 use std::task::Context;
 use std::{fmt, sync::Arc, task::Poll};
 
+use crate::connection::command_receivers::CommandReceivers;
 pub use stream::{Packet, State, Stream};
 
 /// How the connection is used.
@@ -349,7 +350,7 @@ struct Active<T> {
     socket: Fuse<frame::Io<T>>,
     next_id: u32,
     streams: IntMap<StreamId, Stream>,
-    stream_receivers: SelectAll<mpsc::Receiver<StreamCommand>>,
+    stream_receivers: CommandReceivers,
     dropped_streams: Vec<StreamId>,
     pending_frames: VecDeque<Frame<()>>,
 }
@@ -415,7 +416,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             config: Arc::new(cfg),
             socket,
             streams: IntMap::default(),
-            stream_receivers: SelectAll::default(),
+            stream_receivers: CommandReceivers::default(),
             next_id: match mode {
                 Mode::Client => 1,
                 Mode::Server => 2,
@@ -455,16 +456,15 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 Poll::Pending => {}
             }
 
-            match self.stream_receivers.poll_next_unpin(cx) {
-                Poll::Ready(Some(StreamCommand::SendFrame(frame))) => {
+            match self.stream_receivers.poll_next(cx) {
+                Poll::Ready(StreamCommand::SendFrame(frame)) => {
                     self.on_send_frame(frame);
                     continue;
                 }
-                Poll::Ready(Some(StreamCommand::CloseStream { id, ack })) => {
+                Poll::Ready(StreamCommand::CloseStream { id, ack }) => {
                     self.on_close_stream(id, ack);
                     continue;
                 }
-                Poll::Ready(None) => {}
                 Poll::Pending => {}
             }
 

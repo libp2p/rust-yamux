@@ -1,23 +1,21 @@
+use crate::connection::command_receivers::CommandReceivers;
 use crate::connection::StreamCommand;
 use crate::frame;
 use crate::frame::Frame;
 use crate::Result;
-use futures::channel::mpsc;
-use futures::stream::{Fuse, SelectAll};
-use futures::{ready, AsyncRead, AsyncWrite, SinkExt, StreamExt};
+use futures::stream::Fuse;
+use futures::{ready, AsyncRead, AsyncWrite, SinkExt};
 use std::collections::VecDeque;
 use std::future::Future;
-use std::mem;
 use std::pin::Pin;
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll};
 
 /// A [`Future`] that gracefully closes the yamux connection.
 #[must_use]
 pub struct Closing<T> {
     state: State,
-    stream_receivers: SelectAll<mpsc::Receiver<StreamCommand>>,
+    stream_receivers: CommandReceivers,
     pending_frames: VecDeque<Frame<()>>,
-    pending_flush_wakers: Vec<Waker>,
     socket: Fuse<frame::Io<T>>,
 }
 
@@ -26,15 +24,14 @@ where
     T: AsyncRead + AsyncWrite + Unpin,
 {
     pub(crate) fn new(
-        stream_receiver: SelectAll<mpsc::Receiver<StreamCommand>>,
+        stream_receivers: CommandReceivers,
         pending_frames: VecDeque<Frame<()>>,
         socket: Fuse<frame::Io<T>>,
     ) -> Self {
         Self {
             state: State::ClosingStreamReceiver,
-            stream_receivers: stream_receiver,
+            stream_receivers,
             pending_frames,
-            pending_flush_wakers: vec![],
             socket,
         }
     }
@@ -52,32 +49,27 @@ where
         loop {
             match this.state {
                 State::ClosingStreamReceiver => {
-                    for stream in this.stream_receivers.iter_mut() {
-                        stream.close();
-                    }
+                    this.stream_receivers.close();
                     this.state = State::DrainingStreamReceiver;
                 }
 
-                State::DrainingStreamReceiver => {
-                    match ready!(this.stream_receivers.poll_next_unpin(cx)) {
-                        Some(StreamCommand::SendFrame(frame)) => {
-                            this.pending_frames.push_back(frame.into())
-                        }
-                        Some(StreamCommand::CloseStream { id, ack }) => {
-                            this.pending_frames
-                                .push_back(Frame::close_stream(id, ack).into());
-                        }
-                        None => {
-                            // Receiver is closed, meaning we have queued all frames for sending.
-                            // Notify all pending flush tasks.
-                            for waker in mem::take(&mut this.pending_flush_wakers) {
-                                waker.wake();
-                            }
-
-                            this.state = State::SendingTermFrame;
-                        }
+                State::DrainingStreamReceiver => match this.stream_receivers.poll_next(cx) {
+                    Poll::Ready(StreamCommand::SendFrame(frame)) => {
+                        this.pending_frames.push_back(frame.into())
                     }
-                }
+                    Poll::Ready(StreamCommand::CloseStream { id, ack }) => {
+                        this.pending_frames
+                            .push_back(Frame::close_stream(id, ack).into());
+                    }
+                    Poll::Pending => {
+                        if this.stream_receivers.is_empty() {
+                            this.state = State::SendingTermFrame;
+                            continue;
+                        }
+
+                        return Poll::Pending;
+                    }
+                },
                 State::SendingTermFrame => {
                     this.pending_frames.push_back(Frame::term().into());
                     this.state = State::FlushingPendingFrames;
