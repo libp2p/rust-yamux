@@ -39,9 +39,4 @@ impl CommandReceivers {
             stream.close();
         }
     }
-
-    /// Returns `true` if there are no [`mpsc::Receiver`]s.
-    pub(crate) fn is_empty(&self) -> bool {
-        self.inner.is_empty()
-    }
 }

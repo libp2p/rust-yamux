@@ -34,21 +34,17 @@ impl Future for Cleanup {
                     this.stream_receivers.close();
                     this.state = State::DrainingStreamReceiver;
                 }
-
                 State::DrainingStreamReceiver => match this.stream_receivers.poll_next(cx) {
                     Poll::Ready(cmd) => {
                         drop(cmd);
                     }
+                    // Poll::Pending means that there are no more commands.
                     Poll::Pending => {
-                        if this.stream_receivers.is_empty() {
-                            return Poll::Ready(
-                                this.error
-                                    .take()
-                                    .expect("to not be called after completion"),
-                            );
-                        }
-
-                        return Poll::Pending;
+                        return Poll::Ready(
+                            this.error
+                                .take()
+                                .expect("to not be called after completion"),
+                        )
                     }
                 },
             }

@@ -62,18 +62,12 @@ where
                             .push_back(Frame::close_stream(id, ack).into());
                     }
                     Poll::Pending => {
-                        if this.stream_receivers.is_empty() {
-                            this.state = State::SendingTermFrame;
-                            continue;
-                        }
-
-                        return Poll::Pending;
+                        // No more frames from streams, append `Term` frame and flush them all.
+                        this.pending_frames.push_back(Frame::term().into());
+                        this.state = State::FlushingPendingFrames;
+                        continue;
                     }
                 },
-                State::SendingTermFrame => {
-                    this.pending_frames.push_back(Frame::term().into());
-                    this.state = State::FlushingPendingFrames;
-                }
                 State::FlushingPendingFrames => {
                     ready!(this.socket.poll_ready_unpin(cx))?;
 
@@ -95,7 +89,6 @@ where
 enum State {
     ClosingStreamReceiver,
     DrainingStreamReceiver,
-    SendingTermFrame,
     FlushingPendingFrames,
     ClosingSocket,
 }
