@@ -113,34 +113,6 @@ fn prop_send_recv() {
 }
 
 #[test]
-fn prop_max_streams() {
-    fn prop(n: usize) -> Result<bool, ConnectionError> {
-        let max_streams = n % 100;
-        let mut cfg = Config::default();
-        cfg.set_max_num_streams(max_streams);
-
-        Runtime::new().unwrap().block_on(async move {
-            let (server, client) = connected_peers(cfg.clone(), cfg).await?;
-
-            task::spawn(echo_server(server));
-
-            let (mut control, client) = Control::new(client);
-            task::spawn(noop_server(client));
-
-            let mut v = Vec::new();
-            for _ in 0..max_streams {
-                v.push(control.open_stream().await?)
-            }
-
-            let open_result = control.open_stream().await;
-
-            Ok(matches!(open_result, Err(ConnectionError::TooManyStreams)))
-        })
-    }
-    QuickCheck::new().tests(7).quickcheck(prop as fn(_) -> _)
-}
-
-#[test]
 fn prop_send_recv_half_closed() {
     fn prop(msg: Msg) -> Result<(), ConnectionError> {
         let msg_len = msg.0.len();

@@ -1,10 +1,15 @@
+use futures::future::BoxFuture;
+use futures::stream::FuturesUnordered;
 use futures::{
     future, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, StreamExt, TryStreamExt,
 };
-use futures::{stream, Stream};
+use futures::{stream, FutureExt, Stream};
 use quickcheck::{Arbitrary, Gen};
-use std::io;
+use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::{fmt, io, mem};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 use yamux::ConnectionError;
@@ -89,6 +94,136 @@ pub async fn send_recv_message(stream: &mut yamux::Stream, Msg(msg): Msg) -> io:
     assert_eq!(data, msg);
 
     Ok(())
+}
+
+pub struct EchoServer<T> {
+    connection: Connection<T>,
+    worker_streams: FuturesUnordered<BoxFuture<'static, yamux::Result<()>>>,
+    streams_processed: usize,
+    connection_closed: bool,
+}
+
+impl<T> EchoServer<T> {
+    pub fn new(connection: Connection<T>) -> Self {
+        Self {
+            connection,
+            worker_streams: FuturesUnordered::default(),
+            streams_processed: 0,
+            connection_closed: false,
+        }
+    }
+}
+
+impl<T> Future for EchoServer<T>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    type Output = yamux::Result<usize>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+
+        loop {
+            match this.worker_streams.poll_next_unpin(cx) {
+                Poll::Ready(Some(Ok(()))) => {
+                    this.streams_processed += 1;
+                    continue;
+                }
+                Poll::Ready(Some(Err(e))) => {
+                    eprintln!("A stream failed: {}", e);
+                    continue;
+                }
+                Poll::Ready(None) => {
+                    if this.connection_closed {
+                        return Poll::Ready(Ok(this.streams_processed));
+                    }
+                }
+                Poll::Pending => {}
+            }
+
+            match this.connection.poll_next_inbound(cx) {
+                Poll::Ready(Some(Ok(mut stream))) => {
+                    this.worker_streams.push(
+                        async move {
+                            {
+                                let (mut r, mut w) = AsyncReadExt::split(&mut stream);
+                                futures::io::copy(&mut r, &mut w).await?;
+                            }
+                            stream.close().await?;
+                            Ok(())
+                        }
+                        .boxed(),
+                    );
+                    continue;
+                }
+                Poll::Ready(None) | Poll::Ready(Some(Err(_))) => {
+                    this.connection_closed = true;
+                    continue;
+                }
+                Poll::Pending => {}
+            }
+
+            return Poll::Pending;
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct OpenStreamsClient<T> {
+    connection: Option<Connection<T>>,
+    streams: Vec<yamux::Stream>,
+    to_open: usize,
+}
+
+impl<T> OpenStreamsClient<T> {
+    pub fn new(connection: Connection<T>, to_open: usize) -> Self {
+        Self {
+            connection: Some(connection),
+            streams: vec![],
+            to_open,
+        }
+    }
+}
+
+impl<T> Future for OpenStreamsClient<T>
+where
+    T: AsyncRead + AsyncWrite + Unpin + fmt::Debug,
+{
+    type Output = yamux::Result<(Connection<T>, Vec<yamux::Stream>)>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let connection = this.connection.as_mut().unwrap();
+
+        loop {
+            // Drive connection to make progress.
+            match connection.poll_next_inbound(cx)? {
+                Poll::Ready(_stream) => {
+                    panic!("Unexpected inbound stream");
+                }
+                Poll::Pending => {}
+            }
+
+            if this.streams.len() < this.to_open {
+                match connection.poll_new_outbound(cx)? {
+                    Poll::Ready(stream) => {
+                        this.streams.push(stream);
+                        continue;
+                    }
+                    Poll::Pending => {}
+                }
+            }
+
+            if this.streams.len() == this.to_open {
+                return Poll::Ready(Ok((
+                    this.connection.take().unwrap(),
+                    mem::take(&mut this.streams),
+                )));
+            }
+
+            return Poll::Pending;
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
