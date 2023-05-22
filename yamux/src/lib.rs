@@ -51,7 +51,7 @@ const MAX_COMMAND_BACKLOG: usize = 32;
 
 /// The maximum number of streams we will open without an acknowledgement from the other peer.
 ///
-/// This enables a very basic form of backpressure.
+/// This enables a very basic form of backpressure on the creation of streams.
 const MAX_ACK_BACKLOG: usize = 256;
 
 /// Default maximum number of bytes a Yamux data frame might carry as its
