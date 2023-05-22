@@ -96,15 +96,15 @@ use crate::{
     error::ConnectionError,
     frame::header::{self, Data, GoAway, Header, Ping, StreamId, Tag, WindowUpdate, CONNECTION_ID},
     frame::{self, Frame},
-    Config, WindowUpdateMode, DEFAULT_CREDIT, MAX_COMMAND_BACKLOG,
+    Config, WindowUpdateMode, DEFAULT_CREDIT,
 };
 use cleanup::Cleanup;
 use closing::Closing;
+use futures::stream::SelectAll;
 use futures::{channel::mpsc, future::Either, prelude::*, sink::SinkExt, stream::Fuse};
 use nohash_hasher::IntMap;
-use std::collections::hash_map::Entry;
 use std::collections::VecDeque;
-use std::task::{Context, Waker};
+use std::task::Context;
 use std::{fmt, sync::Arc, task::Poll};
 
 pub use stream::{Packet, State, Stream};
@@ -349,10 +349,7 @@ struct Active<T> {
     socket: Fuse<frame::Io<T>>,
     next_id: u32,
     streams: IntMap<StreamId, Stream>,
-    /// Stores the "marks" at which we need to notify a waiting flush task of a [`Stream`].
-    flush_marks: IntMap<StreamId, (u64, Waker)>,
-    stream_sender: mpsc::Sender<StreamCommand>,
-    stream_receiver: mpsc::Receiver<StreamCommand>,
+    stream_receivers: SelectAll<mpsc::Receiver<StreamCommand>>,
     dropped_streams: Vec<StreamId>,
     pending_frames: VecDeque<Frame<()>>,
 }
@@ -362,13 +359,6 @@ struct Active<T> {
 pub(crate) enum StreamCommand {
     /// A new frame should be sent to the remote.
     SendFrame(Frame<Either<Data, WindowUpdate>>),
-    Flush {
-        id: StreamId,
-        /// How many frames we've queued for sending at the time the flush was requested.
-        num_frames: u64,
-        /// The waker to wake once the flush is complete.
-        waker: Waker,
-    },
     /// Close a stream.
     CloseStream { id: StreamId, ack: bool },
 }
@@ -418,7 +408,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     fn new(socket: T, cfg: Config, mode: Mode) -> Self {
         let id = Id::random();
         log::debug!("new connection: {} ({:?})", id, mode);
-        let (stream_sender, stream_receiver) = mpsc::channel(MAX_COMMAND_BACKLOG);
         let socket = frame::Io::new(id, socket, cfg.max_buffer_size).fuse();
         Active {
             id,
@@ -426,9 +415,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             config: Arc::new(cfg),
             socket,
             streams: IntMap::default(),
-            flush_marks: Default::default(),
-            stream_sender,
-            stream_receiver,
+            stream_receivers: SelectAll::default(),
             next_id: match mode {
                 Mode::Client => 1,
                 Mode::Server => 2,
@@ -440,7 +427,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
     /// Gracefully close the connection to the remote.
     fn close(self) -> Closing<T> {
-        Closing::new(self.stream_receiver, self.pending_frames, self.socket)
+        Closing::new(self.stream_receivers, self.pending_frames, self.socket)
     }
 
     /// Cleanup all our resources.
@@ -449,7 +436,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     fn cleanup(mut self, error: ConnectionError) -> Cleanup {
         self.drop_all_streams();
 
-        Cleanup::new(self.stream_receiver, error)
+        Cleanup::new(self.stream_receivers, error)
     }
 
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Result<Stream>> {
@@ -468,7 +455,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 Poll::Pending => {}
             }
 
-            match self.stream_receiver.poll_next_unpin(cx) {
+            match self.stream_receivers.poll_next_unpin(cx) {
                 Poll::Ready(Some(StreamCommand::SendFrame(frame))) => {
                     self.on_send_frame(frame);
                     continue;
@@ -477,17 +464,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                     self.on_close_stream(id, ack);
                     continue;
                 }
-                Poll::Ready(Some(StreamCommand::Flush {
-                    id,
-                    num_frames,
-                    waker,
-                })) => {
-                    self.on_flush_stream(id, num_frames, waker);
-                    continue;
-                }
-                Poll::Ready(None) => {
-                    debug_assert!(false, "Only closed during shutdown")
-                }
+                Poll::Ready(None) => {}
                 Poll::Pending => {}
             }
 
@@ -527,16 +504,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             self.pending_frames.push_back(frame.into());
         }
 
-        let stream = {
-            let config = self.config.clone();
-            let sender = self.stream_sender.clone();
-            let window = self.config.receive_window;
-            let mut stream = Stream::new(id, self.id, config, window, DEFAULT_CREDIT, sender);
-            if extra_credit == 0 {
-                stream.set_flag(stream::Flag::Syn)
-            }
-            stream
-        };
+        let mut stream = self.make_new_stream(id, self.config.receive_window, DEFAULT_CREDIT);
+
+        if extra_credit == 0 {
+            stream.set_flag(stream::Flag::Syn)
+        }
 
         log::debug!("{}: new outbound {} of {}", self.id, stream, self);
         self.streams.insert(id, stream.clone());
@@ -549,32 +521,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
         log::trace!("{}/{}: sending: {}", self.id, stream_id, frame.header());
         self.pending_frames.push_back(frame.into());
-
-        if let Some(stream) = self.streams.get(&stream_id) {
-            let mut shared = stream.shared();
-
-            shared.inc_sent();
-
-            if let Entry::Occupied(entry) = self.flush_marks.entry(stream_id) {
-                if shared.num_sent() >= entry.get().0 {
-                    entry.remove().1.wake();
-                }
-            }
-        }
-    }
-
-    fn on_flush_stream(&mut self, id: StreamId, new_flush_mark: u64, waker: Waker) {
-        if let Some(stream) = self.streams.get(&id) {
-            let shared = stream.shared();
-
-            // Check if we have already reached the requested flush mark:
-            if shared.num_sent() >= new_flush_mark {
-                waker.wake();
-                return;
-            }
-
-            self.flush_marks.insert(id, (new_flush_mark, waker));
-        }
     }
 
     fn on_close_stream(&mut self, id: StreamId, ack: bool) {
@@ -670,12 +616,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 log::error!("{}: maximum number of streams reached", self.id);
                 return Action::Terminate(Frame::internal_error());
             }
-            let mut stream = {
-                let config = self.config.clone();
-                let credit = DEFAULT_CREDIT;
-                let sender = self.stream_sender.clone();
-                Stream::new(stream_id, self.id, config, credit, credit, sender)
-            };
+            let mut stream = self.make_new_stream(stream_id, DEFAULT_CREDIT, DEFAULT_CREDIT);
             let mut window_update = None;
             {
                 let mut shared = stream.shared();
@@ -790,15 +731,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 log::error!("{}: maximum number of streams reached", self.id);
                 return Action::Terminate(Frame::protocol_error());
             }
-            let stream = {
-                let credit = frame.header().credit() + DEFAULT_CREDIT;
-                let config = self.config.clone();
-                let sender = self.stream_sender.clone();
-                let mut stream =
-                    Stream::new(stream_id, self.id, config, DEFAULT_CREDIT, credit, sender);
-                stream.set_flag(stream::Flag::Ack);
-                stream
-            };
+
+            let credit = frame.header().credit() + DEFAULT_CREDIT;
+            let mut stream = self.make_new_stream(stream_id, DEFAULT_CREDIT, credit);
+            stream.set_flag(stream::Flag::Ack);
+
             if is_finish {
                 stream
                     .shared()
@@ -861,6 +798,20 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         // See https://github.com/paritytech/yamux/issues/110 for details.
 
         Action::None
+    }
+
+    fn make_new_stream(&mut self, id: StreamId, window: u32, credit: u32) -> Stream {
+        let config = self.config.clone();
+
+        // Create a channel with 0 _additional_ capacity for items.
+        // `poll_flush` for `Sender` will check whether we can send an item into the stream and
+        // NOT whether all items have been taken out of the receiver.
+        // To ensure that `poll_flush` on our `Stream` means that we have sent all frames,
+        // this channel must be configured with 0 capacity.
+        let (sender, receiver) = mpsc::channel(0);
+        self.stream_receivers.push(receiver);
+
+        Stream::new(id, self.id, config, window, credit, sender)
     }
 
     fn next_stream_id(&mut self) -> Result<StreamId> {
@@ -1052,9 +1003,16 @@ mod tests {
                                     panic!("Connection is not active")
                                 };
 
-                                active.stream_receiver.try_next().expect_err(
-                                    "expected no pending frames in the channel after flushing",
-                                );
+                                assert_eq!(active.stream_receivers.len(), 1);
+                                active
+                                    .stream_receivers
+                                    .iter_mut()
+                                    .next()
+                                    .unwrap()
+                                    .try_next()
+                                    .expect_err(
+                                        "expected no pending frames in the channel after flushing",
+                                    );
 
                                 *this = Client::Testing {
                                     worker_stream: StreamState::Receiving(stream),

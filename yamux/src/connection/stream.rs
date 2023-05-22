@@ -21,7 +21,7 @@ use futures::{
     channel::mpsc,
     future::Either,
     io::{AsyncRead, AsyncWrite},
-    ready,
+    ready, SinkExt,
 };
 use parking_lot::{Mutex, MutexGuard};
 use std::convert::TryInto;
@@ -346,7 +346,6 @@ impl AsyncWrite for Stream {
             let k = std::cmp::min(shared.credit as usize, buf.len());
             let k = std::cmp::min(k, self.config.split_send_size);
             shared.credit = shared.credit.saturating_sub(k as u32);
-            shared.inc_queued();
 
             Vec::from(&buf[..k])
         };
@@ -363,35 +362,9 @@ impl AsyncWrite for Stream {
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
-        if self.is_closed() {
-            return Poll::Ready(Ok(()));
-        }
-
-        let num_frames = {
-            let shared = self.shared();
-
-            if shared.is_flushed() {
-                return Poll::Ready(Ok(()));
-            }
-
-            shared.queued_frames
-        };
-
-        ready!(self
-            .sender
-            .poll_ready(cx)
-            .map_err(|_| self.write_zero_err())?);
-
-        let cmd = StreamCommand::Flush {
-            id: self.id,
-            num_frames,
-            waker: cx.waker().clone(),
-        };
         self.sender
-            .start_send(cmd)
-            .map_err(|_| self.write_zero_err())?;
-
-        Poll::Pending
+            .poll_flush_unpin(cx)
+            .map_err(|_| self.write_zero_err())
     }
 
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
@@ -428,12 +401,6 @@ pub(crate) struct Shared {
     pub(crate) reader: Option<Waker>,
     pub(crate) writer: Option<Waker>,
     config: Arc<Config>,
-
-    /// The number of frames queued for sending via [`StreamCommand::SendFrame`]
-    queued_frames: u64,
-
-    /// The number of frames sent to the socket by the [`Connection`](crate::Connection).
-    sent_frames: u64,
 }
 
 impl Shared {
@@ -446,29 +413,11 @@ impl Shared {
             reader: None,
             writer: None,
             config,
-            queued_frames: 0,
-            sent_frames: 0,
         }
     }
 
     pub(crate) fn state(&self) -> State {
         self.state
-    }
-
-    pub(crate) fn is_flushed(&self) -> bool {
-        self.queued_frames == self.sent_frames
-    }
-
-    pub(crate) fn inc_queued(&mut self) {
-        self.queued_frames += 1;
-    }
-
-    pub(crate) fn inc_sent(&mut self) {
-        self.sent_frames += 1;
-    }
-
-    pub(crate) fn num_sent(&self) -> u64 {
-        self.sent_frames
     }
 
     /// Update the stream state and return the state before it was updated.
