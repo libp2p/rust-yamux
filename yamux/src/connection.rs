@@ -89,7 +89,6 @@
 
 mod cleanup;
 mod closing;
-mod command_receivers;
 mod stream;
 
 use crate::Result;
@@ -101,13 +100,14 @@ use crate::{
 };
 use cleanup::Cleanup;
 use closing::Closing;
+use futures::stream::SelectAll;
 use futures::{channel::mpsc, future::Either, prelude::*, sink::SinkExt, stream::Fuse};
 use nohash_hasher::IntMap;
 use std::collections::VecDeque;
-use std::task::Context;
-use std::{fmt, sync::Arc, task::Poll};
+use std::iter::FromIterator;
+use std::task::{Context, Waker};
+use std::{fmt, mem, sync::Arc, task::Poll};
 
-use crate::connection::command_receivers::CommandReceivers;
 pub use stream::{Packet, State, Stream};
 
 /// How the connection is used.
@@ -349,9 +349,11 @@ struct Active<T> {
     config: Arc<Config>,
     socket: Fuse<frame::Io<T>>,
     next_id: u32,
+
     streams: IntMap<StreamId, Stream>,
-    stream_receivers: CommandReceivers,
-    dropped_streams: Vec<StreamId>,
+    stream_receivers: Vec<(StreamId, mpsc::Receiver<StreamCommand>)>,
+    no_streams_waker: Option<Waker>,
+
     pending_frames: VecDeque<Frame<()>>,
 }
 
@@ -416,19 +418,27 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             config: Arc::new(cfg),
             socket,
             streams: IntMap::default(),
-            stream_receivers: CommandReceivers::default(),
+            stream_receivers: Vec::default(),
+            no_streams_waker: None,
             next_id: match mode {
                 Mode::Client => 1,
                 Mode::Server => 2,
             },
-            dropped_streams: Vec::new(),
             pending_frames: VecDeque::default(),
         }
     }
 
     /// Gracefully close the connection to the remote.
     fn close(self) -> Closing<T> {
-        Closing::new(self.stream_receivers, self.pending_frames, self.socket)
+        Closing::new(
+            SelectAll::from_iter(
+                self.stream_receivers
+                    .into_iter()
+                    .map(|(_, receiver)| receiver),
+            ),
+            self.pending_frames,
+            self.socket,
+        )
     }
 
     /// Cleanup all our resources.
@@ -437,13 +447,18 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     fn cleanup(mut self, error: ConnectionError) -> Cleanup {
         self.drop_all_streams();
 
-        Cleanup::new(self.stream_receivers, error)
+        Cleanup::new(
+            SelectAll::from_iter(
+                self.stream_receivers
+                    .into_iter()
+                    .map(|(_, receiver)| receiver),
+            ),
+            error,
+        )
     }
 
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Result<Stream>> {
         loop {
-            self.garbage_collect();
-
             if self.socket.poll_ready_unpin(cx).is_ready() {
                 if let Some(frame) = self.pending_frames.pop_front() {
                     self.socket.start_send_unpin(frame)?;
@@ -456,16 +471,23 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 Poll::Pending => {}
             }
 
-            match self.stream_receivers.poll_next(cx) {
-                Poll::Ready(StreamCommand::SendFrame(frame)) => {
-                    self.on_send_frame(frame);
-                    continue;
+            for (id, mut stream) in mem::take(&mut self.stream_receivers) {
+                match stream.poll_next_unpin(cx) {
+                    Poll::Ready(Some(StreamCommand::SendFrame(frame))) => {
+                        self.on_send_frame(frame);
+                        self.stream_receivers.push((id, stream));
+                    }
+                    Poll::Ready(Some(StreamCommand::CloseStream { id, ack })) => {
+                        self.on_close_stream(id, ack);
+                        self.stream_receivers.push((id, stream));
+                    }
+                    Poll::Ready(None) => {
+                        self.on_drop_stream(id);
+                    }
+                    Poll::Pending => {
+                        self.stream_receivers.push((id, stream));
+                    }
                 }
-                Poll::Ready(StreamCommand::CloseStream { id, ack }) => {
-                    self.on_close_stream(id, ack);
-                    continue;
-                }
-                Poll::Pending => {}
             }
 
             match self.socket.poll_next_unpin(cx) {
@@ -479,6 +501,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                     return Poll::Ready(Err(ConnectionError::Closed));
                 }
                 Poll::Pending => {}
+            }
+
+            if self.stream_receivers.is_empty() {
+                self.no_streams_waker = Some(cx.waker().clone());
             }
 
             // If we make it this far, at least one of the above must have registered a waker.
@@ -530,6 +556,71 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         log::trace!("{}/{}: sending close", self.id, id);
         self.pending_frames
             .push_back(Frame::close_stream(id, ack).into());
+    }
+
+    fn on_drop_stream(&mut self, id: StreamId) {
+        let stream = self.streams.remove(&id).expect("stream not found");
+
+        log::trace!("{}: removing dropped {}", self.id, stream);
+        let stream_id = stream.id();
+        let frame = {
+            let mut shared = stream.shared();
+            let frame = match shared.update_state(self.id, stream_id, State::Closed) {
+                // The stream was dropped without calling `poll_close`.
+                // We reset the stream to inform the remote of the closure.
+                State::Open => {
+                    let mut header = Header::data(stream_id, 0);
+                    header.rst();
+                    Some(Frame::new(header))
+                }
+                // The stream was dropped without calling `poll_close`.
+                // We have already received a FIN from remote and send one
+                // back which closes the stream for good.
+                State::RecvClosed => {
+                    let mut header = Header::data(stream_id, 0);
+                    header.fin();
+                    Some(Frame::new(header))
+                }
+                // The stream was properly closed. We either already have
+                // or will at some later point send our FIN frame.
+                // The remote may be out of credit though and blocked on
+                // writing more data. We may need to reset the stream.
+                State::SendClosed => {
+                    if self.config.window_update_mode == WindowUpdateMode::OnRead
+                        && shared.window == 0
+                    {
+                        // The remote may be waiting for a window update
+                        // which we will never send, so reset the stream now.
+                        let mut header = Header::data(stream_id, 0);
+                        header.rst();
+                        Some(Frame::new(header))
+                    } else {
+                        // The remote has either still credit or will be given more
+                        // (due to an enqueued window update or because the update
+                        // mode is `OnReceive`) or we already have inbound frames in
+                        // the socket buffer which will be processed later. In any
+                        // case we will reply with an RST in `Connection::on_data`
+                        // because the stream will no longer be known.
+                        None
+                    }
+                }
+                // The stream was properly closed. We either already have
+                // or will at some later point send our FIN frame. The
+                // remote end has already done so in the past.
+                State::Closed => None,
+            };
+            if let Some(w) = shared.reader.take() {
+                w.wake()
+            }
+            if let Some(w) = shared.writer.take() {
+                w.wake()
+            }
+            frame
+        };
+        if let Some(f) = frame {
+            log::trace!("{}/{}: sending: {}", self.id, stream_id, f.header());
+            self.pending_frames.push_back(f.into());
+        }
     }
 
     /// Process the result of reading from the socket.
@@ -806,13 +897,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     fn make_new_stream(&mut self, id: StreamId, window: u32, credit: u32) -> Stream {
         let config = self.config.clone();
 
-        // Create a channel with 0 _additional_ capacity for items.
-        // `poll_flush` for `Sender` will check whether we can send an item into the stream and
-        // NOT whether all items have been taken out of the receiver.
-        // To ensure that `poll_flush` on our `Stream` means that we have sent all frames,
-        // this channel must be configured with 0 capacity.
-        let (sender, receiver) = mpsc::channel(0);
-        self.stream_receivers.push(receiver);
+        let (sender, receiver) = mpsc::channel(10);
+        self.stream_receivers.push((id, receiver));
+        if let Some(waker) = self.no_streams_waker.take() {
+            waker.wake();
+        }
 
         Stream::new(id, self.id, config, window, credit, sender)
     }
@@ -840,79 +929,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             Mode::Server => id.is_client(),
         }
     }
-
-    /// Remove stale streams and create necessary messages to be sent to the remote.
-    fn garbage_collect(&mut self) {
-        let conn_id = self.id;
-        let win_update_mode = self.config.window_update_mode;
-        for stream in self.streams.values_mut() {
-            if stream.strong_count() > 1 {
-                continue;
-            }
-            log::trace!("{}: removing dropped {}", conn_id, stream);
-            let stream_id = stream.id();
-            let frame = {
-                let mut shared = stream.shared();
-                let frame = match shared.update_state(conn_id, stream_id, State::Closed) {
-                    // The stream was dropped without calling `poll_close`.
-                    // We reset the stream to inform the remote of the closure.
-                    State::Open => {
-                        let mut header = Header::data(stream_id, 0);
-                        header.rst();
-                        Some(Frame::new(header))
-                    }
-                    // The stream was dropped without calling `poll_close`.
-                    // We have already received a FIN from remote and send one
-                    // back which closes the stream for good.
-                    State::RecvClosed => {
-                        let mut header = Header::data(stream_id, 0);
-                        header.fin();
-                        Some(Frame::new(header))
-                    }
-                    // The stream was properly closed. We either already have
-                    // or will at some later point send our FIN frame.
-                    // The remote may be out of credit though and blocked on
-                    // writing more data. We may need to reset the stream.
-                    State::SendClosed => {
-                        if win_update_mode == WindowUpdateMode::OnRead && shared.window == 0 {
-                            // The remote may be waiting for a window update
-                            // which we will never send, so reset the stream now.
-                            let mut header = Header::data(stream_id, 0);
-                            header.rst();
-                            Some(Frame::new(header))
-                        } else {
-                            // The remote has either still credit or will be given more
-                            // (due to an enqueued window update or because the update
-                            // mode is `OnReceive`) or we already have inbound frames in
-                            // the socket buffer which will be processed later. In any
-                            // case we will reply with an RST in `Connection::on_data`
-                            // because the stream will no longer be known.
-                            None
-                        }
-                    }
-                    // The stream was properly closed. We either already have
-                    // or will at some later point send our FIN frame. The
-                    // remote end has already done so in the past.
-                    State::Closed => None,
-                };
-                if let Some(w) = shared.reader.take() {
-                    w.wake()
-                }
-                if let Some(w) = shared.writer.take() {
-                    w.wake()
-                }
-                frame
-            };
-            if let Some(f) = frame {
-                log::trace!("{}/{}: sending: {}", self.id, stream_id, f.header());
-                self.pending_frames.push_back(f.into());
-            }
-            self.dropped_streams.push(stream_id)
-        }
-        for id in self.dropped_streams.drain(..) {
-            self.streams.remove(&id);
-        }
-    }
 }
 
 impl<T> Active<T> {
@@ -926,275 +942,6 @@ impl<T> Active<T> {
             }
             if let Some(w) = shared.writer.take() {
                 w.wake()
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use futures::future::BoxFuture;
-    use futures::stream::FuturesUnordered;
-    use futures::AsyncReadExt;
-    use futures_ringbuf::Endpoint;
-    use std::mem;
-    use std::pin::Pin;
-
-    #[tokio::test]
-    async fn poll_flush_on_stream_only_returns_ok_if_frame_is_queued_for_sending() {
-        let (client, server) = Endpoint::pair(1000, 1000);
-
-        let client = Client::new(Connection::new(client, Config::default(), Mode::Client));
-        let server = EchoServer::new(Connection::new(server, Config::default(), Mode::Server));
-
-        let ((), processed) = futures::future::try_join(client, server).await.unwrap();
-
-        assert_eq!(processed, 1);
-    }
-
-    /// Our testing client.
-    ///
-    /// This struct will open a single outbound stream, send a message, attempt to flush it and assert the internal state of [`Connection`] after it.
-    enum Client {
-        Initial {
-            connection: Connection<Endpoint>,
-        },
-        Testing {
-            connection: Connection<Endpoint>,
-            worker_stream: StreamState,
-        },
-        Closing {
-            connection: Connection<Endpoint>,
-        },
-        Poisoned,
-    }
-
-    enum StreamState {
-        Sending(Stream),
-        Flushing(Stream),
-        Receiving(Stream),
-        Closing(Stream),
-    }
-
-    impl Client {
-        fn new(connection: Connection<Endpoint>) -> Self {
-            Self::Initial { connection }
-        }
-    }
-
-    impl Future for Client {
-        type Output = Result<()>;
-
-        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            let this = self.get_mut();
-
-            loop {
-                match mem::replace(this, Client::Poisoned) {
-                    // This state matching is out of order to have the interesting one at the top.
-                    Client::Testing {
-                        worker_stream: StreamState::Flushing(mut stream),
-                        mut connection,
-                    } => {
-                        match Pin::new(&mut stream).poll_flush(cx)? {
-                            Poll::Ready(()) => {
-                                let ConnectionState::Active(active) = &mut connection.inner else {
-                                    panic!("Connection is not active")
-                                };
-
-                                // Here is the actual test:
-                                // If the stream reports that it successfully flushed, we expect the connection to have queued the frames for sending
-                                // and thus not have any more `StreamCommand`s.
-                                assert!(active.stream_receivers.poll_next(cx).is_pending());
-
-                                *this = Client::Testing {
-                                    worker_stream: StreamState::Receiving(stream),
-                                    connection,
-                                };
-                                continue;
-                            }
-                            Poll::Pending => {}
-                        }
-
-                        drive_connection(this, connection, StreamState::Flushing(stream), cx);
-                        return Poll::Pending;
-                    }
-                    Client::Testing {
-                        worker_stream: StreamState::Receiving(mut stream),
-                        connection,
-                    } => {
-                        let mut buffer = [0u8; 5];
-
-                        match Pin::new(&mut stream).poll_read(cx, &mut buffer)? {
-                            Poll::Ready(num_bytes) => {
-                                assert_eq!(num_bytes, 5);
-                                assert_eq!(&buffer, b"hello");
-
-                                *this = Client::Testing {
-                                    worker_stream: StreamState::Closing(stream),
-                                    connection,
-                                };
-                                continue;
-                            }
-                            Poll::Pending => {}
-                        }
-
-                        drive_connection(this, connection, StreamState::Closing(stream), cx);
-                        return Poll::Pending;
-                    }
-                    Client::Testing {
-                        worker_stream: StreamState::Closing(mut stream),
-                        connection,
-                    } => {
-                        match Pin::new(&mut stream).poll_close(cx)? {
-                            Poll::Ready(()) => {
-                                *this = Client::Closing { connection };
-                                continue;
-                            }
-                            Poll::Pending => {}
-                        }
-
-                        drive_connection(this, connection, StreamState::Closing(stream), cx);
-                        return Poll::Pending;
-                    }
-                    Client::Initial { mut connection } => {
-                        match connection.poll_new_outbound(cx)? {
-                            Poll::Ready(stream) => {
-                                *this = Client::Testing {
-                                    connection,
-                                    worker_stream: StreamState::Sending(stream),
-                                };
-                                continue;
-                            }
-                            Poll::Pending => {
-                                *this = Client::Initial { connection };
-                                return Poll::Pending;
-                            }
-                        }
-                    }
-                    Client::Testing {
-                        worker_stream: StreamState::Sending(mut stream),
-                        connection,
-                    } => {
-                        match Pin::new(&mut stream).poll_write(cx, b"hello")? {
-                            Poll::Ready(written) => {
-                                assert_eq!(written, 5);
-                                *this = Client::Testing {
-                                    worker_stream: StreamState::Flushing(stream),
-                                    connection,
-                                };
-                                continue;
-                            }
-                            Poll::Pending => {}
-                        }
-
-                        drive_connection(this, connection, StreamState::Flushing(stream), cx);
-                        return Poll::Pending;
-                    }
-                    Client::Closing { mut connection } => match connection.poll_close(cx)? {
-                        Poll::Ready(()) => {
-                            return Poll::Ready(Ok(()));
-                        }
-                        Poll::Pending => {
-                            *this = Client::Closing { connection };
-                            return Poll::Pending;
-                        }
-                    },
-                    Client::Poisoned => {
-                        unreachable!()
-                    }
-                }
-            }
-        }
-    }
-
-    fn drive_connection(
-        this: &mut Client,
-        mut connection: Connection<futures_ringbuf::Endpoint>,
-        state: StreamState,
-        cx: &mut Context,
-    ) {
-        match connection.poll_next_inbound(cx) {
-            Poll::Ready(Some(_)) => {
-                panic!("Unexpected inbound stream")
-            }
-            Poll::Ready(None) => {
-                panic!("Unexpected connection close")
-            }
-            Poll::Pending => {
-                *this = Client::Testing {
-                    worker_stream: state,
-                    connection,
-                };
-            }
-        }
-    }
-
-    struct EchoServer {
-        connection: Connection<Endpoint>,
-        worker_streams: FuturesUnordered<BoxFuture<'static, Result<()>>>,
-        streams_processed: usize,
-        connection_closed: bool,
-    }
-
-    impl EchoServer {
-        fn new(connection: Connection<Endpoint>) -> Self {
-            Self {
-                connection,
-                worker_streams: FuturesUnordered::default(),
-                streams_processed: 0,
-                connection_closed: false,
-            }
-        }
-    }
-
-    impl Future for EchoServer {
-        type Output = Result<usize>;
-
-        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            let this = self.get_mut();
-
-            loop {
-                match this.worker_streams.poll_next_unpin(cx) {
-                    Poll::Ready(Some(Ok(()))) => {
-                        this.streams_processed += 1;
-                        continue;
-                    }
-                    Poll::Ready(Some(Err(e))) => {
-                        eprintln!("A stream failed: {}", e);
-                        continue;
-                    }
-                    Poll::Ready(None) => {
-                        if this.connection_closed {
-                            return Poll::Ready(Ok(this.streams_processed));
-                        }
-                    }
-                    Poll::Pending => {}
-                }
-
-                match this.connection.poll_next_inbound(cx) {
-                    Poll::Ready(Some(Ok(mut stream))) => {
-                        this.worker_streams.push(
-                            async move {
-                                {
-                                    let (mut r, mut w) = AsyncReadExt::split(&mut stream);
-                                    futures::io::copy(&mut r, &mut w).await?;
-                                }
-                                stream.close().await?;
-                                Ok(())
-                            }
-                            .boxed(),
-                        );
-                        continue;
-                    }
-                    Poll::Ready(None) | Poll::Ready(Some(Err(_))) => {
-                        this.connection_closed = true;
-                        continue;
-                    }
-                    Poll::Pending => {}
-                }
-
-                return Poll::Pending;
             }
         }
     }

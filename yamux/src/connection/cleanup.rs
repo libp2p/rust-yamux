@@ -1,5 +1,8 @@
-use crate::connection::command_receivers::CommandReceivers;
+use crate::connection::StreamCommand;
 use crate::ConnectionError;
+use futures::channel::mpsc;
+use futures::stream::SelectAll;
+use futures::StreamExt;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -8,12 +11,15 @@ use std::task::{Context, Poll};
 #[must_use]
 pub struct Cleanup {
     state: State,
-    stream_receivers: CommandReceivers,
+    stream_receivers: SelectAll<mpsc::Receiver<StreamCommand>>,
     error: Option<ConnectionError>,
 }
 
 impl Cleanup {
-    pub(crate) fn new(stream_receivers: CommandReceivers, error: ConnectionError) -> Self {
+    pub(crate) fn new(
+        stream_receivers: SelectAll<mpsc::Receiver<StreamCommand>>,
+        error: ConnectionError,
+    ) -> Self {
         Self {
             state: State::ClosingStreamReceiver,
             stream_receivers,
@@ -31,15 +37,16 @@ impl Future for Cleanup {
         loop {
             match this.state {
                 State::ClosingStreamReceiver => {
-                    this.stream_receivers.close();
+                    for stream in this.stream_receivers.iter_mut() {
+                        stream.close();
+                    }
                     this.state = State::DrainingStreamReceiver;
                 }
-                State::DrainingStreamReceiver => match this.stream_receivers.poll_next(cx) {
-                    Poll::Ready(cmd) => {
+                State::DrainingStreamReceiver => match this.stream_receivers.poll_next_unpin(cx) {
+                    Poll::Ready(Some(cmd)) => {
                         drop(cmd);
                     }
-                    // Poll::Pending means that there are no more commands.
-                    Poll::Pending => {
+                    Poll::Ready(None) | Poll::Pending => {
                         return Poll::Ready(
                             this.error
                                 .take()

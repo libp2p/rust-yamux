@@ -136,10 +136,6 @@ impl Stream {
         self.flag = flag
     }
 
-    pub(crate) fn strong_count(&self) -> usize {
-        Arc::strong_count(&self.shared)
-    }
-
     pub(crate) fn shared(&self) -> MutexGuard<'_, Shared> {
         self.shared.lock()
     }
