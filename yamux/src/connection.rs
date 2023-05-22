@@ -505,7 +505,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         }
 
         if self.pending_acks.len() >= MAX_ACK_BACKLOG {
-            log::debug!("{MAX_ACK_BACKLOG} streams waiting for ACK, parking task until remote acknowledges at least one stream");
+            log::debug!("{MAX_ACK_BACKLOG} streams waiting for ACK, registering task for wake-up until remote acknowledges at least one stream");
             self.new_outbound_stream_waker = Some(cx.waker().clone());
             return Poll::Pending;
         }
