@@ -375,7 +375,7 @@ impl AsyncWrite for Stream {
             false
         };
         log::trace!("{}/{}: close", self.conn, self.id);
-        let cmd = StreamCommand::CloseStream { id: self.id, ack };
+        let cmd = StreamCommand::CloseStream { ack };
         self.sender
             .start_send(cmd)
             .map_err(|_| self.write_zero_err())?;

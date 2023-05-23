@@ -61,7 +61,7 @@ where
                         Poll::Ready(Some((_, Some(StreamCommand::SendFrame(frame))))) => {
                             this.pending_frames.push_back(frame.into())
                         }
-                        Poll::Ready(Some((_, Some(StreamCommand::CloseStream { id, ack })))) => {
+                        Poll::Ready(Some((id, Some(StreamCommand::CloseStream { ack })))) => {
                             this.pending_frames
                                 .push_back(Frame::close_stream(id, ack).into());
                         }

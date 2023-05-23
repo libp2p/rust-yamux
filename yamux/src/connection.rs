@@ -363,7 +363,7 @@ pub(crate) enum StreamCommand {
     /// A new frame should be sent to the remote.
     SendFrame(Frame<Either<Data, WindowUpdate>>),
     /// Close a stream.
-    CloseStream { id: StreamId, ack: bool },
+    CloseStream { ack: bool },
 }
 
 /// Possible actions as a result of incoming frame handling.
@@ -456,13 +456,20 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 Poll::Pending => {}
             }
 
-            match self.poll_stream_receivers(cx) {
-                Poll::Ready(StreamCommand::SendFrame(frame)) => {
+            match self.stream_receivers.poll_next_unpin(cx) {
+                Poll::Ready(None) => {
+                    self.no_streams_waker = Some(cx.waker().clone());
+                }
+                Poll::Ready(Some((_, Some(StreamCommand::SendFrame(frame))))) => {
                     self.on_send_frame(frame.into());
                     continue;
                 }
-                Poll::Ready(StreamCommand::CloseStream { id, ack }) => {
+                Poll::Ready(Some((id, Some(StreamCommand::CloseStream { ack })))) => {
                     self.on_close_stream(id, ack);
+                    continue;
+                }
+                Poll::Ready(Some((id, None))) => {
+                    self.on_drop_stream(id);
                     continue;
                 }
                 Poll::Pending => {}
@@ -483,23 +490,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
             // If we make it this far, at least one of the above must have registered a waker.
             return Poll::Pending;
-        }
-    }
-
-    fn poll_stream_receivers(&mut self, cx: &mut Context) -> Poll<StreamCommand> {
-        loop {
-            match futures::ready!(self.stream_receivers.poll_next_unpin(cx)) {
-                None => {
-                    self.no_streams_waker = Some(cx.waker().clone());
-                    return Poll::Pending;
-                }
-                Some((_, Some(command))) => {
-                    return Poll::Ready(command);
-                }
-                Some((id, None)) => {
-                    self.on_drop_stream(id);
-                }
-            }
         }
     }
 
