@@ -1,13 +1,10 @@
-use futures::future::{BoxFuture, Either};
+use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
-use futures::{
-    future, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, FutureExt, SinkExt, StreamExt,
-};
+use futures::{future, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, FutureExt, StreamExt};
 use quickcheck::QuickCheck;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::time::Duration;
 use test_harness::*;
 use tokio::net::TcpStream;
 use tokio::runtime::Runtime;

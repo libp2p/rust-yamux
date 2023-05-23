@@ -102,7 +102,7 @@ use cleanup::Cleanup;
 use closing::Closing;
 use futures::{channel::mpsc, future::Either, prelude::*, sink::SinkExt, stream::Fuse};
 use nohash_hasher::IntMap;
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::task::{Context, Waker};
 use std::{fmt, sync::Arc, task::Poll};
 
@@ -356,7 +356,6 @@ struct Active<T> {
     stream_receiver: mpsc::Receiver<StreamCommand>,
     dropped_streams: Vec<StreamId>,
     pending_frames: VecDeque<Frame<()>>,
-    pending_acks: HashSet<StreamId>,
     new_outbound_stream_waker: Option<Waker>,
 }
 
@@ -430,7 +429,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             },
             dropped_streams: Vec::new(),
             pending_frames: VecDeque::default(),
-            pending_acks: HashSet::default(),
             new_outbound_stream_waker: None,
         }
     }
@@ -504,7 +502,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             return Poll::Ready(Err(ConnectionError::TooManyStreams));
         }
 
-        if self.pending_acks.len() >= MAX_ACK_BACKLOG {
+        if self.ack_backlog() >= MAX_ACK_BACKLOG {
             log::debug!("{MAX_ACK_BACKLOG} streams waiting for ACK, parking task until remote acknowledges at least one stream");
             self.new_outbound_stream_waker = Some(cx.waker().clone());
             return Poll::Pending;
@@ -536,8 +534,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         log::debug!("{}: new outbound {} of {}", self.id, stream, self);
         self.streams.insert(id, stream.clone());
 
-        self.pending_acks.insert(id);
-
         Poll::Ready(Ok(stream))
     }
 
@@ -568,7 +564,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
         if frame.header().flags().contains(header::ACK) {
             let id = frame.header().stream_id();
-            self.pending_acks.remove(&id);
             if let Some(stream) = self.streams.get(&id) {
                 stream.set_acknowledged();
             }
@@ -860,6 +855,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             Mode::Server => assert!(proposed.is_server()),
         }
         Ok(proposed)
+    }
+
+    /// The ACK backlog is defined as the number of streams that have not yet been acknowledged.
+    fn ack_backlog(&mut self) -> usize {
+        self.streams
+            .values()
+            .filter(|s| !s.is_acknowledged())
+            .count()
     }
 
     // Check if the given stream ID is valid w.r.t. the provided tag and our connection mode.
