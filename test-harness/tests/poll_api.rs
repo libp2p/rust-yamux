@@ -1,6 +1,6 @@
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
-use futures::{future, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, FutureExt, StreamExt};
+use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, FutureExt, StreamExt};
 use quickcheck::QuickCheck;
 use std::future::Future;
 use std::pin::Pin;
@@ -36,7 +36,7 @@ fn prop_config_send_recv_multi() {
             };
 
             let (server_processed, client_processed) =
-                future::try_join(server, client).await.unwrap();
+                futures::future::try_join(server, client).await.unwrap();
 
             assert_eq!(server_processed, num_messagses);
             assert_eq!(client_processed, num_messagses);
