@@ -30,6 +30,7 @@ mod error;
 mod frame;
 
 pub(crate) mod connection;
+mod tagged_stream;
 
 pub use crate::connection::{Connection, Mode, Packet, Stream};
 pub use crate::control::{Control, ControlledConnection};

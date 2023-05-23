@@ -16,6 +16,7 @@ nohash-hasher = "0.2"
 parking_lot = "0.12"
 rand = "0.8.3"
 static_assertions = "1"
+pin-project = "1.1.0"
 
 [dev-dependencies]
 anyhow = "1"

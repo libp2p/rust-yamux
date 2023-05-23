@@ -1,5 +1,6 @@
 use crate::connection::StreamCommand;
-use crate::ConnectionError;
+use crate::tagged_stream::TaggedStream;
+use crate::{ConnectionError, StreamId};
 use futures::channel::mpsc;
 use futures::stream::SelectAll;
 use futures::StreamExt;
@@ -11,13 +12,13 @@ use std::task::{Context, Poll};
 #[must_use]
 pub struct Cleanup {
     state: State,
-    stream_receivers: SelectAll<mpsc::Receiver<StreamCommand>>,
+    stream_receivers: SelectAll<TaggedStream<StreamId, mpsc::Receiver<StreamCommand>>>,
     error: Option<ConnectionError>,
 }
 
 impl Cleanup {
     pub(crate) fn new(
-        stream_receivers: SelectAll<mpsc::Receiver<StreamCommand>>,
+        stream_receivers: SelectAll<TaggedStream<StreamId, mpsc::Receiver<StreamCommand>>>,
         error: ConnectionError,
     ) -> Self {
         Self {
@@ -38,7 +39,7 @@ impl Future for Cleanup {
             match this.state {
                 State::ClosingStreamReceiver => {
                     for stream in this.stream_receivers.iter_mut() {
-                        stream.close();
+                        stream.inner_mut().close();
                     }
                     this.state = State::DrainingStreamReceiver;
                 }

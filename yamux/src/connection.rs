@@ -104,10 +104,10 @@ use futures::stream::SelectAll;
 use futures::{channel::mpsc, future::Either, prelude::*, sink::SinkExt, stream::Fuse};
 use nohash_hasher::IntMap;
 use std::collections::VecDeque;
-use std::iter::FromIterator;
 use std::task::{Context, Waker};
 use std::{fmt, sync::Arc, task::Poll};
 
+use crate::tagged_stream::TaggedStream;
 pub use stream::{Packet, State, Stream};
 
 /// How the connection is used.
@@ -351,7 +351,7 @@ struct Active<T> {
     next_id: u32,
 
     streams: IntMap<StreamId, Stream>,
-    stream_receivers: Vec<(StreamId, mpsc::Receiver<StreamCommand>)>,
+    stream_receivers: SelectAll<TaggedStream<StreamId, mpsc::Receiver<StreamCommand>>>,
     no_streams_waker: Option<Waker>,
 
     pending_frames: VecDeque<Frame<()>>,
@@ -418,7 +418,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             config: Arc::new(cfg),
             socket,
             streams: IntMap::default(),
-            stream_receivers: Vec::default(),
+            stream_receivers: SelectAll::default(),
             no_streams_waker: None,
             next_id: match mode {
                 Mode::Client => 1,
@@ -430,15 +430,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
     /// Gracefully close the connection to the remote.
     fn close(self) -> Closing<T> {
-        Closing::new(
-            SelectAll::from_iter(
-                self.stream_receivers
-                    .into_iter()
-                    .map(|(_, receiver)| receiver),
-            ),
-            self.pending_frames,
-            self.socket,
-        )
+        Closing::new(self.stream_receivers, self.pending_frames, self.socket)
     }
 
     /// Cleanup all our resources.
@@ -447,14 +439,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     fn cleanup(mut self, error: ConnectionError) -> Cleanup {
         self.drop_all_streams();
 
-        Cleanup::new(
-            SelectAll::from_iter(
-                self.stream_receivers
-                    .into_iter()
-                    .map(|(_, receiver)| receiver),
-            ),
-            error,
-        )
+        Cleanup::new(self.stream_receivers, error)
     }
 
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Result<Stream>> {
@@ -502,29 +487,20 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     }
 
     fn poll_stream_receivers(&mut self, cx: &mut Context) -> Poll<StreamCommand> {
-        for i in (0..self.stream_receivers.len()).rev() {
-            let (id, mut receiver) = self.stream_receivers.swap_remove(i);
-
-            match receiver.poll_next_unpin(cx) {
-                Poll::Ready(Some(command)) => {
-                    self.stream_receivers.push((id, receiver));
+        loop {
+            match futures::ready!(self.stream_receivers.poll_next_unpin(cx)) {
+                None => {
+                    self.no_streams_waker = Some(cx.waker().clone());
+                    return Poll::Pending;
+                }
+                Some((_, Some(command))) => {
                     return Poll::Ready(command);
                 }
-                Poll::Ready(None) => {
+                Some((id, None)) => {
                     self.on_drop_stream(id);
-                }
-                Poll::Pending => {
-                    self.stream_receivers.push((id, receiver));
                 }
             }
         }
-
-        if self.stream_receivers.is_empty() {
-            self.no_streams_waker = Some(cx.waker().clone());
-            return Poll::Pending;
-        }
-
-        Poll::Pending
     }
 
     fn new_outbound(&mut self) -> Result<Stream> {
@@ -913,7 +889,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         let config = self.config.clone();
 
         let (sender, receiver) = mpsc::channel(10);
-        self.stream_receivers.push((id, receiver));
+        self.stream_receivers.push(TaggedStream::new(id, receiver));
         if let Some(waker) = self.no_streams_waker.take() {
             waker.wake();
         }
