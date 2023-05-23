@@ -562,8 +562,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                     header.fin();
                     Some(Frame::new(header))
                 }
-                // The stream was properly closed. We either already have
-                // or will at some later point send our FIN frame.
+                // The stream was properly closed. We already sent our FIN frame.
                 // The remote may be out of credit though and blocked on
                 // writing more data. We may need to reset the stream.
                 State::SendClosed => {
@@ -585,8 +584,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                         None
                     }
                 }
-                // The stream was properly closed. We either already have
-                // or will at some later point send our FIN frame. The
+                // The stream was properly closed. We already have sent our FIN frame. The
                 // remote end has already done so in the past.
                 State::Closed => None,
             };
