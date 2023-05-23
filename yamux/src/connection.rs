@@ -457,9 +457,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             }
 
             match self.stream_receivers.poll_next_unpin(cx) {
-                Poll::Ready(None) => {
-                    self.no_streams_waker = Some(cx.waker().clone());
-                }
                 Poll::Ready(Some((_, Some(StreamCommand::SendFrame(frame))))) => {
                     self.on_send_frame(frame.into());
                     continue;
@@ -471,6 +468,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 Poll::Ready(Some((id, None))) => {
                     self.on_drop_stream(id);
                     continue;
+                }
+                Poll::Ready(None) => {
+                    self.no_streams_waker = Some(cx.waker().clone());
                 }
                 Poll::Pending => {}
             }
