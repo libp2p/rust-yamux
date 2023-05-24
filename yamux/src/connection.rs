@@ -937,7 +937,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     fn ack_backlog(&mut self) -> usize {
         self.streams
             .values()
-            .filter(|s| s.is_outbound())
+            .filter(|s| s.is_outbound(self.mode))
             .filter(|s| !s.is_acknowledged())
             .count()
     }

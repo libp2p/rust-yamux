@@ -16,7 +16,7 @@ use crate::{
         header::{Data, Header, StreamId, WindowUpdate},
         Frame,
     },
-    Config, WindowUpdateMode, DEFAULT_CREDIT,
+    Config, Mode, WindowUpdateMode, DEFAULT_CREDIT,
 };
 use futures::{
     channel::mpsc,
@@ -83,7 +83,6 @@ pub struct Stream {
     sender: mpsc::Sender<StreamCommand>,
     flag: Flag,
     shared: Arc<Mutex<Shared>>,
-    direction: Direction,
 }
 
 impl fmt::Debug for Stream {
@@ -116,7 +115,6 @@ impl Stream {
             sender,
             flag: Flag::None,
             shared: Arc::new(Mutex::new(Shared::new(DEFAULT_CREDIT, credit, config))),
-            direction: Direction::Inbound,
         }
     }
 
@@ -134,7 +132,6 @@ impl Stream {
             sender,
             flag: Flag::None,
             shared: Arc::new(Mutex::new(Shared::new(window, DEFAULT_CREDIT, config))),
-            direction: Direction::Outbound,
         }
     }
 
@@ -159,8 +156,18 @@ impl Stream {
         self.shared().acknowledged = true;
     }
 
-    pub(crate) fn is_outbound(&self) -> bool {
-        matches!(self.direction, Direction::Outbound)
+    /// Whether this is an outbound stream.
+    ///
+    /// Clients use odd IDs and servers use even IDs.
+    /// A stream is outbound if:
+    ///
+    /// - Its ID is odd and we are the client.
+    /// - Its ID is even and we are the server.
+    pub(crate) fn is_outbound(&self, our_mode: Mode) -> bool {
+        match our_mode {
+            Mode::Client => self.id.is_client(),
+            Mode::Server => self.id.is_server(),
+        }
     }
 
     /// Set the flag that should be set on the next outbound frame header.
@@ -180,7 +187,6 @@ impl Stream {
             sender: self.sender.clone(),
             flag: self.flag,
             shared: self.shared.clone(),
-            direction: self.direction,
         }
     }
 
@@ -234,12 +240,6 @@ impl Stream {
 
         Poll::Ready(Ok(()))
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
-    Inbound,
-    Outbound,
 }
 
 /// Byte data produced by the [`futures::stream::Stream`] impl of [`Stream`].
