@@ -91,6 +91,7 @@ mod cleanup;
 mod closing;
 mod stream;
 
+use crate::tagged_stream::TaggedStream;
 use crate::{
     error::ConnectionError,
     frame::header::{self, Data, GoAway, Header, Ping, StreamId, Tag, WindowUpdate, CONNECTION_ID},
@@ -107,8 +108,6 @@ use std::collections::VecDeque;
 use std::task::{Context, Waker};
 use std::{fmt, sync::Arc, task::Poll};
 
-use crate::connection::stream::Direction;
-use crate::tagged_stream::TaggedStream;
 pub use stream::{Packet, State, Stream};
 
 /// How the connection is used.
@@ -938,7 +937,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     fn ack_backlog(&mut self) -> usize {
         self.streams
             .values()
-            .filter(|s| s.direction() == Direction::Outbound)
+            .filter(|s| s.is_outbound())
             .filter(|s| !s.is_acknowledged())
             .count()
     }

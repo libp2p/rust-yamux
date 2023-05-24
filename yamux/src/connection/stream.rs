@@ -159,8 +159,8 @@ impl Stream {
         self.shared().acknowledged = true;
     }
 
-    pub(crate) fn direction(&self) -> Direction {
-        self.direction
+    pub(crate) fn is_outbound(&self) -> bool {
+        matches!(self.direction, Direction::Outbound)
     }
 
     /// Set the flag that should be set on the next outbound frame header.
