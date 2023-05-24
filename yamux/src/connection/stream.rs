@@ -109,15 +109,15 @@ impl Stream {
         credit: u32,
         sender: mpsc::Sender<StreamCommand>,
     ) -> Self {
-        Self::new(
+        Self {
             id,
             conn,
-            config,
-            DEFAULT_CREDIT,
-            credit,
+            config: config.clone(),
             sender,
-            Direction::Inbound,
-        )
+            flag: Flag::None,
+            shared: Arc::new(Mutex::new(Shared::new(DEFAULT_CREDIT, credit, config))),
+            direction: Direction::Inbound,
+        }
     }
 
     pub(crate) fn new_outbound(
@@ -127,34 +127,14 @@ impl Stream {
         window: u32,
         sender: mpsc::Sender<StreamCommand>,
     ) -> Self {
-        Self::new(
-            id,
-            conn,
-            config,
-            window,
-            DEFAULT_CREDIT,
-            sender,
-            Direction::Outbound,
-        )
-    }
-
-    fn new(
-        id: StreamId,
-        conn: connection::Id,
-        config: Arc<Config>,
-        window: u32,
-        credit: u32,
-        sender: mpsc::Sender<StreamCommand>,
-        direction: Direction,
-    ) -> Self {
         Self {
             id,
             conn,
             config: config.clone(),
             sender,
             flag: Flag::None,
-            shared: Arc::new(Mutex::new(Shared::new(window, credit, config))),
-            direction,
+            shared: Arc::new(Mutex::new(Shared::new(window, DEFAULT_CREDIT, config))),
+            direction: Direction::Outbound,
         }
     }
 
