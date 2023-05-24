@@ -107,6 +107,7 @@ use std::collections::VecDeque;
 use std::task::{Context, Waker};
 use std::{fmt, sync::Arc, task::Poll};
 
+use crate::connection::stream::Direction;
 use crate::tagged_stream::TaggedStream;
 pub use stream::{Packet, State, Stream};
 
@@ -523,7 +524,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             self.pending_frames.push_back(frame.into());
         }
 
-        let mut stream = self.make_new_stream(id, self.config.receive_window, DEFAULT_CREDIT);
+        let mut stream =
+            self.make_new_outbound_stream(id, self.config.receive_window, DEFAULT_CREDIT);
 
         if extra_credit == 0 {
             stream.set_flag(stream::Flag::Syn)
@@ -712,7 +714,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 log::error!("{}: maximum number of streams reached", self.id);
                 return Action::Terminate(Frame::internal_error());
             }
-            let mut stream = self.make_new_stream(stream_id, DEFAULT_CREDIT, DEFAULT_CREDIT);
+            let mut stream =
+                self.make_new_inbound_stream(stream_id, DEFAULT_CREDIT, DEFAULT_CREDIT);
             let mut window_update = None;
             {
                 let mut shared = stream.shared();
@@ -829,7 +832,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             }
 
             let credit = frame.header().credit() + DEFAULT_CREDIT;
-            let mut stream = self.make_new_stream(stream_id, DEFAULT_CREDIT, credit);
+            let mut stream = self.make_new_inbound_stream(stream_id, DEFAULT_CREDIT, credit);
             stream.set_flag(stream::Flag::Ack);
 
             if is_finish {
@@ -896,7 +899,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         Action::None
     }
 
-    fn make_new_stream(&mut self, id: StreamId, window: u32, credit: u32) -> Stream {
+    fn make_new_inbound_stream(&mut self, id: StreamId, window: u32, credit: u32) -> Stream {
         let config = self.config.clone();
 
         let (sender, receiver) = mpsc::channel(10); // 10 is an arbitrary number.
@@ -905,7 +908,19 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             waker.wake();
         }
 
-        Stream::new(id, self.id, config, window, credit, sender)
+        Stream::new_inbound(id, self.id, config, window, credit, sender)
+    }
+
+    fn make_new_outbound_stream(&mut self, id: StreamId, window: u32, credit: u32) -> Stream {
+        let config = self.config.clone();
+
+        let (sender, receiver) = mpsc::channel(10); // 10 is an arbitrary number.
+        self.stream_receivers.push(TaggedStream::new(id, receiver));
+        if let Some(waker) = self.no_streams_waker.take() {
+            waker.wake();
+        }
+
+        Stream::new_outbound(id, self.id, config, window, credit, sender)
     }
 
     fn next_stream_id(&mut self) -> Result<StreamId> {
@@ -921,10 +936,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         Ok(proposed)
     }
 
-    /// The ACK backlog is defined as the number of streams that have not yet been acknowledged.
+    /// The ACK backlog is defined as the number of outbound streams that have not yet been acknowledged.
     fn ack_backlog(&mut self) -> usize {
         self.streams
             .values()
+            .filter(|s| s.direction() == Direction::Outbound)
             .filter(|s| !s.is_acknowledged())
             .count()
     }

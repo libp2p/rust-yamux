@@ -83,6 +83,7 @@ pub struct Stream {
     sender: mpsc::Sender<StreamCommand>,
     flag: Flag,
     shared: Arc<Mutex<Shared>>,
+    direction: Direction,
 }
 
 impl fmt::Debug for Stream {
@@ -101,7 +102,7 @@ impl fmt::Display for Stream {
 }
 
 impl Stream {
-    pub(crate) fn new(
+    pub(crate) fn new_inbound(
         id: StreamId,
         conn: connection::Id,
         config: Arc<Config>,
@@ -109,13 +110,45 @@ impl Stream {
         credit: u32,
         sender: mpsc::Sender<StreamCommand>,
     ) -> Self {
-        Stream {
+        Self::new(id, conn, config, window, credit, sender, Direction::Inbound)
+    }
+
+    pub(crate) fn new_outbound(
+        id: StreamId,
+        conn: connection::Id,
+        config: Arc<Config>,
+        window: u32,
+        credit: u32,
+        sender: mpsc::Sender<StreamCommand>,
+    ) -> Self {
+        Self::new(
+            id,
+            conn,
+            config,
+            window,
+            credit,
+            sender,
+            Direction::Outbound,
+        )
+    }
+
+    fn new(
+        id: StreamId,
+        conn: connection::Id,
+        config: Arc<Config>,
+        window: u32,
+        credit: u32,
+        sender: mpsc::Sender<StreamCommand>,
+        direction: Direction,
+    ) -> Self {
+        Self {
             id,
             conn,
             config: config.clone(),
             sender,
             flag: Flag::None,
             shared: Arc::new(Mutex::new(Shared::new(window, credit, config))),
+            direction,
         }
     }
 
@@ -140,6 +173,10 @@ impl Stream {
         self.shared().acknowledged = true;
     }
 
+    pub(crate) fn direction(&self) -> Direction {
+        self.direction
+    }
+
     /// Set the flag that should be set on the next outbound frame header.
     pub(crate) fn set_flag(&mut self, flag: Flag) {
         self.flag = flag
@@ -157,6 +194,7 @@ impl Stream {
             sender: self.sender.clone(),
             flag: self.flag,
             shared: self.shared.clone(),
+            direction: self.direction,
         }
     }
 
@@ -210,6 +248,12 @@ impl Stream {
 
         Poll::Ready(Ok(()))
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Inbound,
+    Outbound,
 }
 
 /// Byte data produced by the [`futures::stream::Stream`] impl of [`Stream`].
