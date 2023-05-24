@@ -16,7 +16,7 @@ use crate::{
         header::{Data, Header, StreamId, WindowUpdate},
         Frame,
     },
-    Config, WindowUpdateMode,
+    Config, WindowUpdateMode, DEFAULT_CREDIT,
 };
 use futures::{
     channel::mpsc,
@@ -106,11 +106,18 @@ impl Stream {
         id: StreamId,
         conn: connection::Id,
         config: Arc<Config>,
-        window: u32,
         credit: u32,
         sender: mpsc::Sender<StreamCommand>,
     ) -> Self {
-        Self::new(id, conn, config, window, credit, sender, Direction::Inbound)
+        Self::new(
+            id,
+            conn,
+            config,
+            DEFAULT_CREDIT,
+            credit,
+            sender,
+            Direction::Inbound,
+        )
     }
 
     pub(crate) fn new_outbound(

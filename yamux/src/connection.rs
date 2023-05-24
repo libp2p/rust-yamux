@@ -714,8 +714,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 log::error!("{}: maximum number of streams reached", self.id);
                 return Action::Terminate(Frame::internal_error());
             }
-            let mut stream =
-                self.make_new_inbound_stream(stream_id, DEFAULT_CREDIT, DEFAULT_CREDIT);
+            let mut stream = self.make_new_inbound_stream(stream_id, DEFAULT_CREDIT);
             let mut window_update = None;
             {
                 let mut shared = stream.shared();
@@ -832,7 +831,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             }
 
             let credit = frame.header().credit() + DEFAULT_CREDIT;
-            let mut stream = self.make_new_inbound_stream(stream_id, DEFAULT_CREDIT, credit);
+            let mut stream = self.make_new_inbound_stream(stream_id, credit);
             stream.set_flag(stream::Flag::Ack);
 
             if is_finish {
@@ -899,7 +898,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         Action::None
     }
 
-    fn make_new_inbound_stream(&mut self, id: StreamId, window: u32, credit: u32) -> Stream {
+    fn make_new_inbound_stream(&mut self, id: StreamId, credit: u32) -> Stream {
         let config = self.config.clone();
 
         let (sender, receiver) = mpsc::channel(10); // 10 is an arbitrary number.
@@ -908,7 +907,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             waker.wake();
         }
 
-        Stream::new_inbound(id, self.id, config, window, credit, sender)
+        Stream::new_inbound(id, self.id, config, credit, sender)
     }
 
     fn make_new_outbound_stream(&mut self, id: StreamId, window: u32, credit: u32) -> Stream {
