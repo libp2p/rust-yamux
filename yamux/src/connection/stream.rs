@@ -22,7 +22,7 @@ use futures::{
     channel::mpsc,
     future::Either,
     io::{AsyncRead, AsyncWrite},
-    ready,
+    ready, SinkExt,
 };
 use parking_lot::{Mutex, MutexGuard};
 use std::convert::TryInto;
@@ -143,10 +143,6 @@ impl Stream {
     /// Set the flag that should be set on the next outbound frame header.
     pub(crate) fn set_flag(&mut self, flag: Flag) {
         self.flag = flag
-    }
-
-    pub(crate) fn strong_count(&self) -> usize {
-        Arc::strong_count(&self.shared)
     }
 
     pub(crate) fn shared(&self) -> MutexGuard<'_, Shared> {
@@ -373,8 +369,10 @@ impl AsyncWrite for Stream {
         Poll::Ready(Ok(n))
     }
 
-    fn poll_flush(self: Pin<&mut Self>, _: &mut Context) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
+        self.sender
+            .poll_flush_unpin(cx)
+            .map_err(|_| self.write_zero_err())
     }
 
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
@@ -392,7 +390,7 @@ impl AsyncWrite for Stream {
             false
         };
         log::trace!("{}/{}: close", self.conn, self.id);
-        let cmd = StreamCommand::CloseStream { id: self.id, ack };
+        let cmd = StreamCommand::CloseStream { ack };
         self.sender
             .start_send(cmd)
             .map_err(|_| self.write_zero_err())?;
