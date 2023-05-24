@@ -524,8 +524,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             self.pending_frames.push_back(frame.into());
         }
 
-        let mut stream =
-            self.make_new_outbound_stream(id, self.config.receive_window, DEFAULT_CREDIT);
+        let mut stream = self.make_new_outbound_stream(id, self.config.receive_window);
 
         if extra_credit == 0 {
             stream.set_flag(stream::Flag::Syn)
@@ -910,7 +909,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         Stream::new_inbound(id, self.id, config, credit, sender)
     }
 
-    fn make_new_outbound_stream(&mut self, id: StreamId, window: u32, credit: u32) -> Stream {
+    fn make_new_outbound_stream(&mut self, id: StreamId, window: u32) -> Stream {
         let config = self.config.clone();
 
         let (sender, receiver) = mpsc::channel(10); // 10 is an arbitrary number.
@@ -919,7 +918,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             waker.wake();
         }
 
-        Stream::new_outbound(id, self.id, config, window, credit, sender)
+        Stream::new_outbound(id, self.id, config, window, sender)
     }
 
     fn next_stream_id(&mut self) -> Result<StreamId> {

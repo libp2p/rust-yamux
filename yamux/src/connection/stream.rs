@@ -125,7 +125,6 @@ impl Stream {
         conn: connection::Id,
         config: Arc<Config>,
         window: u32,
-        credit: u32,
         sender: mpsc::Sender<StreamCommand>,
     ) -> Self {
         Self::new(
@@ -133,7 +132,7 @@ impl Stream {
             conn,
             config,
             window,
-            credit,
+            DEFAULT_CREDIT,
             sender,
             Direction::Outbound,
         )
