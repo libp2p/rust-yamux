@@ -561,7 +561,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             let frame = match shared.update_state(self.id, stream_id, State::Closed) {
                 // The stream was dropped without calling `poll_close`.
                 // We reset the stream to inform the remote of the closure.
-                State::Open => {
+                State::Open { .. } => {
                     let mut header = Header::data(stream_id, 0);
                     header.rst();
                     Some(Frame::new(header))
@@ -626,7 +626,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         if frame.header().flags().contains(header::ACK) {
             let id = frame.header().stream_id();
             if let Some(stream) = self.streams.get(&id) {
-                stream.set_acknowledged();
+                stream
+                    .shared()
+                    .update_state(self.id, id, State::Open { acknowledged: true });
             }
             if let Some(waker) = self.new_outbound_stream_waker.take() {
                 waker.wake();
@@ -938,7 +940,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         self.streams
             .values()
             .filter(|s| s.is_outbound(self.mode))
-            .filter(|s| !s.is_acknowledged())
+            .filter(|s| s.is_pending_ack())
             .count()
     }
 

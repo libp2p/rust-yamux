@@ -37,7 +37,18 @@ use std::{
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum State {
     /// Open bidirectionally.
-    Open,
+    Open {
+        /// Whether the stream is acknowledged.
+        ///
+        /// For outbound streams, this tracks whether the remote has acknowledged our stream.
+        /// For inbound streams, this tracks whether we have acknowledged the stream to the remote.
+        ///
+        /// This starts out with `false` and is set to `true` when we receive an `ACK` flag for this stream.
+        /// We may also directly transition:
+        /// - from `Open` to `RecvClosed` if the remote immediately sends `FIN`.
+        /// - from `Open` to `Closed` if the remote immediately sends `RST`.
+        acknowledged: bool,
+    },
     /// Open for incoming messages.
     SendClosed,
     /// Open for outgoing messages.
@@ -148,12 +159,14 @@ impl Stream {
         matches!(self.shared().state(), State::Closed)
     }
 
-    pub fn is_acknowledged(&self) -> bool {
-        self.shared().acknowledged
-    }
-
-    pub(crate) fn set_acknowledged(&self) {
-        self.shared().acknowledged = true;
+    /// Whether we are still waiting for the remote to acknowledge this stream.
+    pub fn is_pending_ack(&self) -> bool {
+        matches!(
+            self.shared().state(),
+            State::Open {
+                acknowledged: false
+            }
+        )
     }
 
     /// Whether this is an outbound stream.
@@ -389,7 +402,8 @@ impl AsyncWrite for Stream {
 
         // technically, the frame hasn't been sent yet on the wire but from the perspective of this data structure, we've queued the frame for sending
         if frame.header().flags().contains(ACK) {
-            self.set_acknowledged();
+            self.shared()
+                .update_state(self.conn, self.id, State::Open { acknowledged: true });
         }
 
         let cmd = StreamCommand::SendFrame(frame);
@@ -439,22 +453,20 @@ pub(crate) struct Shared {
     pub(crate) reader: Option<Waker>,
     pub(crate) writer: Option<Waker>,
     config: Arc<Config>,
-
-    /// Whether the stream has been acknowledged by the remote.
-    acknowledged: bool,
 }
 
 impl Shared {
     fn new(window: u32, credit: u32, config: Arc<Config>) -> Self {
         Shared {
-            state: State::Open,
+            state: State::Open {
+                acknowledged: false,
+            },
             window,
             credit,
             buffer: Chunks::new(),
             reader: None,
             writer: None,
             config,
-            acknowledged: false,
         }
     }
 
@@ -475,19 +487,19 @@ impl Shared {
 
         match (current, next) {
             (Closed, _) => {}
-            (Open, _) => self.state = next,
+            (Open { .. }, _) => self.state = next,
             (RecvClosed, Closed) => self.state = Closed,
-            (RecvClosed, Open) => {}
+            (RecvClosed, Open { .. }) => {}
             (RecvClosed, RecvClosed) => {}
             (RecvClosed, SendClosed) => self.state = Closed,
             (SendClosed, Closed) => self.state = Closed,
-            (SendClosed, Open) => {}
+            (SendClosed, Open { .. }) => {}
             (SendClosed, RecvClosed) => self.state = Closed,
             (SendClosed, SendClosed) => {}
         }
 
         log::trace!(
-            "{}/{}: update state: ({:?} {:?} {:?})",
+            "{}/{}: update state: (from {:?} to {:?} -> {:?})",
             cid,
             sid,
             current,

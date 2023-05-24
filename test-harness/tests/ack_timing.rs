@@ -197,7 +197,7 @@ where
 /// Initially, the stream is not acknowledged. The server will only acknowledge the stream with the first frame.
 async fn ping_pong(mut stream: Stream) -> Result<(), ConnectionError> {
     assert!(
-        !stream.is_acknowledged(),
+        stream.is_pending_ack(),
         "newly returned stream should not be acknowledged"
     );
 
@@ -206,7 +206,7 @@ async fn ping_pong(mut stream: Stream) -> Result<(), ConnectionError> {
     stream.read_exact(&mut buffer).await?;
 
     assert!(
-        stream.is_acknowledged(),
+        !stream.is_pending_ack(),
         "stream should be acknowledged once we received the first data"
     );
     assert_eq!(&buffer, b"pong");
@@ -221,7 +221,7 @@ async fn ping_pong(mut stream: Stream) -> Result<(), ConnectionError> {
 /// Initially, the stream is not acknowledged. We only include the ACK flag in the first frame.
 async fn pong_ping(mut stream: Stream) -> Result<(), ConnectionError> {
     assert!(
-        !stream.is_acknowledged(),
+        stream.is_pending_ack(),
         "before sending anything we should not have acknowledged the stream to the remote"
     );
 
@@ -229,7 +229,7 @@ async fn pong_ping(mut stream: Stream) -> Result<(), ConnectionError> {
     stream.write_all(b"pong").await?;
 
     assert!(
-        stream.is_acknowledged(),
+        !stream.is_pending_ack(),
         "we should have sent an ACK flag with the first payload"
     );
 
