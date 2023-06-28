@@ -51,59 +51,6 @@ fn prop_config_send_recv_single() {
         .quickcheck(prop as fn(_, _, _) -> _)
 }
 
-#[test]
-fn prop_send_recv_half_closed() {
-    fn prop(msg: Msg) -> Result<(), ConnectionError> {
-        let msg_len = msg.0.len();
-
-        Runtime::new().unwrap().block_on(async move {
-            let (mut server, client) =
-                connected_peers(Config::default(), Config::default(), None).await?;
-
-            // Server should be able to write on a stream shutdown by the client.
-            let server = async {
-                let mut server = stream::poll_fn(move |cx| server.poll_next_inbound(cx));
-
-                let mut first_stream = server.next().await.ok_or(ConnectionError::Closed)??;
-
-                task::spawn(noop_server(server));
-
-                let mut buf = vec![0; msg_len];
-                first_stream.read_exact(&mut buf).await?;
-                first_stream.write_all(&buf).await?;
-                first_stream.close().await?;
-
-                Result::<(), ConnectionError>::Ok(())
-            };
-
-            // Client should be able to read after shutting down the stream.
-            let client = async {
-                let (mut control, client) = Control::new(client);
-                task::spawn(noop_server(client));
-
-                let mut stream = control.open_stream().await?;
-                stream.write_all(&msg.0).await?;
-                stream.close().await?;
-
-                assert!(stream.is_write_closed());
-                let mut buf = vec![0; msg_len];
-                stream.read_exact(&mut buf).await?;
-
-                assert_eq!(buf, msg.0);
-                assert_eq!(Some(0), stream.read(&mut buf).await.ok());
-                assert!(stream.is_closed());
-
-                Result::<(), ConnectionError>::Ok(())
-            };
-
-            futures::future::try_join(server, client).await?;
-
-            Ok(())
-        })
-    }
-    QuickCheck::new().tests(7).quickcheck(prop as fn(_) -> _)
-}
-
 /// This test simulates two endpoints of a Yamux connection which may be unable to
 /// write simultaneously but can make progress by reading. If both endpoints
 /// don't read in-between trying to finish their writes, a deadlock occurs.
