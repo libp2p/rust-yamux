@@ -3,6 +3,7 @@ use futures::stream::FuturesUnordered;
 use futures::{AsyncRead, AsyncWrite, AsyncWriteExt, FutureExt, StreamExt};
 use quickcheck::QuickCheck;
 use std::future::Future;
+use std::iter;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use test_harness::*;
@@ -33,7 +34,7 @@ fn prop_config_send_recv_multi() {
                 let socket = TcpStream::connect(address).await.expect("connect").compat();
                 let connection = Connection::new(socket, cfg2.0, Mode::Client);
 
-                MessageSender::new(connection, msgs).await
+                MessageSender::new(connection, msgs, false).await
             };
 
             let (server_processed, client_processed) =
@@ -45,6 +46,40 @@ fn prop_config_send_recv_multi() {
     }
 
     QuickCheck::new().quickcheck(prop as fn(_, _, _) -> _)
+}
+
+#[test]
+fn concurrent_streams() {
+    let _ = env_logger::try_init();
+
+    fn prop(tcp_buffer_sizes: Option<TcpBufferSizes>) {
+        const PAYLOAD_SIZE: usize = 128 * 1024;
+
+        let data = Msg(vec![0x42; PAYLOAD_SIZE]);
+        let n_streams = 1000;
+
+        let mut cfg = Config::default();
+        cfg.set_split_send_size(PAYLOAD_SIZE); // Use a large frame size to speed up the test.
+
+        Runtime::new().expect("new runtime").block_on(async move {
+            let (server, client) = connected_peers(cfg.clone(), cfg, tcp_buffer_sizes)
+                .await
+                .unwrap();
+
+            task::spawn(echo_server(server));
+            let client = MessageSender::new(
+                client,
+                iter::repeat(data).take(n_streams).collect::<Vec<_>>(),
+                true,
+            );
+
+            let num_processed = client.await.unwrap();
+
+            assert_eq!(num_processed, n_streams);
+        });
+    }
+
+    QuickCheck::new().tests(3).quickcheck(prop as fn(_) -> _)
 }
 
 #[test]
@@ -76,15 +111,18 @@ struct MessageSender<T> {
     pending_messages: Vec<Msg>,
     worker_streams: FuturesUnordered<BoxFuture<'static, ()>>,
     streams_processed: usize,
+    /// Whether to spawn a new task for each stream.
+    spawn_tasks: bool,
 }
 
 impl<T> MessageSender<T> {
-    fn new(connection: Connection<T>, messages: Vec<Msg>) -> Self {
+    fn new(connection: Connection<T>, messages: Vec<Msg>, spawn_tasks: bool) -> Self {
         Self {
             connection,
             pending_messages: messages,
             worker_streams: FuturesUnordered::default(),
             streams_processed: 0,
+            spawn_tasks,
         }
     }
 }
@@ -108,13 +146,18 @@ where
             if let Some(message) = this.pending_messages.pop() {
                 match this.connection.poll_new_outbound(cx)? {
                     Poll::Ready(mut stream) => {
-                        this.worker_streams.push(
-                            async move {
-                                send_recv_message(&mut stream, message).await.unwrap();
-                                stream.close().await.unwrap();
-                            }
-                            .boxed(),
-                        );
+                        let future = async move {
+                            send_recv_message(&mut stream, message).await.unwrap();
+                            stream.close().await.unwrap();
+                        };
+
+                        let worker_stream_future = if this.spawn_tasks {
+                            async { task::spawn(future).await.unwrap() }.boxed()
+                        } else {
+                            future.boxed()
+                        };
+
+                        this.worker_streams.push(worker_stream_future);
                         continue;
                     }
                     Poll::Pending => {
