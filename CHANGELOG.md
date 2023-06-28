@@ -1,3 +1,10 @@
+# 0.11.1
+
+- Avoid race condition between pending frames and closing stream.
+  See [PR 156].
+  
+[PR 156]: https://github.com/libp2p/rust-yamux/pull/156
+
 # 0.11.0
 
 - Remove `Connection::control` in favor of `Control::new`.

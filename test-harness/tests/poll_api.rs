@@ -1,6 +1,6 @@
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
-use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, FutureExt, StreamExt};
+use futures::{AsyncRead, AsyncWrite, AsyncWriteExt, FutureExt, StreamExt};
 use quickcheck::QuickCheck;
 use std::future::Future;
 use std::pin::Pin;
@@ -8,8 +8,9 @@ use std::task::{Context, Poll};
 use test_harness::*;
 use tokio::net::TcpStream;
 use tokio::runtime::Runtime;
+use tokio::task;
 use tokio_util::compat::TokioAsyncReadCompatExt;
-use yamux::{Connection, Mode};
+use yamux::{Config, Connection, ConnectionError, Mode};
 
 #[test]
 fn prop_config_send_recv_multi() {
@@ -46,76 +47,28 @@ fn prop_config_send_recv_multi() {
     QuickCheck::new().quickcheck(prop as fn(_, _, _) -> _)
 }
 
-struct EchoServer<T> {
-    connection: Connection<T>,
-    worker_streams: FuturesUnordered<BoxFuture<'static, yamux::Result<()>>>,
-    streams_processed: usize,
-    connection_closed: bool,
-}
+#[test]
+fn prop_max_streams() {
+    fn prop(n: usize) -> Result<bool, ConnectionError> {
+        let max_streams = n % 100;
+        let mut cfg = Config::default();
+        cfg.set_max_num_streams(max_streams);
 
-impl<T> EchoServer<T> {
-    fn new(connection: Connection<T>) -> Self {
-        Self {
-            connection,
-            worker_streams: FuturesUnordered::default(),
-            streams_processed: 0,
-            connection_closed: false,
-        }
+        Runtime::new().unwrap().block_on(async move {
+            let (server, client) = connected_peers(cfg.clone(), cfg).await?;
+
+            task::spawn(EchoServer::new(server));
+
+            let client = OpenStreamsClient::new(client, max_streams);
+
+            let (client, streams) = client.await?;
+            assert_eq!(streams.len(), max_streams);
+
+            let open_result = OpenStreamsClient::new(client, 1).await;
+            Ok(matches!(open_result, Err(ConnectionError::TooManyStreams)))
+        })
     }
-}
-
-impl<T> Future for EchoServer<T>
-where
-    T: AsyncRead + AsyncWrite + Unpin,
-{
-    type Output = yamux::Result<usize>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-
-        loop {
-            match this.worker_streams.poll_next_unpin(cx) {
-                Poll::Ready(Some(Ok(()))) => {
-                    this.streams_processed += 1;
-                    continue;
-                }
-                Poll::Ready(Some(Err(e))) => {
-                    eprintln!("A stream failed: {}", e);
-                    continue;
-                }
-                Poll::Ready(None) => {
-                    if this.connection_closed {
-                        return Poll::Ready(Ok(this.streams_processed));
-                    }
-                }
-                Poll::Pending => {}
-            }
-
-            match this.connection.poll_next_inbound(cx) {
-                Poll::Ready(Some(Ok(mut stream))) => {
-                    this.worker_streams.push(
-                        async move {
-                            {
-                                let (mut r, mut w) = AsyncReadExt::split(&mut stream);
-                                futures::io::copy(&mut r, &mut w).await?;
-                            }
-                            stream.close().await?;
-                            Ok(())
-                        }
-                        .boxed(),
-                    );
-                    continue;
-                }
-                Poll::Ready(None) | Poll::Ready(Some(Err(_))) => {
-                    this.connection_closed = true;
-                    continue;
-                }
-                Poll::Pending => {}
-            }
-
-            return Poll::Pending;
-        }
-    }
+    QuickCheck::new().tests(7).quickcheck(prop as fn(_) -> _)
 }
 
 struct MessageSender<T> {

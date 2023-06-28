@@ -55,37 +55,6 @@ fn prop_config_send_recv_single() {
 }
 
 #[test]
-fn prop_config_send_recv_multi() {
-    fn prop(
-        mut msgs: Vec<Msg>,
-        TestConfig(cfg1): TestConfig,
-        TestConfig(cfg2): TestConfig,
-    ) -> Result<(), ConnectionError> {
-        msgs.insert(0, Msg(vec![1u8; yamux::DEFAULT_CREDIT as usize]));
-
-        Runtime::new().unwrap().block_on(async move {
-            let (server, client) = connected_peers(cfg1, cfg2).await?;
-
-            let server = echo_server(server);
-            let client = async {
-                let (control, client) = Control::new(client);
-                task::spawn(noop_server(client));
-                send_on_separate_streams(control, msgs).await?;
-
-                Ok(())
-            };
-
-            futures::future::try_join(server, client).await?;
-
-            Ok(())
-        })
-    }
-    QuickCheck::new()
-        .tests(10)
-        .quickcheck(prop as fn(_, _, _) -> _)
-}
-
-#[test]
 fn prop_send_recv() {
     fn prop(msgs: Vec<Msg>) -> Result<TestResult, ConnectionError> {
         if msgs.is_empty() {
@@ -110,34 +79,6 @@ fn prop_send_recv() {
         })
     }
     QuickCheck::new().tests(1).quickcheck(prop as fn(_) -> _)
-}
-
-#[test]
-fn prop_max_streams() {
-    fn prop(n: usize) -> Result<bool, ConnectionError> {
-        let max_streams = n % 100;
-        let mut cfg = Config::default();
-        cfg.set_max_num_streams(max_streams);
-
-        Runtime::new().unwrap().block_on(async move {
-            let (server, client) = connected_peers(cfg.clone(), cfg).await?;
-
-            task::spawn(echo_server(server));
-
-            let (mut control, client) = Control::new(client);
-            task::spawn(noop_server(client));
-
-            let mut v = Vec::new();
-            for _ in 0..max_streams {
-                v.push(control.open_stream().await?)
-            }
-
-            let open_result = control.open_stream().await;
-
-            Ok(matches!(open_result, Err(ConnectionError::TooManyStreams)))
-        })
-    }
-    QuickCheck::new().tests(7).quickcheck(prop as fn(_) -> _)
 }
 
 #[test]
