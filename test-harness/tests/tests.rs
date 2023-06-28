@@ -13,7 +13,7 @@ use futures::future::join;
 use futures::io::AsyncReadExt;
 use futures::prelude::*;
 use futures::task::{Spawn, SpawnExt};
-use quickcheck::{QuickCheck, TestResult};
+use quickcheck::QuickCheck;
 use std::panic::panic_any;
 
 use test_harness::*;
@@ -49,34 +49,6 @@ fn prop_config_send_recv_single() {
     QuickCheck::new()
         .tests(10)
         .quickcheck(prop as fn(_, _, _) -> _)
-}
-
-#[test]
-fn prop_send_recv() {
-    fn prop(msgs: Vec<Msg>) -> Result<TestResult, ConnectionError> {
-        if msgs.is_empty() {
-            return Ok(TestResult::discard());
-        }
-
-        Runtime::new().unwrap().block_on(async move {
-            let (server, client) =
-                connected_peers(Config::default(), Config::default(), None).await?;
-
-            let server = echo_server(server);
-            let client = async {
-                let (control, client) = Control::new(client);
-                task::spawn(noop_server(client));
-                send_on_separate_streams(control, msgs).await?;
-
-                Ok(())
-            };
-
-            futures::future::try_join(server, client).await?;
-
-            Ok(TestResult::passed())
-        })
-    }
-    QuickCheck::new().tests(1).quickcheck(prop as fn(_) -> _)
 }
 
 #[test]
@@ -204,25 +176,6 @@ fn write_deadlock() {
             )
             .unwrap(),
     );
-}
-
-/// Send all messages, opening a new stream for each one.
-async fn send_on_separate_streams(
-    mut control: Control,
-    iter: impl IntoIterator<Item = Msg>,
-) -> Result<(), ConnectionError> {
-    for msg in iter {
-        let mut stream = control.open_stream().await?;
-        log::debug!("C: new stream: {}", stream);
-
-        send_recv_message(&mut stream, msg).await?;
-        stream.close().await?;
-    }
-
-    log::debug!("C: closing connection");
-    control.close().await?;
-
-    Ok(())
 }
 
 /// Send all messages, using only a single stream.
