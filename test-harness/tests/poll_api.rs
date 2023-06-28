@@ -1,11 +1,15 @@
-use futures::future::BoxFuture;
+use futures::executor::LocalPool;
+use futures::future::{join, BoxFuture};
+use futures::prelude::*;
 use futures::stream::FuturesUnordered;
+use futures::task::{Spawn, SpawnExt};
 use futures::{
     future, stream, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, FutureExt, StreamExt,
 };
 use quickcheck::QuickCheck;
 use std::future::Future;
 use std::iter;
+use std::panic::panic_any;
 use std::pin::{pin, Pin};
 use std::task::{Context, Poll};
 use test_harness::*;
@@ -198,6 +202,86 @@ fn prop_config_send_recv_single() {
     QuickCheck::new()
         .tests(10)
         .quickcheck(prop as fn(_, _, _) -> _)
+}
+
+/// This test simulates two endpoints of a Yamux connection which may be unable to
+/// write simultaneously but can make progress by reading. If both endpoints
+/// don't read in-between trying to finish their writes, a deadlock occurs.
+#[test]
+fn write_deadlock() {
+    let _ = env_logger::try_init();
+    let mut pool = LocalPool::new();
+
+    // We make the message to transmit large enough s.t. the "server"
+    // is forced to start writing (i.e. echoing) the bytes before
+    // having read the entire payload.
+    let msg = vec![1u8; 1024 * 1024];
+
+    // We choose a "connection capacity" that is artificially below
+    // the size of a receive window. If it were equal or greater,
+    // multiple concurrently writing streams would be needed to non-deterministically
+    // provoke the write deadlock. This is supposed to reflect the
+    // fact that the sum of receive windows of all open streams can easily
+    // be larger than the send capacity of the connection at any point in time.
+    // Using such a low capacity here therefore yields a more reproducible test.
+    let capacity = 1024;
+
+    // Create a bounded channel representing the underlying "connection".
+    // Each endpoint gets a name and a bounded capacity for its outbound
+    // channel (which is the other's inbound channel).
+    let (server_endpoint, client_endpoint) = futures_ringbuf::Endpoint::pair(capacity, capacity);
+
+    // Create and spawn a "server" that echoes every message back to the client.
+    let server = Connection::new(server_endpoint, Config::default(), Mode::Server);
+    pool.spawner()
+        .spawn_obj(
+            async move { echo_server(server).await.unwrap() }
+                .boxed()
+                .into(),
+        )
+        .unwrap();
+
+    // Create and spawn a "client" that sends messages expected to be echoed
+    // by the server.
+    let mut client = Connection::new(client_endpoint, Config::default(), Mode::Client);
+
+    let stream = pool
+        .run_until(future::poll_fn(|cx| client.poll_new_outbound(cx)))
+        .unwrap();
+
+    // Continuously advance the Yamux connection of the client in a background task.
+    pool.spawner()
+        .spawn_obj(
+            noop_server(stream::poll_fn(move |cx| client.poll_next_inbound(cx)))
+                .boxed()
+                .into(),
+        )
+        .unwrap();
+
+    // Send the message, expecting it to be echo'd.
+    pool.run_until(
+        pool.spawner()
+            .spawn_with_handle(
+                async move {
+                    let (mut reader, mut writer) = AsyncReadExt::split(stream);
+                    let mut b = vec![0; msg.len()];
+                    // Write & read concurrently, so that the client is able
+                    // to start reading the echo'd bytes before it even finished
+                    // sending them all.
+                    let _ = join(
+                        writer.write_all(msg.as_ref()).map_err(|e| panic_any(e)),
+                        reader.read_exact(&mut b[..]).map_err(|e| panic_any(e)),
+                    )
+                    .await;
+                    let mut stream = reader.reunite(writer).unwrap();
+                    stream.close().await.unwrap();
+                    log::debug!("C: Stream {} done.", stream.id());
+                    assert_eq!(b, msg);
+                }
+                .boxed(),
+            )
+            .unwrap(),
+    );
 }
 
 struct MessageSender<T> {
