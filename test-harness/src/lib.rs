@@ -138,6 +138,22 @@ pub async fn send_recv_message(stream: &mut yamux::Stream, Msg(msg): Msg) -> io:
     Ok(())
 }
 
+/// Send all messages, using only a single stream.
+pub async fn send_on_single_stream(
+    mut stream: yamux::Stream,
+    iter: impl IntoIterator<Item = Msg>,
+) -> Result<(), ConnectionError> {
+    log::debug!("C: new stream: {}", stream);
+
+    for msg in iter {
+        send_recv_message(&mut stream, msg).await?;
+    }
+
+    stream.close().await?;
+
+    Ok(())
+}
+
 pub struct EchoServer<T> {
     connection: Connection<T>,
     worker_streams: FuturesUnordered<BoxFuture<'static, yamux::Result<()>>>,

@@ -13,49 +13,10 @@ use futures::future::join;
 use futures::io::AsyncReadExt;
 use futures::prelude::*;
 use futures::task::{Spawn, SpawnExt};
-use quickcheck::QuickCheck;
 use std::panic::panic_any;
-use std::pin::pin;
 
 use test_harness::*;
-use tokio::runtime::Runtime;
-use yamux::{Config, Connection, ConnectionError, Control, Mode};
-
-#[test]
-fn prop_config_send_recv_single() {
-    fn prop(
-        mut msgs: Vec<Msg>,
-        TestConfig(cfg1): TestConfig,
-        TestConfig(cfg2): TestConfig,
-    ) -> Result<(), ConnectionError> {
-        msgs.insert(0, Msg(vec![1u8; yamux::DEFAULT_CREDIT as usize]));
-
-        Runtime::new().unwrap().block_on(async move {
-            let (server, mut client) = connected_peers(cfg1, cfg2, None).await?;
-            let server = echo_server(server);
-
-            let client = async {
-                let stream = future::poll_fn(|cx| client.poll_new_outbound(cx))
-                    .await
-                    .unwrap();
-                let client_task = noop_server(stream::poll_fn(|cx| client.poll_next_inbound(cx)));
-
-                future::select(pin!(client_task), pin!(send_on_single_stream(stream, msgs))).await;
-
-                future::poll_fn(|cx| client.poll_close(cx)).await.unwrap();
-
-                Ok(())
-            };
-
-            futures::future::try_join(server, client).await?;
-
-            Ok(())
-        })
-    }
-    QuickCheck::new()
-        .tests(10)
-        .quickcheck(prop as fn(_, _, _) -> _)
-}
+use yamux::{Config, Connection, Control, Mode};
 
 /// This test simulates two endpoints of a Yamux connection which may be unable to
 /// write simultaneously but can make progress by reading. If both endpoints
@@ -129,20 +90,4 @@ fn write_deadlock() {
             )
             .unwrap(),
     );
-}
-
-/// Send all messages, using only a single stream.
-async fn send_on_single_stream(
-    mut stream: yamux::Stream,
-    iter: impl IntoIterator<Item = Msg>,
-) -> Result<(), ConnectionError> {
-    log::debug!("C: new stream: {}", stream);
-
-    for msg in iter {
-        send_recv_message(&mut stream, msg).await?;
-    }
-
-    stream.close().await?;
-
-    Ok(())
 }

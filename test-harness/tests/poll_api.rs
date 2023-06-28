@@ -1,10 +1,12 @@
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
-use futures::{future, stream, AsyncRead, AsyncWrite, AsyncWriteExt, FutureExt, StreamExt};
+use futures::{
+    future, stream, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, FutureExt, StreamExt,
+};
 use quickcheck::QuickCheck;
 use std::future::Future;
 use std::iter;
-use std::pin::Pin;
+use std::pin::{pin, Pin};
 use std::task::{Context, Poll};
 use test_harness::*;
 use tokio::net::TcpStream;
@@ -160,6 +162,42 @@ fn prop_send_recv_half_closed() {
         })
     }
     QuickCheck::new().tests(7).quickcheck(prop as fn(_) -> _)
+}
+
+#[test]
+fn prop_config_send_recv_single() {
+    fn prop(
+        mut msgs: Vec<Msg>,
+        TestConfig(cfg1): TestConfig,
+        TestConfig(cfg2): TestConfig,
+    ) -> Result<(), ConnectionError> {
+        msgs.insert(0, Msg(vec![1u8; yamux::DEFAULT_CREDIT as usize]));
+
+        Runtime::new().unwrap().block_on(async move {
+            let (server, mut client) = connected_peers(cfg1, cfg2, None).await?;
+            let server = echo_server(server);
+
+            let client = async {
+                let stream = future::poll_fn(|cx| client.poll_new_outbound(cx))
+                    .await
+                    .unwrap();
+                let client_task = noop_server(stream::poll_fn(|cx| client.poll_next_inbound(cx)));
+
+                future::select(pin!(client_task), pin!(send_on_single_stream(stream, msgs))).await;
+
+                future::poll_fn(|cx| client.poll_close(cx)).await.unwrap();
+
+                Ok(())
+            };
+
+            futures::future::try_join(server, client).await?;
+
+            Ok(())
+        })
+    }
+    QuickCheck::new()
+        .tests(10)
+        .quickcheck(prop as fn(_, _, _) -> _)
 }
 
 struct MessageSender<T> {
