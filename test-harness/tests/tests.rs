@@ -15,9 +15,10 @@ use futures::prelude::*;
 use futures::task::{Spawn, SpawnExt};
 use quickcheck::QuickCheck;
 use std::panic::panic_any;
+use std::pin::pin;
 
 use test_harness::*;
-use tokio::{runtime::Runtime, task};
+use tokio::runtime::Runtime;
 use yamux::{Config, Connection, ConnectionError, Control, Mode};
 
 #[test]
@@ -30,13 +31,18 @@ fn prop_config_send_recv_single() {
         msgs.insert(0, Msg(vec![1u8; yamux::DEFAULT_CREDIT as usize]));
 
         Runtime::new().unwrap().block_on(async move {
-            let (server, client) = connected_peers(cfg1, cfg2, None).await?;
-
+            let (server, mut client) = connected_peers(cfg1, cfg2, None).await?;
             let server = echo_server(server);
+
             let client = async {
-                let (control, client) = Control::new(client);
-                task::spawn(noop_server(client));
-                send_on_single_stream(control, msgs).await?;
+                let stream = future::poll_fn(|cx| client.poll_new_outbound(cx))
+                    .await
+                    .unwrap();
+                let client_task = noop_server(stream::poll_fn(|cx| client.poll_next_inbound(cx)));
+
+                future::select(pin!(client_task), pin!(send_on_single_stream(stream, msgs))).await;
+
+                future::poll_fn(|cx| client.poll_close(cx)).await.unwrap();
 
                 Ok(())
             };
@@ -127,10 +133,9 @@ fn write_deadlock() {
 
 /// Send all messages, using only a single stream.
 async fn send_on_single_stream(
-    mut control: Control,
+    mut stream: yamux::Stream,
     iter: impl IntoIterator<Item = Msg>,
 ) -> Result<(), ConnectionError> {
-    let mut stream = control.open_stream().await?;
     log::debug!("C: new stream: {}", stream);
 
     for msg in iter {
@@ -138,9 +143,6 @@ async fn send_on_single_stream(
     }
 
     stream.close().await?;
-
-    log::debug!("C: closing connection");
-    control.close().await?;
 
     Ok(())
 }
