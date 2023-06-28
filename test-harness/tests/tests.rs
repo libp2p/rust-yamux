@@ -33,7 +33,7 @@ fn prop_config_send_recv_single() {
         msgs.insert(0, Msg(vec![1u8; yamux::DEFAULT_CREDIT as usize]));
 
         Runtime::new().unwrap().block_on(async move {
-            let (server, client) = connected_peers(cfg1, cfg2).await?;
+            let (server, client) = connected_peers(cfg1, cfg2, None).await?;
 
             let server = echo_server(server);
             let client = async {
@@ -62,7 +62,8 @@ fn prop_send_recv() {
         }
 
         Runtime::new().unwrap().block_on(async move {
-            let (server, client) = connected_peers(Config::default(), Config::default()).await?;
+            let (server, client) =
+                connected_peers(Config::default(), Config::default(), None).await?;
 
             let server = echo_server(server);
             let client = async {
@@ -88,7 +89,7 @@ fn prop_send_recv_half_closed() {
 
         Runtime::new().unwrap().block_on(async move {
             let (mut server, client) =
-                connected_peers(Config::default(), Config::default()).await?;
+                connected_peers(Config::default(), Config::default(), None).await?;
 
             // Server should be able to write on a stream shutdown by the client.
             let server = async {

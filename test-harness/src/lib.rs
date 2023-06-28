@@ -10,7 +10,7 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::{fmt, io, mem};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 use yamux::ConnectionError;
 use yamux::{Config, WindowUpdateMode};
@@ -19,8 +19,9 @@ use yamux::{Connection, Mode};
 pub async fn connected_peers(
     server_config: Config,
     client_config: Config,
+    buffer_sizes: Option<TcpBufferSizes>,
 ) -> io::Result<(Connection<Compat<TcpStream>>, Connection<Compat<TcpStream>>)> {
-    let (listener, addr) = bind().await?;
+    let (listener, addr) = bind(buffer_sizes).await?;
 
     let server = async {
         let (stream, _) = listener.accept().await?;
@@ -31,7 +32,7 @@ pub async fn connected_peers(
         ))
     };
     let client = async {
-        let stream = TcpStream::connect(addr).await?;
+        let stream = new_socket(buffer_sizes)?.connect(addr).await?;
         Ok(Connection::new(
             stream.compat(),
             client_config,
@@ -42,12 +43,27 @@ pub async fn connected_peers(
     futures::future::try_join(server, client).await
 }
 
-pub async fn bind() -> io::Result<(TcpListener, SocketAddr)> {
-    let i = Ipv4Addr::new(127, 0, 0, 1);
-    let s = SocketAddr::V4(SocketAddrV4::new(i, 0));
-    let l = TcpListener::bind(&s).await?;
-    let a = l.local_addr()?;
-    Ok((l, a))
+pub async fn bind(buffer_sizes: Option<TcpBufferSizes>) -> io::Result<(TcpListener, SocketAddr)> {
+    let socket = new_socket(buffer_sizes)?;
+    socket.bind(SocketAddr::V4(SocketAddrV4::new(
+        Ipv4Addr::new(127, 0, 0, 1),
+        0,
+    )))?;
+
+    let listener = socket.listen(1024)?;
+    let address = listener.local_addr()?;
+
+    Ok((listener, address))
+}
+
+fn new_socket(buffer_sizes: Option<TcpBufferSizes>) -> io::Result<TcpSocket> {
+    let socket = TcpSocket::new_v4()?;
+    if let Some(size) = buffer_sizes {
+        socket.set_send_buffer_size(size.send)?;
+        socket.set_recv_buffer_size(size.recv)?;
+    }
+
+    Ok(socket)
 }
 
 /// For each incoming stream of `c` echo back to the sender.
@@ -74,6 +90,32 @@ pub async fn noop_server(c: impl Stream<Item = Result<yamux::Stream, yamux::Conn
         future::ready(())
     })
     .await;
+}
+
+/// Send and receive buffer size for a TCP socket.
+#[derive(Clone, Debug, Copy)]
+pub struct TcpBufferSizes {
+    send: u32,
+    recv: u32,
+}
+
+impl Arbitrary for TcpBufferSizes {
+    fn arbitrary(g: &mut Gen) -> Self {
+        let send = if bool::arbitrary(g) {
+            16 * 1024
+        } else {
+            32 * 1024
+        };
+
+        // Have receive buffer size be some multiple of send buffer size.
+        let recv = if bool::arbitrary(g) {
+            send * 2
+        } else {
+            send * 4
+        };
+
+        TcpBufferSizes { send, recv }
+    }
 }
 
 pub async fn send_recv_message(stream: &mut yamux::Stream, Msg(msg): Msg) -> io::Result<()> {

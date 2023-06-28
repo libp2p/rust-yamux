@@ -20,7 +20,7 @@ fn prop_config_send_recv_multi() {
         Runtime::new().unwrap().block_on(async move {
             let num_messagses = msgs.len();
 
-            let (listener, address) = bind().await.expect("bind");
+            let (listener, address) = bind(None).await.expect("bind");
 
             let server = async {
                 let socket = listener.accept().await.expect("accept").0.compat();
@@ -55,7 +55,7 @@ fn prop_max_streams() {
         cfg.set_max_num_streams(max_streams);
 
         Runtime::new().unwrap().block_on(async move {
-            let (server, client) = connected_peers(cfg.clone(), cfg).await?;
+            let (server, client) = connected_peers(cfg.clone(), cfg, None).await?;
 
             task::spawn(EchoServer::new(server));
 
