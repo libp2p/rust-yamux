@@ -8,7 +8,6 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures::executor::LocalPool;
 use futures::future::join;
 use futures::io::AsyncReadExt;
@@ -16,9 +15,7 @@ use futures::prelude::*;
 use futures::task::{Spawn, SpawnExt};
 use quickcheck::{QuickCheck, TestResult};
 use std::panic::panic_any;
-use std::pin::Pin;
-use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Waker};
+
 use test_harness::*;
 use tokio::{runtime::Runtime, task};
 use yamux::{Config, Connection, ConnectionError, Control, Mode};
@@ -160,7 +157,7 @@ fn write_deadlock() {
     // Create a bounded channel representing the underlying "connection".
     // Each endpoint gets a name and a bounded capacity for its outbound
     // channel (which is the other's inbound channel).
-    let (server_endpoint, client_endpoint) = bounded::channel(("S", capacity), ("C", capacity));
+    let (server_endpoint, client_endpoint) = futures_ringbuf::Endpoint::pair(capacity, capacity);
 
     // Create and spawn a "server" that echoes every message back to the client.
     let server = Connection::new(server_endpoint, Config::default(), Mode::Server);
@@ -246,148 +243,4 @@ async fn send_on_single_stream(
     control.close().await?;
 
     Ok(())
-}
-
-/// This module implements a duplex connection via channels with bounded
-/// capacities. The channels used for the implementation are unbounded
-/// as the operate at the granularity of variably-sized chunks of bytes
-/// (`Vec<u8>`), whereas the capacity bounds (i.e. max. number of bytes
-/// in transit in one direction) are enforced separately.
-mod bounded {
-    use super::*;
-    use futures::ready;
-    use std::io::{Error, ErrorKind, Result};
-
-    pub struct Endpoint {
-        name: &'static str,
-        capacity: usize,
-        send: UnboundedSender<Vec<u8>>,
-        send_guard: Arc<Mutex<ChannelGuard>>,
-        recv: UnboundedReceiver<Vec<u8>>,
-        recv_buf: Vec<u8>,
-        recv_guard: Arc<Mutex<ChannelGuard>>,
-    }
-
-    /// A `ChannelGuard` is used to enforce the maximum number of
-    /// bytes "in transit" across all chunks of an unbounded channel.
-    #[derive(Default)]
-    struct ChannelGuard {
-        size: usize,
-        waker: Option<Waker>,
-    }
-
-    pub fn channel(
-        (name_a, capacity_a): (&'static str, usize),
-        (name_b, capacity_b): (&'static str, usize),
-    ) -> (Endpoint, Endpoint) {
-        let (a_to_b_sender, a_to_b_receiver) = unbounded();
-        let (b_to_a_sender, b_to_a_receiver) = unbounded();
-
-        let a_to_b_guard = Arc::new(Mutex::new(ChannelGuard::default()));
-        let b_to_a_guard = Arc::new(Mutex::new(ChannelGuard::default()));
-
-        let a = Endpoint {
-            name: name_a,
-            capacity: capacity_a,
-            send: a_to_b_sender,
-            send_guard: a_to_b_guard.clone(),
-            recv: b_to_a_receiver,
-            recv_buf: Vec::new(),
-            recv_guard: b_to_a_guard.clone(),
-        };
-
-        let b = Endpoint {
-            name: name_b,
-            capacity: capacity_b,
-            send: b_to_a_sender,
-            send_guard: b_to_a_guard,
-            recv: a_to_b_receiver,
-            recv_buf: Vec::new(),
-            recv_guard: a_to_b_guard,
-        };
-
-        (a, b)
-    }
-
-    impl AsyncRead for Endpoint {
-        fn poll_read(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-            buf: &mut [u8],
-        ) -> Poll<Result<usize>> {
-            if self.recv_buf.is_empty() {
-                match ready!(self.recv.poll_next_unpin(cx)) {
-                    Some(bytes) => {
-                        self.recv_buf = bytes;
-                    }
-                    None => return Poll::Ready(Ok(0)),
-                }
-            }
-
-            let n = std::cmp::min(buf.len(), self.recv_buf.len());
-            buf[0..n].copy_from_slice(&self.recv_buf[0..n]);
-            self.recv_buf = self.recv_buf.split_off(n);
-
-            let mut guard = self.recv_guard.lock().unwrap();
-            if let Some(waker) = guard.waker.take() {
-                log::debug!(
-                    "{}: read: notifying waker after read of {} bytes",
-                    self.name,
-                    n
-                );
-                waker.wake();
-            }
-            guard.size -= n;
-
-            log::debug!(
-                "{}: read: channel: {}/{}",
-                self.name,
-                guard.size,
-                self.capacity
-            );
-
-            Poll::Ready(Ok(n))
-        }
-    }
-
-    impl AsyncWrite for Endpoint {
-        fn poll_write(
-            self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-            buf: &[u8],
-        ) -> Poll<Result<usize>> {
-            debug_assert!(!buf.is_empty());
-            let mut guard = self.send_guard.lock().unwrap();
-            let n = std::cmp::min(self.capacity - guard.size, buf.len());
-            if n == 0 {
-                log::debug!("{}: write: channel full, registering waker", self.name);
-                guard.waker = Some(cx.waker().clone());
-                return Poll::Pending;
-            }
-
-            self.send
-                .unbounded_send(buf[0..n].to_vec())
-                .map_err(|e| Error::new(ErrorKind::ConnectionAborted, e))?;
-
-            guard.size += n;
-            log::debug!(
-                "{}: write: channel: {}/{}",
-                self.name,
-                guard.size,
-                self.capacity
-            );
-
-            Poll::Ready(Ok(n))
-        }
-
-        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
-            ready!(self.send.poll_flush_unpin(cx)).unwrap();
-            Poll::Ready(Ok(()))
-        }
-
-        fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<()>> {
-            ready!(self.send.poll_close_unpin(cx)).unwrap();
-            Poll::Ready(Ok(()))
-        }
-    }
 }
