@@ -16,7 +16,7 @@ use futures::task::{Spawn, SpawnExt};
 use std::panic::panic_any;
 
 use test_harness::*;
-use yamux::{Config, Connection, Control, Mode};
+use yamux::{Config, Connection, Mode};
 
 /// This test simulates two endpoints of a Yamux connection which may be unable to
 /// write simultaneously but can make progress by reading. If both endpoints
@@ -57,12 +57,19 @@ fn write_deadlock() {
 
     // Create and spawn a "client" that sends messages expected to be echoed
     // by the server.
-    let client = Connection::new(client_endpoint, Config::default(), Mode::Client);
-    let (mut ctrl, client) = Control::new(client);
+    let mut client = Connection::new(client_endpoint, Config::default(), Mode::Client);
+
+    let stream = pool
+        .run_until(future::poll_fn(|cx| client.poll_new_outbound(cx)))
+        .unwrap();
 
     // Continuously advance the Yamux connection of the client in a background task.
     pool.spawner()
-        .spawn_obj(noop_server(client).boxed().into())
+        .spawn_obj(
+            noop_server(stream::poll_fn(move |cx| client.poll_next_inbound(cx)))
+                .boxed()
+                .into(),
+        )
         .unwrap();
 
     // Send the message, expecting it to be echo'd.
@@ -70,7 +77,6 @@ fn write_deadlock() {
         pool.spawner()
             .spawn_with_handle(
                 async move {
-                    let stream = ctrl.open_stream().await.unwrap();
                     let (mut reader, mut writer) = AsyncReadExt::split(stream);
                     let mut b = vec![0; msg.len()];
                     // Write & read concurrently, so that the client is able
