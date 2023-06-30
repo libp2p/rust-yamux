@@ -91,6 +91,8 @@ pub struct MessageSender<T> {
     streams_processed: usize,
     /// Whether to spawn a new task for each stream.
     spawn_tasks: bool,
+    /// How many times to send each message on the stream
+    message_multiplier: u64,
 }
 
 impl<T> MessageSender<T> {
@@ -101,7 +103,13 @@ impl<T> MessageSender<T> {
             worker_streams: FuturesUnordered::default(),
             streams_processed: 0,
             spawn_tasks,
+            message_multiplier: 1,
         }
+    }
+
+    pub fn with_message_multiplier(mut self, multiplier: u64) -> Self {
+        self.message_multiplier = multiplier;
+        self
     }
 }
 
@@ -124,8 +132,13 @@ where
             if let Some(message) = this.pending_messages.pop() {
                 match this.connection.poll_new_outbound(cx)? {
                     Poll::Ready(mut stream) => {
+                        let multiplier = this.message_multiplier;
+
                         let future = async move {
-                            send_recv_message(&mut stream, message).await.unwrap();
+                            for _ in 0..multiplier {
+                                send_recv_message(&mut stream, &message).await.unwrap();
+                            }
+
                             stream.close().await.unwrap();
                         };
 
@@ -203,13 +216,13 @@ impl Arbitrary for TcpBufferSizes {
     }
 }
 
-pub async fn send_recv_message(stream: &mut yamux::Stream, Msg(msg): Msg) -> io::Result<()> {
+pub async fn send_recv_message(stream: &mut yamux::Stream, Msg(msg): &Msg) -> io::Result<()> {
     let id = stream.id();
     let (mut reader, mut writer) = AsyncReadExt::split(stream);
 
     let len = msg.len();
     let write_fut = async {
-        writer.write_all(&msg).await.unwrap();
+        writer.write_all(msg).await.unwrap();
         log::debug!("C: {}: sent {} bytes", id, len);
     };
     let mut data = vec![0; msg.len()];
@@ -218,7 +231,7 @@ pub async fn send_recv_message(stream: &mut yamux::Stream, Msg(msg): Msg) -> io:
         log::debug!("C: {}: received {} bytes", id, data.len());
     };
     futures::future::join(write_fut, read_fut).await;
-    assert_eq!(data, msg);
+    assert_eq!(&data, msg);
 
     Ok(())
 }
@@ -231,7 +244,7 @@ pub async fn send_on_single_stream(
     log::debug!("C: new stream: {}", stream);
 
     for msg in iter {
-        send_recv_message(&mut stream, msg).await?;
+        send_recv_message(&mut stream, &msg).await?;
     }
 
     stream.close().await?;
