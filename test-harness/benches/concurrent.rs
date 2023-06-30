@@ -10,10 +10,11 @@
 
 use constrained_connection::{new_unconstrained_connection, samples, Endpoint};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use futures::{channel::mpsc, future, io::AsyncReadExt, prelude::*};
+use std::iter;
 use std::sync::Arc;
+use test_harness::{dev_null_server, MessageSender, MessageSenderStrategy, Msg};
 use tokio::{runtime::Runtime, task};
-use yamux::{Config, Connection, Control, Mode};
+use yamux::{Config, Connection, Mode};
 
 criterion_group!(benches, concurrent);
 criterion_main!(benches);
@@ -86,62 +87,20 @@ async fn oneway(
     server: Endpoint,
     client: Endpoint,
 ) {
-    let msg_len = data.0.len();
-    let (tx, rx) = mpsc::unbounded();
+    let server = Connection::new(server, config(), Mode::Server);
+    let client = Connection::new(client, config(), Mode::Client);
 
-    let server = async move {
-        let mut connection = Connection::new(server, config(), Mode::Server);
+    task::spawn(dev_null_server(server));
 
-        while let Some(Ok(mut stream)) = stream::poll_fn(|cx| connection.poll_next_inbound(cx))
-            .next()
-            .await
-        {
-            let tx = tx.clone();
-
-            task::spawn(async move {
-                let mut n = 0;
-                let mut b = vec![0; msg_len];
-
-                // Receive `nmessages` messages.
-                for _ in 0..nmessages {
-                    stream.read_exact(&mut b[..]).await.unwrap();
-                    n += b.len();
-                }
-
-                tx.unbounded_send(n).expect("unbounded_send");
-                stream.close().await.unwrap();
-            });
-        }
-    };
-    task::spawn(server);
-
-    let conn = Connection::new(client, config(), Mode::Client);
-    let (mut ctrl, conn) = Control::new(conn);
-
-    task::spawn(conn.for_each(|r| {
-        r.unwrap();
-        future::ready(())
-    }));
-
-    for _ in 0..nstreams {
-        let data = data.clone();
-        let mut ctrl = ctrl.clone();
-        task::spawn(async move {
-            let mut stream = ctrl.open_stream().await.unwrap();
-
-            // Send `nmessages` messages.
-            for _ in 0..nmessages {
-                stream.write_all(data.as_ref()).await.unwrap();
-            }
-
-            stream.close().await.unwrap();
-        });
-    }
-
-    let n = rx
+    let messages = iter::repeat(data)
+        .map(|b| Msg(b.0.to_vec()))
         .take(nstreams)
-        .fold(0, |acc, n| future::ready(acc + n))
-        .await;
-    assert_eq!(n, nstreams * nmessages * msg_len);
-    ctrl.close().await.expect("close");
+        .collect(); // `MessageSender` will use 1 stream per message.
+    let num_streams_used = MessageSender::new(client, messages, true)
+        .with_message_multiplier(nmessages as u64)
+        .with_strategy(MessageSenderStrategy::Send)
+        .await
+        .unwrap();
+
+    assert_eq!(num_streams_used, nstreams);
 }
