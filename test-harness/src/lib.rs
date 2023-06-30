@@ -69,8 +69,8 @@ fn new_socket(buffer_sizes: Option<TcpBufferSizes>) -> io::Result<TcpSocket> {
 
 /// For each incoming stream of `c` echo back to the sender.
 pub async fn echo_server<T>(mut c: Connection<T>) -> Result<(), ConnectionError>
-    where
-        T: AsyncRead + AsyncWrite + Unpin,
+where
+    T: AsyncRead + AsyncWrite + Unpin,
 {
     stream::poll_fn(|cx| c.poll_next_inbound(cx))
         .try_for_each_concurrent(None, |mut stream| async move {
@@ -86,8 +86,8 @@ pub async fn echo_server<T>(mut c: Connection<T>) -> Result<(), ConnectionError>
 
 /// For each incoming stream of `c`, read to end but don't write back.
 pub async fn dev_null_server<T>(mut c: Connection<T>) -> Result<(), ConnectionError>
-    where
-        T: AsyncRead + AsyncWrite + Unpin,
+where
+    T: AsyncRead + AsyncWrite + Unpin,
 {
     stream::poll_fn(|cx| c.poll_next_inbound(cx))
         .try_for_each_concurrent(None, |mut stream| async move {
@@ -148,8 +148,8 @@ impl<T> MessageSender<T> {
 }
 
 impl<T> Future for MessageSender<T>
-    where
-        T: AsyncRead + AsyncWrite + Unpin,
+where
+    T: AsyncRead + AsyncWrite + Unpin,
 {
     type Output = yamux::Result<usize>;
 
@@ -224,12 +224,12 @@ impl<T> Future for MessageSender<T>
 }
 
 /// For each incoming stream, do nothing.
-pub async fn noop_server(c: impl Stream<Item=Result<yamux::Stream, yamux::ConnectionError>>) {
+pub async fn noop_server(c: impl Stream<Item = Result<yamux::Stream, yamux::ConnectionError>>) {
     c.for_each(|maybe_stream| {
         drop(maybe_stream);
         future::ready(())
     })
-        .await;
+    .await;
 }
 
 /// Send and receive buffer size for a TCP socket.
@@ -281,7 +281,7 @@ pub async fn send_recv_message(stream: &mut yamux::Stream, Msg(msg): &Msg) -> io
 /// Send all messages, using only a single stream.
 pub async fn send_on_single_stream(
     mut stream: yamux::Stream,
-    iter: impl IntoIterator<Item=Msg>,
+    iter: impl IntoIterator<Item = Msg>,
 ) -> Result<(), ConnectionError> {
     log::debug!("C: new stream: {}", stream);
 
@@ -313,8 +313,8 @@ impl<T> EchoServer<T> {
 }
 
 impl<T> Future for EchoServer<T>
-    where
-        T: AsyncRead + AsyncWrite + Unpin,
+where
+    T: AsyncRead + AsyncWrite + Unpin,
 {
     type Output = yamux::Result<usize>;
 
@@ -350,7 +350,7 @@ impl<T> Future for EchoServer<T>
                             stream.close().await?;
                             Ok(())
                         }
-                            .boxed(),
+                        .boxed(),
                     );
                     continue;
                 }
@@ -384,8 +384,8 @@ impl<T> OpenStreamsClient<T> {
 }
 
 impl<T> Future for OpenStreamsClient<T>
-    where
-        T: AsyncRead + AsyncWrite + Unpin + fmt::Debug,
+where
+    T: AsyncRead + AsyncWrite + Unpin + fmt::Debug,
 {
     type Output = yamux::Result<(Connection<T>, Vec<yamux::Stream>)>;
 
@@ -437,7 +437,7 @@ impl Arbitrary for Msg {
         msg
     }
 
-    fn shrink(&self) -> Box<dyn Iterator<Item=Self>> {
+    fn shrink(&self) -> Box<dyn Iterator<Item = Self>> {
         Box::new(self.0.shrink().filter(|v| !v.is_empty()).map(Msg))
     }
 }
