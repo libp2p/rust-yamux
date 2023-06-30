@@ -14,7 +14,7 @@ use yamux::{Config, Connection, ConnectionError, Mode, Stream};
 async fn stream_is_acknowledged_on_first_use() {
     let _ = env_logger::try_init();
 
-    let (listener, address) = bind().await.expect("bind");
+    let (listener, address) = bind(None).await.expect("bind");
 
     let server = async {
         let socket = listener.accept().await.expect("accept").0.compat();
