@@ -11,6 +11,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::{fmt, io, mem};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::task;
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 use yamux::ConnectionError;
 use yamux::{Config, WindowUpdateMode};
@@ -81,6 +82,90 @@ where
             Ok(())
         })
         .await
+}
+
+pub struct MessageSender<T> {
+    connection: Connection<T>,
+    pending_messages: Vec<Msg>,
+    worker_streams: FuturesUnordered<BoxFuture<'static, ()>>,
+    streams_processed: usize,
+    /// Whether to spawn a new task for each stream.
+    spawn_tasks: bool,
+}
+
+impl<T> MessageSender<T> {
+    pub fn new(connection: Connection<T>, messages: Vec<Msg>, spawn_tasks: bool) -> Self {
+        Self {
+            connection,
+            pending_messages: messages,
+            worker_streams: FuturesUnordered::default(),
+            streams_processed: 0,
+            spawn_tasks,
+        }
+    }
+}
+
+impl<T> Future for MessageSender<T>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    type Output = yamux::Result<usize>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+
+        loop {
+            if this.pending_messages.is_empty() && this.worker_streams.is_empty() {
+                futures::ready!(this.connection.poll_close(cx)?);
+
+                return Poll::Ready(Ok(this.streams_processed));
+            }
+
+            if let Some(message) = this.pending_messages.pop() {
+                match this.connection.poll_new_outbound(cx)? {
+                    Poll::Ready(mut stream) => {
+                        let future = async move {
+                            send_recv_message(&mut stream, message).await.unwrap();
+                            stream.close().await.unwrap();
+                        };
+
+                        let worker_stream_future = if this.spawn_tasks {
+                            async { task::spawn(future).await.unwrap() }.boxed()
+                        } else {
+                            future.boxed()
+                        };
+
+                        this.worker_streams.push(worker_stream_future);
+                        continue;
+                    }
+                    Poll::Pending => {
+                        this.pending_messages.push(message);
+                    }
+                }
+            }
+
+            match this.worker_streams.poll_next_unpin(cx) {
+                Poll::Ready(Some(())) => {
+                    this.streams_processed += 1;
+                    continue;
+                }
+                Poll::Ready(None) | Poll::Pending => {}
+            }
+
+            match this.connection.poll_next_inbound(cx)? {
+                Poll::Ready(Some(stream)) => {
+                    drop(stream);
+                    panic!("Did not expect remote to open a stream");
+                }
+                Poll::Ready(None) => {
+                    panic!("Did not expect remote to close the connection");
+                }
+                Poll::Pending => {}
+            }
+
+            return Poll::Pending;
+        }
+    }
 }
 
 /// For each incoming stream, do nothing.
