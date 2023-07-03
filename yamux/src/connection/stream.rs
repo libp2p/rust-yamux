@@ -43,7 +43,7 @@ pub enum State {
         /// For outbound streams, this tracks whether the remote has acknowledged our stream.
         /// For inbound streams, this tracks whether we have acknowledged the stream to the remote.
         ///
-        /// This starts out with `false` and is set to `true` when we receive an `ACK` flag for this stream.
+        /// This starts out with `false` and is set to `true` when we receive or send an `ACK` flag for this stream.
         /// We may also directly transition:
         /// - from `Open` to `RecvClosed` if the remote immediately sends `FIN`.
         /// - from `Open` to `Closed` if the remote immediately sends `RST`.
