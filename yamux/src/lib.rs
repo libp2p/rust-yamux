@@ -50,6 +50,9 @@ pub type Result<T> = std::result::Result<T, ConnectionError>;
 /// actual upper bound is this value + number of clones.
 const MAX_COMMAND_BACKLOG: usize = 32;
 
+/// Arbitrary limit of our per stream channels.
+const MAX_STREAM_BACKLOG: usize = 10;
+
 /// Default maximum number of bytes a Yamux data frame might carry as its
 /// payload when being send. Larger Payloads will be split.
 ///
@@ -103,6 +106,7 @@ pub enum WindowUpdateMode {
 /// - window update mode = on read
 /// - read after close = true
 /// - split send size = 16 KiB
+/// - max. stream backlog = 10 frames
 #[derive(Debug, Clone)]
 pub struct Config {
     receive_window: u32,
@@ -111,6 +115,7 @@ pub struct Config {
     window_update_mode: WindowUpdateMode,
     read_after_close: bool,
     split_send_size: usize,
+    max_stream_backlog: usize,
 }
 
 impl Default for Config {
@@ -122,6 +127,7 @@ impl Default for Config {
             window_update_mode: WindowUpdateMode::OnRead,
             read_after_close: true,
             split_send_size: DEFAULT_SPLIT_SEND_SIZE,
+            max_stream_backlog: MAX_STREAM_BACKLOG,
         }
     }
 }
@@ -167,6 +173,12 @@ impl Config {
     /// than the configured max. will be split.
     pub fn set_split_send_size(&mut self, n: usize) -> &mut Self {
         self.split_send_size = n;
+        self
+    }
+
+    /// Set the max. stream channel size used when sending frames.
+    pub fn set_max_stream_backlog(&mut self, n: usize) -> &mut Self {
+        self.max_stream_backlog = n;
         self
     }
 }
