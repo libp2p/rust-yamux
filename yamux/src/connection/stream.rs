@@ -140,15 +140,8 @@ impl Stream {
         self.shared.lock()
     }
 
-    pub(crate) fn clone(&self) -> Self {
-        Stream {
-            id: self.id,
-            conn: self.conn,
-            config: self.config.clone(),
-            sender: self.sender.clone(),
-            flag: self.flag,
-            shared: self.shared.clone(),
-        }
+    pub(crate) fn clone_shared(&self) -> Arc<Mutex<Shared>> {
+        self.shared.clone()
     }
 
     fn write_zero_err(&self) -> io::Error {
