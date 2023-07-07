@@ -461,7 +461,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
             match self.stream_receivers.poll_next_unpin(cx) {
                 Poll::Ready(Some((_, Some(StreamCommand::SendFrame(frame))))) => {
-                    self.on_send_frame(frame.into());
+                    self.on_send_frame(frame);
                     continue;
                 }
                 Poll::Ready(Some((id, Some(StreamCommand::CloseStream { ack })))) => {
