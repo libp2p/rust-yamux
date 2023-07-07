@@ -353,7 +353,7 @@ struct Active<T> {
     socket: Fuse<frame::Io<T>>,
     next_id: u32,
 
-    streams: IntMap<StreamId, Arc<Mutex<Shared>>>,
+    streams: IntMap<StreamId, Arc<Mutex<stream::Shared>>>,
     stream_receivers: SelectAll<TaggedStream<StreamId, mpsc::Receiver<StreamCommand>>>,
     no_streams_waker: Option<Waker>,
 
