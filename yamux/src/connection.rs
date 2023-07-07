@@ -542,7 +542,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             .push_back(Frame::close_stream(id, ack).into());
     }
 
-    fn on_drop_stream(&mut self, id: StreamId) {
+    fn on_drop_stream(&mut self, stream_id: StreamId) {
         let s = self.streams.remove(&id).expect("stream not found");
 
         log::trace!("{}: removing dropped stream {}", self.id, id);
