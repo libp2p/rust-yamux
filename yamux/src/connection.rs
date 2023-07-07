@@ -545,7 +545,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     fn on_drop_stream(&mut self, id: StreamId) {
         let s = self.streams.remove(&id).expect("stream not found");
 
-        log::trace!("{}: removing dropped", self.id);
+        log::trace!("{}: removing dropped stream {}", self.id, id);
         let stream_id = id;
         let frame = {
             let mut shared = s.lock();
