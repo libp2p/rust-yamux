@@ -8,6 +8,7 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
+use crate::frame::header::ACK;
 use crate::{
     chunks::Chunks,
     connection::{self, StreamCommand},
@@ -15,7 +16,7 @@ use crate::{
         header::{Data, Header, StreamId, WindowUpdate},
         Frame,
     },
-    Config, WindowUpdateMode,
+    Config, Mode, WindowUpdateMode, DEFAULT_CREDIT,
 };
 use futures::{
     channel::mpsc,
@@ -36,7 +37,18 @@ use std::{
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum State {
     /// Open bidirectionally.
-    Open,
+    Open {
+        /// Whether the stream is acknowledged.
+        ///
+        /// For outbound streams, this tracks whether the remote has acknowledged our stream.
+        /// For inbound streams, this tracks whether we have acknowledged the stream to the remote.
+        ///
+        /// This starts out with `false` and is set to `true` when we receive or send an `ACK` flag for this stream.
+        /// We may also directly transition:
+        /// - from `Open` to `RecvClosed` if the remote immediately sends `FIN`.
+        /// - from `Open` to `Closed` if the remote immediately sends `RST`.
+        acknowledged: bool,
+    },
     /// Open for incoming messages.
     SendClosed,
     /// Open for outgoing messages.
@@ -100,21 +112,37 @@ impl fmt::Display for Stream {
 }
 
 impl Stream {
-    pub(crate) fn new(
+    pub(crate) fn new_inbound(
         id: StreamId,
         conn: connection::Id,
         config: Arc<Config>,
-        window: u32,
         credit: u32,
         sender: mpsc::Sender<StreamCommand>,
     ) -> Self {
-        Stream {
+        Self {
             id,
             conn,
             config: config.clone(),
             sender,
             flag: Flag::None,
-            shared: Arc::new(Mutex::new(Shared::new(window, credit, config))),
+            shared: Arc::new(Mutex::new(Shared::new(DEFAULT_CREDIT, credit, config))),
+        }
+    }
+
+    pub(crate) fn new_outbound(
+        id: StreamId,
+        conn: connection::Id,
+        config: Arc<Config>,
+        window: u32,
+        sender: mpsc::Sender<StreamCommand>,
+    ) -> Self {
+        Self {
+            id,
+            conn,
+            config: config.clone(),
+            sender,
+            flag: Flag::None,
+            shared: Arc::new(Mutex::new(Shared::new(window, DEFAULT_CREDIT, config))),
         }
     }
 
@@ -129,6 +157,30 @@ impl Stream {
 
     pub fn is_closed(&self) -> bool {
         matches!(self.shared().state(), State::Closed)
+    }
+
+    /// Whether we are still waiting for the remote to acknowledge this stream.
+    pub fn is_pending_ack(&self) -> bool {
+        matches!(
+            self.shared().state(),
+            State::Open {
+                acknowledged: false
+            }
+        )
+    }
+
+    /// Whether this is an outbound stream.
+    ///
+    /// Clients use odd IDs and servers use even IDs.
+    /// A stream is outbound if:
+    ///
+    /// - Its ID is odd and we are the client.
+    /// - Its ID is even and we are the server.
+    pub(crate) fn is_outbound(&self, our_mode: Mode) -> bool {
+        match our_mode {
+            Mode::Client => self.id.is_client(),
+            Mode::Server => self.id.is_server(),
+        }
     }
 
     /// Set the flag that should be set on the next outbound frame header.
@@ -347,6 +399,16 @@ impl AsyncWrite for Stream {
         let mut frame = Frame::data(self.id, body).expect("body <= u32::MAX").left();
         self.add_flag(frame.header_mut());
         log::trace!("{}/{}: write {} bytes", self.conn, self.id, n);
+
+        // technically, the frame hasn't been sent yet on the wire but from the perspective of this data structure, we've queued the frame for sending
+        // We are tracking this information:
+        // a) to be consistent with outbound streams
+        // b) to correctly test our behaviour around timing of when ACKs are sent. See `ack_timing.rs` test.
+        if frame.header().flags().contains(ACK) {
+            self.shared()
+                .update_state(self.conn, self.id, State::Open { acknowledged: true });
+        }
+
         let cmd = StreamCommand::SendFrame(frame);
         self.sender
             .start_send(cmd)
@@ -399,7 +461,9 @@ pub(crate) struct Shared {
 impl Shared {
     fn new(window: u32, credit: u32, config: Arc<Config>) -> Self {
         Shared {
-            state: State::Open,
+            state: State::Open {
+                acknowledged: false,
+            },
             window,
             credit,
             buffer: Chunks::new(),
@@ -426,19 +490,19 @@ impl Shared {
 
         match (current, next) {
             (Closed, _) => {}
-            (Open, _) => self.state = next,
+            (Open { .. }, _) => self.state = next,
             (RecvClosed, Closed) => self.state = Closed,
-            (RecvClosed, Open) => {}
+            (RecvClosed, Open { .. }) => {}
             (RecvClosed, RecvClosed) => {}
             (RecvClosed, SendClosed) => self.state = Closed,
             (SendClosed, Closed) => self.state = Closed,
-            (SendClosed, Open) => {}
+            (SendClosed, Open { .. }) => {}
             (SendClosed, RecvClosed) => self.state = Closed,
             (SendClosed, SendClosed) => {}
         }
 
         log::trace!(
-            "{}/{}: update state: ({:?} {:?} {:?})",
+            "{}/{}: update state: (from {:?} to {:?} -> {:?})",
             cid,
             sid,
             current,
