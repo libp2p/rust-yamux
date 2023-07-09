@@ -111,8 +111,6 @@ use std::{fmt, sync::Arc, task::Poll};
 use crate::tagged_stream::TaggedStream;
 pub use stream::{Packet, State, Stream};
 
-use self::stream::Shared;
-
 /// How the connection is used.
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub enum Mode {
@@ -543,10 +541,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     }
 
     fn on_drop_stream(&mut self, stream_id: StreamId) {
-        let s = self.streams.remove(&id).expect("stream not found");
+        let s = self.streams.remove(&stream_id).expect("stream not found");
 
-        log::trace!("{}: removing dropped stream {}", self.id, id);
-        let stream_id = id;
+        log::trace!("{}: removing dropped stream {}", self.id, stream_id);
         let frame = {
             let mut shared = s.lock();
             let frame = match shared.update_state(self.id, stream_id, State::Closed) {
