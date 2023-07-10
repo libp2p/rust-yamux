@@ -91,13 +91,14 @@ mod cleanup;
 mod closing;
 mod stream;
 
-use crate::Result;
+use crate::tagged_stream::TaggedStream;
 use crate::{
     error::ConnectionError,
     frame::header::{self, Data, GoAway, Header, Ping, StreamId, Tag, WindowUpdate, CONNECTION_ID},
     frame::{self, Frame},
     Config, WindowUpdateMode, DEFAULT_CREDIT,
 };
+use crate::{Result, MAX_ACK_BACKLOG};
 use cleanup::Cleanup;
 use closing::Closing;
 use futures::stream::SelectAll;
@@ -108,7 +109,6 @@ use std::collections::VecDeque;
 use std::task::{Context, Waker};
 use std::{fmt, sync::Arc, task::Poll};
 
-use crate::tagged_stream::TaggedStream;
 pub use stream::{Packet, State, Stream};
 
 /// How the connection is used.
@@ -163,12 +163,16 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
     pub fn poll_new_outbound(&mut self, cx: &mut Context<'_>) -> Poll<Result<Stream>> {
         loop {
             match std::mem::replace(&mut self.inner, ConnectionState::Poisoned) {
-                ConnectionState::Active(mut active) => match active.new_outbound() {
-                    Ok(stream) => {
+                ConnectionState::Active(mut active) => match active.poll_new_outbound(cx) {
+                    Poll::Ready(Ok(stream)) => {
                         self.inner = ConnectionState::Active(active);
                         return Poll::Ready(Ok(stream));
                     }
-                    Err(e) => {
+                    Poll::Pending => {
+                        self.inner = ConnectionState::Active(active);
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(Err(e)) => {
                         self.inner = ConnectionState::Cleanup(active.cleanup(e));
                         continue;
                     }
@@ -356,6 +360,7 @@ struct Active<T> {
     no_streams_waker: Option<Waker>,
 
     pending_frames: VecDeque<Frame<()>>,
+    new_outbound_stream_waker: Option<Waker>,
 }
 
 /// `Stream` to `Connection` commands.
@@ -426,6 +431,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 Mode::Server => 2,
             },
             pending_frames: VecDeque::default(),
+            new_outbound_stream_waker: None,
         }
     }
 
@@ -494,10 +500,16 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         }
     }
 
-    fn new_outbound(&mut self) -> Result<Stream> {
+    fn poll_new_outbound(&mut self, cx: &mut Context<'_>) -> Poll<Result<Stream>> {
         if self.streams.len() >= self.config.max_num_streams {
             log::error!("{}: maximum number of streams reached", self.id);
-            return Err(ConnectionError::TooManyStreams);
+            return Poll::Ready(Err(ConnectionError::TooManyStreams));
+        }
+
+        if self.ack_backlog() >= MAX_ACK_BACKLOG {
+            log::debug!("{MAX_ACK_BACKLOG} streams waiting for ACK, registering task for wake-up until remote acknowledges at least one stream");
+            self.new_outbound_stream_waker = Some(cx.waker().clone());
+            return Poll::Pending;
         }
 
         log::trace!("{}: creating new outbound stream", self.id);
@@ -512,7 +524,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             self.pending_frames.push_back(frame.into());
         }
 
-        let mut stream = self.make_new_stream(id, self.config.receive_window, DEFAULT_CREDIT);
+        let mut stream = self.make_new_outbound_stream(id, self.config.receive_window);
 
         if extra_credit == 0 {
             stream.set_flag(stream::Flag::Syn)
@@ -521,7 +533,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         log::debug!("{}: new outbound {} of {}", self.id, stream, self);
         self.streams.insert(id, stream.clone_shared());
 
-        Ok(stream)
+        Poll::Ready(Ok(stream))
     }
 
     fn on_send_frame(&mut self, frame: Frame<Either<Data, WindowUpdate>>) {
@@ -549,7 +561,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             let frame = match shared.update_state(self.id, stream_id, State::Closed) {
                 // The stream was dropped without calling `poll_close`.
                 // We reset the stream to inform the remote of the closure.
-                State::Open => {
+                State::Open { .. } => {
                     let mut header = Header::data(stream_id, 0);
                     header.rst();
                     Some(Frame::new(header))
@@ -610,6 +622,19 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     /// if one was opened by the remote.
     fn on_frame(&mut self, frame: Frame<()>) -> Result<Option<Stream>> {
         log::trace!("{}: received: {}", self.id, frame.header());
+
+        if frame.header().flags().contains(header::ACK) {
+            let id = frame.header().stream_id();
+            if let Some(stream) = self.streams.get(&id) {
+                stream
+                    .lock()
+                    .update_state(self.id, id, State::Open { acknowledged: true });
+            }
+            if let Some(waker) = self.new_outbound_stream_waker.take() {
+                waker.wake();
+            }
+        }
+
         let action = match frame.header().tag() {
             Tag::Data => self.on_data(frame.into_data()),
             Tag::WindowUpdate => self.on_window_update(&frame.into_window_update()),
@@ -689,7 +714,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 log::error!("{}: maximum number of streams reached", self.id);
                 return Action::Terminate(Frame::internal_error());
             }
-            let mut stream = self.make_new_stream(stream_id, DEFAULT_CREDIT, DEFAULT_CREDIT);
+            let mut stream = self.make_new_inbound_stream(stream_id, DEFAULT_CREDIT);
             let mut window_update = None;
             {
                 let mut shared = stream.shared();
@@ -806,7 +831,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             }
 
             let credit = frame.header().credit() + DEFAULT_CREDIT;
-            let mut stream = self.make_new_stream(stream_id, DEFAULT_CREDIT, credit);
+            let mut stream = self.make_new_inbound_stream(stream_id, credit);
             stream.set_flag(stream::Flag::Ack);
 
             if is_finish {
@@ -873,7 +898,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         Action::None
     }
 
-    fn make_new_stream(&mut self, id: StreamId, window: u32, credit: u32) -> Stream {
+    fn make_new_inbound_stream(&mut self, id: StreamId, credit: u32) -> Stream {
         let config = self.config.clone();
 
         let (sender, receiver) = mpsc::channel(10); // 10 is an arbitrary number.
@@ -882,7 +907,19 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             waker.wake();
         }
 
-        Stream::new(id, self.id, config, window, credit, sender)
+        Stream::new_inbound(id, self.id, config, credit, sender)
+    }
+
+    fn make_new_outbound_stream(&mut self, id: StreamId, window: u32) -> Stream {
+        let config = self.config.clone();
+
+        let (sender, receiver) = mpsc::channel(10); // 10 is an arbitrary number.
+        self.stream_receivers.push(TaggedStream::new(id, receiver));
+        if let Some(waker) = self.no_streams_waker.take() {
+            waker.wake();
+        }
+
+        Stream::new_outbound(id, self.id, config, window, sender)
     }
 
     fn next_stream_id(&mut self) -> Result<StreamId> {
@@ -896,6 +933,25 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             Mode::Server => assert!(proposed.is_server()),
         }
         Ok(proposed)
+    }
+
+    /// The ACK backlog is defined as the number of outbound streams that have not yet been acknowledged.
+    fn ack_backlog(&mut self) -> usize {
+        self.streams
+            .iter()
+            // Whether this is an outbound stream.
+            //
+            // Clients use odd IDs and servers use even IDs.
+            // A stream is outbound if:
+            //
+            // - Its ID is odd and we are the client.
+            // - Its ID is even and we are the server.
+            .filter(|(id, _)| match self.mode {
+                Mode::Client => id.is_client(),
+                Mode::Server => id.is_server(),
+            })
+            .filter(|(_, s)| s.lock().is_pending_ack())
+            .count()
     }
 
     // Check if the given stream ID is valid w.r.t. the provided tag and our connection mode.
