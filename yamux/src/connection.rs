@@ -104,6 +104,7 @@ use closing::Closing;
 use futures::stream::SelectAll;
 use futures::{channel::mpsc, future::Either, prelude::*, sink::SinkExt, stream::Fuse};
 use nohash_hasher::IntMap;
+use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::task::{Context, Waker};
 use std::{fmt, sync::Arc, task::Poll};
@@ -354,7 +355,7 @@ struct Active<T> {
     socket: Fuse<frame::Io<T>>,
     next_id: u32,
 
-    streams: IntMap<StreamId, Stream>,
+    streams: IntMap<StreamId, Arc<Mutex<stream::Shared>>>,
     stream_receivers: SelectAll<TaggedStream<StreamId, mpsc::Receiver<StreamCommand>>>,
     no_streams_waker: Option<Waker>,
 
@@ -530,7 +531,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         }
 
         log::debug!("{}: new outbound {} of {}", self.id, stream, self);
-        self.streams.insert(id, stream.clone());
+        self.streams.insert(id, stream.clone_shared());
 
         Poll::Ready(Ok(stream))
     }
@@ -551,13 +552,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             .push_back(Frame::close_stream(id, ack).into());
     }
 
-    fn on_drop_stream(&mut self, id: StreamId) {
-        let stream = self.streams.remove(&id).expect("stream not found");
+    fn on_drop_stream(&mut self, stream_id: StreamId) {
+        let s = self.streams.remove(&stream_id).expect("stream not found");
 
-        log::trace!("{}: removing dropped {}", self.id, stream);
-        let stream_id = stream.id();
+        log::trace!("{}: removing dropped stream {}", self.id, stream_id);
         let frame = {
-            let mut shared = stream.shared();
+            let mut shared = s.lock();
             let frame = match shared.update_state(self.id, stream_id, State::Closed) {
                 // The stream was dropped without calling `poll_close`.
                 // We reset the stream to inform the remote of the closure.
@@ -627,7 +627,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             let id = frame.header().stream_id();
             if let Some(stream) = self.streams.get(&id) {
                 stream
-                    .shared()
+                    .lock()
                     .update_state(self.id, id, State::Open { acknowledged: true });
             }
             if let Some(waker) = self.new_outbound_stream_waker.take() {
@@ -678,7 +678,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         if frame.header().flags().contains(header::RST) {
             // stream reset
             if let Some(s) = self.streams.get_mut(&stream_id) {
-                let mut shared = s.shared();
+                let mut shared = s.lock();
                 shared.update_state(self.id, stream_id, State::Closed);
                 if let Some(w) = shared.reader.take() {
                     w.wake()
@@ -736,12 +736,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             if window_update.is_none() {
                 stream.set_flag(stream::Flag::Ack)
             }
-            self.streams.insert(stream_id, stream.clone());
+            self.streams.insert(stream_id, stream.clone_shared());
             return Action::New(stream, window_update);
         }
 
-        if let Some(stream) = self.streams.get_mut(&stream_id) {
-            let mut shared = stream.shared();
+        if let Some(s) = self.streams.get_mut(&stream_id) {
+            let mut shared = s.lock();
             if frame.body().len() > shared.window as usize {
                 log::error!(
                     "{}/{}: frame body larger than window of stream",
@@ -801,7 +801,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         if frame.header().flags().contains(header::RST) {
             // stream reset
             if let Some(s) = self.streams.get_mut(&stream_id) {
-                let mut shared = s.shared();
+                let mut shared = s.lock();
                 shared.update_state(self.id, stream_id, State::Closed);
                 if let Some(w) = shared.reader.take() {
                     w.wake()
@@ -839,12 +839,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                     .shared()
                     .update_state(self.id, stream_id, State::RecvClosed);
             }
-            self.streams.insert(stream_id, stream.clone());
+            self.streams.insert(stream_id, stream.clone_shared());
             return Action::New(stream, None);
         }
 
-        if let Some(stream) = self.streams.get_mut(&stream_id) {
-            let mut shared = stream.shared();
+        if let Some(s) = self.streams.get_mut(&stream_id) {
+            let mut shared = s.lock();
             shared.credit += frame.header().credit();
             if is_finish {
                 shared.update_state(self.id, stream_id, State::RecvClosed);
@@ -938,9 +938,19 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     /// The ACK backlog is defined as the number of outbound streams that have not yet been acknowledged.
     fn ack_backlog(&mut self) -> usize {
         self.streams
-            .values()
-            .filter(|s| s.is_outbound(self.mode))
-            .filter(|s| s.is_pending_ack())
+            .iter()
+            // Whether this is an outbound stream.
+            //
+            // Clients use odd IDs and servers use even IDs.
+            // A stream is outbound if:
+            //
+            // - Its ID is odd and we are the client.
+            // - Its ID is even and we are the server.
+            .filter(|(id, _)| match self.mode {
+                Mode::Client => id.is_client(),
+                Mode::Server => id.is_server(),
+            })
+            .filter(|(_, s)| s.lock().is_pending_ack())
             .count()
     }
 
@@ -960,7 +970,7 @@ impl<T> Active<T> {
     /// Close and drop all `Stream`s and wake any pending `Waker`s.
     fn drop_all_streams(&mut self) {
         for (id, s) in self.streams.drain() {
-            let mut shared = s.shared();
+            let mut shared = s.lock();
             shared.update_state(self.id, id, State::Closed);
             if let Some(w) = shared.reader.take() {
                 w.wake()

@@ -4,6 +4,9 @@
   Users have to move to the `poll_` functions of `Connection`.
   See [PR #164](https://github.com/libp2p/rust-yamux/pull/164).
 
+- Fix a bug where `Stream`s would not be dropped until their corresponding `Connection` was dropped.
+  See [PR #167](https://github.com/libp2p/rust-yamux/pull/167).
+
 # 0.11.1
 
 - Avoid race condition between pending frames and closing stream.

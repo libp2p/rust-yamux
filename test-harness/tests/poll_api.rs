@@ -278,3 +278,55 @@ fn write_deadlock() {
             .unwrap(),
     );
 }
+
+#[test]
+fn close_through_drop_of_stream_propagates_to_remote() {
+    let _ = env_logger::try_init();
+    let mut pool = LocalPool::new();
+
+    let (server_endpoint, client_endpoint) = futures_ringbuf::Endpoint::pair(1024, 1024);
+    let mut server = Connection::new(server_endpoint, Config::default(), Mode::Server);
+    let mut client = Connection::new(client_endpoint, Config::default(), Mode::Client);
+
+    // Spawn client, opening a stream, writing to the stream, dropping the stream, driving the
+    // client connection state machine.
+    pool.spawner()
+        .spawn_obj(
+            async {
+                let mut stream = future::poll_fn(|cx| client.poll_new_outbound(cx))
+                    .await
+                    .unwrap();
+                stream.write_all(&[42]).await.unwrap();
+                drop(stream);
+
+                noop_server(stream::poll_fn(move |cx| client.poll_next_inbound(cx))).await;
+            }
+            .boxed()
+            .into(),
+        )
+        .unwrap();
+
+    // Accept inbound stream.
+    let mut stream_server_side = pool
+        .run_until(future::poll_fn(|cx| server.poll_next_inbound(cx)))
+        .unwrap()
+        .unwrap();
+
+    // Spawn server connection state machine.
+    pool.spawner()
+        .spawn_obj(
+            noop_server(stream::poll_fn(move |cx| server.poll_next_inbound(cx)))
+                .boxed()
+                .into(),
+        )
+        .unwrap();
+
+    // Expect to eventually receive close on stream.
+    pool.run_until(async {
+        let mut buf = Vec::new();
+        stream_server_side.read_to_end(&mut buf).await?;
+        assert_eq!(buf, vec![42]);
+        Ok::<(), std::io::Error>(())
+    })
+    .unwrap();
+}

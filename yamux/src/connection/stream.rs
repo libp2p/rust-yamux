@@ -16,7 +16,7 @@ use crate::{
         header::{Data, Header, StreamId, WindowUpdate},
         Frame,
     },
-    Config, Mode, WindowUpdateMode, DEFAULT_CREDIT,
+    Config, WindowUpdateMode, DEFAULT_CREDIT,
 };
 use futures::{
     channel::mpsc,
@@ -161,26 +161,7 @@ impl Stream {
 
     /// Whether we are still waiting for the remote to acknowledge this stream.
     pub fn is_pending_ack(&self) -> bool {
-        matches!(
-            self.shared().state(),
-            State::Open {
-                acknowledged: false
-            }
-        )
-    }
-
-    /// Whether this is an outbound stream.
-    ///
-    /// Clients use odd IDs and servers use even IDs.
-    /// A stream is outbound if:
-    ///
-    /// - Its ID is odd and we are the client.
-    /// - Its ID is even and we are the server.
-    pub(crate) fn is_outbound(&self, our_mode: Mode) -> bool {
-        match our_mode {
-            Mode::Client => self.id.is_client(),
-            Mode::Server => self.id.is_server(),
-        }
+        self.shared().is_pending_ack()
     }
 
     /// Set the flag that should be set on the next outbound frame header.
@@ -192,15 +173,8 @@ impl Stream {
         self.shared.lock()
     }
 
-    pub(crate) fn clone(&self) -> Self {
-        Stream {
-            id: self.id,
-            conn: self.conn,
-            config: self.config.clone(),
-            sender: self.sender.clone(),
-            flag: self.flag,
-            shared: self.shared.clone(),
-        }
+    pub(crate) fn clone_shared(&self) -> Arc<Mutex<Shared>> {
+        self.shared.clone()
     }
 
     fn write_zero_err(&self) -> io::Error {
@@ -550,5 +524,15 @@ impl Shared {
         } else {
             None
         }
+    }
+
+    /// Whether we are still waiting for the remote to acknowledge this stream.
+    pub fn is_pending_ack(&self) -> bool {
+        matches!(
+            self.state(),
+            State::Open {
+                acknowledged: false
+            }
+        )
     }
 }
