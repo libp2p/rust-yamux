@@ -36,12 +36,15 @@ impl Chunks {
     }
 
     /// Add another chunk of bytes to the end.
-    pub(crate) fn push(&mut self, x: Vec<u8>) {
-        self.len += x.len();
-        if !x.is_empty() {
-            self.seq.push_back(Chunk {
-                cursor: io::Cursor::new(x),
-            })
+    pub(crate) fn push(&mut self, x: Vec<u8>, offset: usize) {
+        let x_len = x.len();
+        let cursor = io::Cursor::new(x);
+        let mut chunk = Chunk { cursor };
+        chunk.advance(offset);
+        if !chunk.is_empty() {
+            assert_eq!(chunk.len(), x_len - offset);
+            self.len += chunk.len() + offset;
+            self.seq.push_back(chunk);
         }
     }
 

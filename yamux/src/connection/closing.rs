@@ -45,7 +45,7 @@ where
     type Output = Result<()>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut this = self.get_mut();
+        let this = self.get_mut();
 
         loop {
             match this.state {

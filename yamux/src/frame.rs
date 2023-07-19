@@ -13,47 +13,99 @@ mod io;
 
 use futures::future::Either;
 use header::{Data, GoAway, Header, Ping, StreamId, WindowUpdate};
-use std::{convert::TryInto, num::TryFromIntError};
+use std::{convert::TryInto, fmt::Debug, marker::PhantomData, num::TryFromIntError};
+use zerocopy::{AsBytes, ByteSlice, ByteSliceMut, Ref};
 
 pub use io::FrameDecodeError;
 pub(crate) use io::Io;
 
-/// A Yamux message frame consisting of header and body.
-#[derive(Clone, Debug, PartialEq, Eq)]
+use self::header::HEADER_SIZE;
+
+/// A Yamux message frame consisting of header and body in a single buffer
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Frame<T> {
-    header: Header<T>,
-    body: Vec<u8>,
+    buffer: Vec<u8>,
+    _marker: std::marker::PhantomData<T>,
+}
+
+impl<T> Default for Frame<T> {
+    fn default() -> Self {
+        Self {
+            buffer: Vec::new(),
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<T> Frame<T> {
-    pub fn new(header: Header<T>) -> Self {
-        Frame {
-            header,
-            body: Vec::new(),
+    pub(crate) fn new(buffer: Vec<u8>) -> Self {
+        Self {
+            buffer,
+            _marker: std::marker::PhantomData,
         }
     }
 
-    pub fn header(&self) -> &Header<T> {
-        &self.header
+    pub(crate) fn from_header(header: Header<T>) -> Self {
+        let mut buffer = vec![0; HEADER_SIZE];
+        header.write_to(&mut buffer).expect("write_to success");
+        Self::new(buffer)
     }
 
-    pub fn header_mut(&mut self) -> &mut Header<T> {
-        &mut self.header
+    fn make_parsed_frame<B: ByteSlice>(
+        header: Ref<B, Header<T>>,
+        body: B,
+    ) -> Result<ParsedFrame<B, T>, io::FrameDecodeError> {
+        let frame = ParsedFrame { header, body };
+        let version = frame.header.version().val();
+        if version != 0 {
+            Err(FrameDecodeError::Header(crate::HeaderDecodeError::Version(
+                version,
+            )))
+        } else {
+            frame.header.tag().map(|_| frame).map_err(|e| e.into())
+        }
+    }
+
+    pub(crate) fn parse(&self) -> Result<ParsedFrame<&[u8], T>, io::FrameDecodeError> {
+        let (header, body) = Ref::new_from_prefix(&self.buffer[..]).expect("construct a valid Ref");
+        Self::make_parsed_frame(header, body)
+    }
+
+    pub(crate) fn parse_mut(&mut self) -> Result<ParsedFrame<&mut [u8], T>, io::FrameDecodeError> {
+        let (header, body) =
+            Ref::new_from_prefix(&mut self.buffer[..]).expect("construct a valid Ref");
+        Self::make_parsed_frame(header, body)
+    }
+
+    pub fn into_buffer(self) -> Vec<u8> {
+        self.buffer
+    }
+
+    pub fn buffer(&self) -> &[u8] {
+        &self.buffer
+    }
+
+    pub fn buffer_mut(&mut self) -> &mut [u8] {
+        &mut self.buffer
+    }
+
+    pub fn append_bytes(&mut self, bytes: &mut Vec<u8>) {
+        self.buffer.append(bytes);
     }
 
     /// Introduce this frame to the right of a binary frame type.
     pub(crate) fn right<U>(self) -> Frame<Either<U, T>> {
         Frame {
-            header: self.header.right(),
-            body: self.body,
+            buffer: self.buffer,
+            _marker: PhantomData,
         }
     }
 
     /// Introduce this frame to the left of a binary frame type.
     pub(crate) fn left<U>(self) -> Frame<Either<T, U>> {
         Frame {
-            header: self.header.left(),
-            body: self.body,
+            buffer: self.buffer,
+            _marker: PhantomData,
         }
     }
 }
@@ -61,8 +113,8 @@ impl<T> Frame<T> {
 impl<A: header::private::Sealed> From<Frame<A>> for Frame<()> {
     fn from(f: Frame<A>) -> Frame<()> {
         Frame {
-            header: f.header.into(),
-            body: f.body,
+            buffer: f.buffer,
+            _marker: PhantomData,
         }
     }
 }
@@ -70,32 +122,35 @@ impl<A: header::private::Sealed> From<Frame<A>> for Frame<()> {
 impl Frame<()> {
     pub(crate) fn into_data(self) -> Frame<Data> {
         Frame {
-            header: self.header.into_data(),
-            body: self.body,
+            buffer: self.buffer,
+            _marker: PhantomData,
         }
     }
 
     pub(crate) fn into_window_update(self) -> Frame<WindowUpdate> {
         Frame {
-            header: self.header.into_window_update(),
-            body: self.body,
+            buffer: self.buffer,
+            _marker: PhantomData,
         }
     }
 
     pub(crate) fn into_ping(self) -> Frame<Ping> {
         Frame {
-            header: self.header.into_ping(),
-            body: self.body,
+            buffer: self.buffer,
+            _marker: PhantomData,
         }
     }
 }
 
 impl Frame<Data> {
-    pub fn data(id: StreamId, b: Vec<u8>) -> Result<Self, TryFromIntError> {
-        Ok(Frame {
-            header: Header::data(id, b.len().try_into()?),
-            body: b,
-        })
+    pub fn data(id: StreamId, body: &[u8]) -> Result<Self, TryFromIntError> {
+        let header = Header::data(id, body.len().try_into()?);
+        let mut buffer = vec![0; HEADER_SIZE + body.len()];
+        header
+            .write_to(&mut buffer[..HEADER_SIZE])
+            .expect("write_to success");
+        buffer[HEADER_SIZE..].copy_from_slice(body);
+        Ok(Frame::new(buffer))
     }
 
     pub fn close_stream(id: StreamId, ack: bool) -> Self {
@@ -105,52 +160,68 @@ impl Frame<Data> {
             header.ack()
         }
 
-        Frame::new(header)
+        Frame::from_header(header)
+    }
+}
+
+impl Frame<WindowUpdate> {
+    pub fn window_update(id: StreamId, credit: u32) -> Frame<WindowUpdate> {
+        Frame::from_header(Header::window_update(id, credit))
+    }
+}
+
+impl Frame<GoAway> {
+    pub fn term() -> Frame<GoAway> {
+        Frame::<GoAway>::from_header(Header::term())
     }
 
-    pub fn body(&self) -> &[u8] {
+    pub fn protocol_error() -> Frame<GoAway> {
+        Frame::<GoAway>::from_header(Header::protocol_error())
+    }
+
+    pub fn internal_error() -> Frame<GoAway> {
+        Frame::<GoAway>::from_header(Header::internal_error())
+    }
+}
+
+/// A zero-copied-parsed view of a Frame
+pub struct ParsedFrame<B: ByteSlice, T> {
+    header: Ref<B, Header<T>>,
+    body: B,
+}
+
+impl<B: ByteSlice, T: Debug> Debug for ParsedFrame<B, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Frame")
+            .field("header", &self.header)
+            .field("body", &"..")
+            .finish()
+    }
+}
+
+impl<B: ByteSlice, T> ParsedFrame<B, T> {
+    pub fn header(&self) -> &Header<T> {
+        &self.header
+    }
+
+    pub fn body(&self) -> &B {
         &self.body
     }
 
     pub fn body_len(&self) -> u32 {
         // Safe cast since we construct `Frame::<Data>`s only with
         // `Vec<u8>` of length [0, u32::MAX] in `Frame::data` above.
-        self.body().len() as u32
+        self.body.len() as u32
     }
 
-    pub fn into_body(self) -> Vec<u8> {
-        self.body
-    }
-}
-
-impl Frame<WindowUpdate> {
-    pub fn window_update(id: StreamId, credit: u32) -> Self {
-        Frame {
-            header: Header::window_update(id, credit),
-            body: Vec::new(),
-        }
+    #[cfg(test)]
+    pub fn bytes(&self) -> &[u8] {
+        self.header.bytes()
     }
 }
 
-impl Frame<GoAway> {
-    pub fn term() -> Self {
-        Frame {
-            header: Header::term(),
-            body: Vec::new(),
-        }
-    }
-
-    pub fn protocol_error() -> Self {
-        Frame {
-            header: Header::protocol_error(),
-            body: Vec::new(),
-        }
-    }
-
-    pub fn internal_error() -> Self {
-        Frame {
-            header: Header::internal_error(),
-            body: Vec::new(),
-        }
+impl<B: ByteSliceMut, T> ParsedFrame<B, T> {
+    pub fn header_mut(&mut self) -> &mut Header<T> {
+        &mut self.header
     }
 }

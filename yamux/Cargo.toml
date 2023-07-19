@@ -17,6 +17,7 @@ parking_lot = "0.12"
 rand = "0.8.3"
 static_assertions = "1"
 pin-project = "1.1.0"
+zerocopy = { version = "0.7.0", features = ["derive"] }
 
 [dev-dependencies]
 quickcheck = "1.0"

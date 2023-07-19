@@ -91,6 +91,7 @@ mod cleanup;
 mod closing;
 mod stream;
 
+use crate::frame::header::HEADER_SIZE;
 use crate::tagged_stream::TaggedStream;
 use crate::{
     error::ConnectionError,
@@ -355,7 +356,7 @@ struct Active<T> {
     socket: Fuse<frame::Io<T>>,
     next_id: u32,
 
-    streams: IntMap<StreamId, Arc<Mutex<stream::Shared>>>,
+    streams: IntMap<u32, Arc<Mutex<stream::Shared>>>,
     stream_receivers: SelectAll<TaggedStream<StreamId, mpsc::Receiver<StreamCommand>>>,
     no_streams_waker: Option<Waker>,
 
@@ -519,8 +520,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
         if extra_credit > 0 {
             let mut frame = Frame::window_update(id, extra_credit);
-            frame.header_mut().syn();
-            log::trace!("{}/{}: sending initial {}", self.id, id, frame.header());
+            let mut parsed_frame = frame.parse_mut().expect("valid frame");
+            parsed_frame.header_mut().syn();
+            log::trace!(
+                "{}/{}: sending initial {}",
+                self.id,
+                id,
+                parsed_frame.header()
+            );
             self.pending_frames.push_back(frame.into());
         }
 
@@ -531,17 +538,18 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         }
 
         log::debug!("{}: new outbound {} of {}", self.id, stream, self);
-        self.streams.insert(id, stream.clone_shared());
+        self.streams.insert(id.val(), stream.clone_shared());
 
         Poll::Ready(Ok(stream))
     }
 
     fn on_send_frame(&mut self, frame: Frame<Either<Data, WindowUpdate>>) {
+        let parsed_frame = frame.parse().expect("valid frame");
         log::trace!(
             "{}/{}: sending: {}",
             self.id,
-            frame.header().stream_id(),
-            frame.header()
+            parsed_frame.header().stream_id(),
+            parsed_frame.header()
         );
         self.pending_frames.push_back(frame.into());
     }
@@ -553,7 +561,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     }
 
     fn on_drop_stream(&mut self, stream_id: StreamId) {
-        let s = self.streams.remove(&stream_id).expect("stream not found");
+        let s = self
+            .streams
+            .remove(&stream_id.val())
+            .expect("stream not found");
 
         log::trace!("{}: removing dropped stream {}", self.id, stream_id);
         let frame = {
@@ -564,7 +575,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 State::Open { .. } => {
                     let mut header = Header::data(stream_id, 0);
                     header.rst();
-                    Some(Frame::new(header))
+                    Some(Frame::from_header(header))
                 }
                 // The stream was dropped without calling `poll_close`.
                 // We have already received a FIN from remote and send one
@@ -572,7 +583,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 State::RecvClosed => {
                     let mut header = Header::data(stream_id, 0);
                     header.fin();
-                    Some(Frame::new(header))
+                    Some(Frame::from_header(header))
                 }
                 // The stream was properly closed. We already sent our FIN frame.
                 // The remote may be out of credit though and blocked on
@@ -585,7 +596,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                         // which we will never send, so reset the stream now.
                         let mut header = Header::data(stream_id, 0);
                         header.rst();
-                        Some(Frame::new(header))
+                        Some(Frame::from_header(header))
                     } else {
                         // The remote has either still credit or will be given more
                         // (due to an enqueued window update or because the update
@@ -609,7 +620,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             frame
         };
         if let Some(f) = frame {
-            log::trace!("{}/{}: sending: {}", self.id, stream_id, f.header());
+            let pf = f.parse().expect("valid frame");
+            log::trace!("{}/{}: sending: {}", self.id, stream_id, pf.header());
             self.pending_frames.push_back(f.into());
         }
     }
@@ -621,11 +633,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     /// Otherwise we process the frame and potentially return a new `Stream`
     /// if one was opened by the remote.
     fn on_frame(&mut self, frame: Frame<()>) -> Result<Option<Stream>> {
-        log::trace!("{}: received: {}", self.id, frame.header());
+        let parsed_frame = frame.parse().expect("valid frame");
+        log::trace!("{}: received: {}", self.id, parsed_frame.header());
 
-        if frame.header().flags().contains(header::ACK) {
-            let id = frame.header().stream_id();
-            if let Some(stream) = self.streams.get(&id) {
+        if parsed_frame.header().flags().contains(header::ACK) {
+            let id = parsed_frame.header().stream_id();
+            if let Some(stream) = self.streams.get(&id.val()) {
                 stream
                     .lock()
                     .update_state(self.id, id, State::Open { acknowledged: true });
@@ -635,7 +648,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             }
         }
 
-        let action = match frame.header().tag() {
+        let action = match parsed_frame.header().tag().expect("valid header's tag") {
             Tag::Data => self.on_data(frame.into_data()),
             Tag::WindowUpdate => self.on_window_update(&frame.into_window_update()),
             Tag::Ping => self.on_ping(&frame.into_ping()),
@@ -646,21 +659,25 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             Action::New(stream, update) => {
                 log::trace!("{}: new inbound {} of {}", self.id, stream, self);
                 if let Some(f) = update {
-                    log::trace!("{}/{}: sending update", self.id, f.header().stream_id());
+                    let pf = f.parse().expect("valid frame");
+                    log::trace!("{}/{}: sending update", self.id, pf.header().stream_id());
                     self.pending_frames.push_back(f.into());
                 }
                 return Ok(Some(stream));
             }
             Action::Update(f) => {
-                log::trace!("{}: sending update: {:?}", self.id, f.header());
+                let pf = f.parse().expect("valid frame");
+                log::trace!("{}: sending update: {:?}", self.id, pf.header());
                 self.pending_frames.push_back(f.into());
             }
             Action::Ping(f) => {
-                log::trace!("{}/{}: pong", self.id, f.header().stream_id());
+                let pf = f.parse().expect("valid frame");
+                log::trace!("{}/{}: pong", self.id, pf.header().stream_id());
                 self.pending_frames.push_back(f.into());
             }
             Action::Reset(f) => {
-                log::trace!("{}/{}: sending reset", self.id, f.header().stream_id());
+                let pf = f.parse().expect("valid frame");
+                log::trace!("{}/{}: sending reset", self.id, pf.header().stream_id());
                 self.pending_frames.push_back(f.into());
             }
             Action::Terminate(f) => {
@@ -673,11 +690,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     }
 
     fn on_data(&mut self, frame: Frame<Data>) -> Action {
-        let stream_id = frame.header().stream_id();
+        let parsed_frame = frame.parse().expect("valid frame");
+        let stream_id = parsed_frame.header().stream_id();
 
-        if frame.header().flags().contains(header::RST) {
+        if parsed_frame.header().flags().contains(header::RST) {
             // stream reset
-            if let Some(s) = self.streams.get_mut(&stream_id) {
+            if let Some(s) = self.streams.get_mut(&stream_id.val()) {
                 let mut shared = s.lock();
                 shared.update_state(self.id, stream_id, State::Closed);
                 if let Some(w) = shared.reader.take() {
@@ -690,15 +708,15 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             return Action::None;
         }
 
-        let is_finish = frame.header().flags().contains(header::FIN); // half-close
+        let is_finish = parsed_frame.header().flags().contains(header::FIN); // half-close
 
-        if frame.header().flags().contains(header::SYN) {
+        if parsed_frame.header().flags().contains(header::SYN) {
             // new stream
             if !self.is_valid_remote_id(stream_id, Tag::Data) {
                 log::error!("{}: invalid stream id {}", self.id, stream_id);
                 return Action::Terminate(Frame::protocol_error());
             }
-            if frame.body().len() > DEFAULT_CREDIT as usize {
+            if parsed_frame.body().len() > DEFAULT_CREDIT as usize {
                 log::error!(
                     "{}/{}: 1st body of stream exceeds default credit",
                     self.id,
@@ -706,7 +724,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 );
                 return Action::Terminate(Frame::protocol_error());
             }
-            if self.streams.contains_key(&stream_id) {
+            if self.streams.contains_key(&stream_id.val()) {
                 log::error!("{}/{}: stream already exists", self.id, stream_id);
                 return Action::Terminate(Frame::protocol_error());
             }
@@ -721,14 +739,16 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 if is_finish {
                     shared.update_state(self.id, stream_id, State::RecvClosed);
                 }
-                shared.window = shared.window.saturating_sub(frame.body_len());
-                shared.buffer.push(frame.into_body());
+                shared.window = shared.window.saturating_sub(parsed_frame.body_len());
+                shared.buffer.push(frame.into_buffer(), HEADER_SIZE);
 
                 if matches!(self.config.window_update_mode, WindowUpdateMode::OnReceive) {
                     if let Some(credit) = shared.next_window_update() {
                         shared.window += credit;
+
                         let mut frame = Frame::window_update(stream_id, credit);
-                        frame.header_mut().ack();
+                        let mut parsed_frame = frame.parse_mut().expect("valid frame");
+                        parsed_frame.header_mut().ack();
                         window_update = Some(frame)
                     }
                 }
@@ -736,13 +756,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             if window_update.is_none() {
                 stream.set_flag(stream::Flag::Ack)
             }
-            self.streams.insert(stream_id, stream.clone_shared());
+            self.streams.insert(stream_id.val(), stream.clone_shared());
             return Action::New(stream, window_update);
         }
 
-        if let Some(s) = self.streams.get_mut(&stream_id) {
+        if let Some(s) = self.streams.get_mut(&stream_id.val()) {
             let mut shared = s.lock();
-            if frame.body().len() > shared.window as usize {
+            if parsed_frame.body().len() > shared.window as usize {
                 log::error!(
                     "{}/{}: frame body larger than window of stream",
                     self.id,
@@ -762,10 +782,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 );
                 let mut header = Header::data(stream_id, 0);
                 header.rst();
-                return Action::Reset(Frame::new(header));
+                return Action::Reset(Frame::from_header(header));
             }
-            shared.window = shared.window.saturating_sub(frame.body_len());
-            shared.buffer.push(frame.into_body());
+            shared.window = shared.window.saturating_sub(parsed_frame.body_len());
+            shared.buffer.push(frame.into_buffer(), HEADER_SIZE);
             if let Some(w) = shared.reader.take() {
                 w.wake()
             }
@@ -796,11 +816,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     }
 
     fn on_window_update(&mut self, frame: &Frame<WindowUpdate>) -> Action {
-        let stream_id = frame.header().stream_id();
+        let parsed_frame = frame.parse().expect("valid frame");
+        let stream_id = parsed_frame.header().stream_id();
 
-        if frame.header().flags().contains(header::RST) {
+        if parsed_frame.header().flags().contains(header::RST) {
             // stream reset
-            if let Some(s) = self.streams.get_mut(&stream_id) {
+            if let Some(s) = self.streams.get_mut(&stream_id.val()) {
                 let mut shared = s.lock();
                 shared.update_state(self.id, stream_id, State::Closed);
                 if let Some(w) = shared.reader.take() {
@@ -813,15 +834,15 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             return Action::None;
         }
 
-        let is_finish = frame.header().flags().contains(header::FIN); // half-close
+        let is_finish = parsed_frame.header().flags().contains(header::FIN); // half-close
 
-        if frame.header().flags().contains(header::SYN) {
+        if parsed_frame.header().flags().contains(header::SYN) {
             // new stream
             if !self.is_valid_remote_id(stream_id, Tag::WindowUpdate) {
                 log::error!("{}: invalid stream id {}", self.id, stream_id);
                 return Action::Terminate(Frame::protocol_error());
             }
-            if self.streams.contains_key(&stream_id) {
+            if self.streams.contains_key(&stream_id.val()) {
                 log::error!("{}/{}: stream already exists", self.id, stream_id);
                 return Action::Terminate(Frame::protocol_error());
             }
@@ -830,7 +851,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 return Action::Terminate(Frame::protocol_error());
             }
 
-            let credit = frame.header().credit() + DEFAULT_CREDIT;
+            let credit = parsed_frame.header().credit() + DEFAULT_CREDIT;
             let mut stream = self.make_new_inbound_stream(stream_id, credit);
             stream.set_flag(stream::Flag::Ack);
 
@@ -839,13 +860,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                     .shared()
                     .update_state(self.id, stream_id, State::RecvClosed);
             }
-            self.streams.insert(stream_id, stream.clone_shared());
+            self.streams.insert(stream_id.val(), stream.clone_shared());
             return Action::New(stream, None);
         }
 
-        if let Some(s) = self.streams.get_mut(&stream_id) {
+        if let Some(s) = self.streams.get_mut(&stream_id.val()) {
             let mut shared = s.lock();
-            shared.credit += frame.header().credit();
+            shared.credit += parsed_frame.header().credit();
             if is_finish {
                 shared.update_state(self.id, stream_id, State::RecvClosed);
             }
@@ -872,15 +893,16 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     }
 
     fn on_ping(&mut self, frame: &Frame<Ping>) -> Action {
-        let stream_id = frame.header().stream_id();
-        if frame.header().flags().contains(header::ACK) {
+        let parsed_frame = frame.parse().expect("valid frame");
+        let stream_id = parsed_frame.header().stream_id();
+        if parsed_frame.header().flags().contains(header::ACK) {
             // pong
             return Action::None;
         }
-        if stream_id == CONNECTION_ID || self.streams.contains_key(&stream_id) {
-            let mut hdr = Header::ping(frame.header().nonce());
+        if stream_id == CONNECTION_ID || self.streams.contains_key(&stream_id.val()) {
+            let mut hdr = Header::ping(parsed_frame.header().nonce());
             hdr.ack();
-            return Action::Ping(Frame::new(hdr));
+            return Action::Ping(Frame::from_header(hdr));
         }
         log::trace!(
             "{}/{}: ping for unknown stream, possibly dropped earlier: {:?}",
@@ -947,8 +969,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             // - Its ID is odd and we are the client.
             // - Its ID is even and we are the server.
             .filter(|(id, _)| match self.mode {
-                Mode::Client => id.is_client(),
-                Mode::Server => id.is_server(),
+                Mode::Client => StreamId::new(**id).is_client(),
+                Mode::Server => StreamId::new(**id).is_server(),
             })
             .filter(|(_, s)| s.lock().is_pending_ack())
             .count()
@@ -971,7 +993,7 @@ impl<T> Active<T> {
     fn drop_all_streams(&mut self) {
         for (id, s) in self.streams.drain() {
             let mut shared = s.lock();
-            shared.update_state(self.id, id, State::Closed);
+            shared.update_state(self.id, StreamId::new(id), State::Closed);
             if let Some(w) = shared.reader.take() {
                 w.wake()
             }

@@ -8,7 +8,7 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-use crate::frame::header::ACK;
+use crate::frame::header::{ACK, HEADER_SIZE};
 use crate::{
     chunks::Chunks,
     connection::{self, StreamCommand},
@@ -218,7 +218,8 @@ impl Stream {
             drop(shared);
 
             let mut frame = Frame::window_update(self.id, credit).right();
-            self.add_flag(frame.header_mut());
+            let mut parsed_frame = frame.parse_mut().expect("valid frame");
+            self.add_flag(parsed_frame.header_mut());
             let cmd = StreamCommand::SendFrame(frame);
             self.sender
                 .start_send(cmd)
@@ -257,7 +258,8 @@ impl futures::stream::Stream for Stream {
         let mut shared = self.shared();
 
         if let Some(bytes) = shared.buffer.pop() {
-            let off = bytes.offset();
+            // Every chunk starts with a frame header, so we add HEADER_SIZE to offset.
+            let off = bytes.offset() + HEADER_SIZE;
             let mut vec = bytes.into_vec();
             if off != 0 {
                 // This should generally not happen when the stream is used only as
@@ -269,7 +271,7 @@ impl futures::stream::Stream for Stream {
                     self.conn,
                     self.id
                 );
-                vec = vec.split_off(off)
+                vec = vec.split_off(off);
             }
             return Poll::Ready(Some(Ok(Packet(vec))));
         }
@@ -367,18 +369,19 @@ impl AsyncWrite for Stream {
             let k = std::cmp::min(shared.credit as usize, buf.len());
             let k = std::cmp::min(k, self.config.split_send_size);
             shared.credit = shared.credit.saturating_sub(k as u32);
-            Vec::from(&buf[..k])
+            &buf[..k]
         };
         let n = body.len();
         let mut frame = Frame::data(self.id, body).expect("body <= u32::MAX").left();
-        self.add_flag(frame.header_mut());
+        let mut parsed_frame = frame.parse_mut().expect("valid frame");
+        self.add_flag(parsed_frame.header_mut());
         log::trace!("{}/{}: write {} bytes", self.conn, self.id, n);
 
         // technically, the frame hasn't been sent yet on the wire but from the perspective of this data structure, we've queued the frame for sending
         // We are tracking this information:
         // a) to be consistent with outbound streams
         // b) to correctly test our behaviour around timing of when ACKs are sent. See `ack_timing.rs` test.
-        if frame.header().flags().contains(ACK) {
+        if parsed_frame.header().flags().contains(ACK) {
             self.shared()
                 .update_state(self.conn, self.id, State::Open { acknowledged: true });
         }
