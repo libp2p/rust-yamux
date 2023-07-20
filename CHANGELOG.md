@@ -1,4 +1,4 @@
-# 0.12.0 - unreleased
+# 0.12.0
 
 - Remove `Control` and `ControlledConnection`.
   Users have to move to the `poll_` functions of `Connection`.
@@ -11,7 +11,7 @@
 
 - Avoid race condition between pending frames and closing stream.
   See [PR 156].
-  
+
 [PR 156]: https://github.com/libp2p/rust-yamux/pull/156
 
 # 0.11.0
