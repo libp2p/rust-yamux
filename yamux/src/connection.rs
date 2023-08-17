@@ -8,6 +8,7 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
+// TODO: The following notes are to be updated.
 // This module contains the `Connection` type and associated helpers.
 // A `Connection` wraps an underlying (async) I/O resource and multiplexes
 // `Stream`s over it.
@@ -145,6 +146,11 @@ impl fmt::Display for Id {
     }
 }
 
+/// A Yamux connection object.
+///
+/// Wraps the underlying I/O resource and makes progress via its
+/// [`Connection::poll_next_inbound`] method which must be called repeatedly
+/// until `Ok(None)` signals EOF or an error is encountered.
 #[derive(Debug)]
 pub struct Connection<T> {
     inner: ConnectionState<T>,
@@ -343,11 +349,7 @@ impl<T> fmt::Debug for ConnectionState<T> {
     }
 }
 
-/// A Yamux connection object.
-///
-/// Wraps the underlying I/O resource and makes progress via its
-/// [`Connection::next_stream`] method which must be called repeatedly
-/// until `Ok(None)` signals EOF or an error is encountered.
+/// The active state of [`Connection`].
 struct Active<T> {
     id: Id,
     mode: Mode,
