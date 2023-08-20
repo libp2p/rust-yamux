@@ -13,12 +13,12 @@
 //! It multiplexes independent I/O streams over reliable, ordered connections,
 //! such as TCP/IP.
 //!
-//! The three primary objects, clients of this crate interact with, are:
+//! The two primary objects, clients of this crate interact with, are:
 //!
-//! - [`Connection`], which wraps the underlying I/O resource, e.g. a socket,
+//! - [`Connection`], which wraps the underlying I/O resource, e.g. a socket, and
+//!   provides methods for opening outbound or accepting inbound streams.
 //! - [`Stream`], which implements [`futures::io::AsyncRead`] and
-//!   [`futures::io::AsyncWrite`], and
-//! - [`Control`], to asynchronously control the [`Connection`].
+//!   [`futures::io::AsyncWrite`].
 //!
 //! [1]: https://github.com/hashicorp/yamux/blob/master/spec.md
 

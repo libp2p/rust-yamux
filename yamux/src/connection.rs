@@ -8,84 +8,9 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-// This module contains the `Connection` type and associated helpers.
-// A `Connection` wraps an underlying (async) I/O resource and multiplexes
-// `Stream`s over it.
-//
-// The overall idea is as follows: The `Connection` makes progress via calls
-// to its `next_stream` method which polls several futures, one that decodes
-// `Frame`s from the I/O resource, one that consumes `ControlCommand`s
-// from an MPSC channel and another one that consumes `StreamCommand`s from
-// yet another MPSC channel. The latter channel is shared with every `Stream`
-// created and whenever a `Stream` wishes to send a `Frame` to the remote end,
-// it enqueues it into this channel (waiting if the channel is full). The
-// former is shared with every `Control` clone and used to open new outbound
-// streams or to trigger a connection close.
-//
-// The `Connection` updates the `Stream` state based on incoming frames, e.g.
-// it pushes incoming data to the `Stream`'s buffer or increases the sending
-// credit if the remote has sent us a corresponding `Frame::<WindowUpdate>`.
-// Updating a `Stream`'s state acquires a `Mutex`, which every `Stream` has
-// around its `Shared` state. While blocking, we make sure the lock is only
-// held for brief moments and *never* while doing I/O. The only contention is
-// between the `Connection` and a single `Stream`, which should resolve
-// quickly. Ideally, we could use `futures::lock::Mutex` but it does not offer
-// a poll-based API as of futures-preview 0.3.0-alpha.19, which makes it
-// difficult to use in a `Stream`'s `AsyncRead` and `AsyncWrite` trait
-// implementations.
-//
-// Closing a `Connection`
-// ----------------------
-//
-// Every `Control` may send a `ControlCommand::Close` at any time and then
-// waits on a `oneshot::Receiver` for confirmation that the connection is
-// closed. The closing proceeds as follows:
-//
-// 1. As soon as we receive the close command we close the MPSC receiver
-//    of `StreamCommand`s. We want to process any stream commands which are
-//    already enqueued at this point but no more.
-// 2. We change the internal shutdown state to `Shutdown::InProgress` which
-//    contains the `oneshot::Sender` of the `Control` which triggered the
-//    closure and which we need to notify eventually.
-// 3. Crucially -- while closing -- we no longer process further control
-//    commands, because opening new streams should no longer be allowed
-//    and further close commands would mean we need to save those
-//    `oneshot::Sender`s for later. On the other hand we also do not simply
-//    close the control channel as this would signal to `Control`s that
-//    try to send close commands, that the connection is already closed,
-//    which it is not. So we just pause processing control commands which
-//    means such `Control`s will wait.
-// 4. We keep processing I/O and stream commands until the remaining stream
-//    commands have all been consumed, at which point we transition the
-//    shutdown state to `Shutdown::Complete`, which entails sending the
-//    final termination frame to the remote, informing the `Control` and
-//    now also closing the control channel.
-// 5. Now that we are closed we go through all pending control commands
-//    and tell the `Control`s that we are closed and we are finally done.
-//
-// While all of this may look complicated, it ensures that `Control`s are
-// only informed about a closed connection when it really is closed.
-//
-// Potential improvements
-// ----------------------
-//
-// There is always more work that can be done to make this a better crate,
-// for example:
-//
-// - Instead of `futures::mpsc` a more efficient channel implementation
-//   could be used, e.g. `tokio-sync`. Unfortunately `tokio-sync` is about
-//   to be merged into `tokio` and depending on this large crate is not
-//   attractive, especially given the dire situation around cargo's flag
-//   resolution.
-// - Flushing could be optimised. This would also require adding a
-//   `StreamCommand::Flush` so that `Stream`s can trigger a flush, which
-//   they would have to when they run out of credit, or else a series of
-//   send operations might never finish.
-// - If Rust gets async destructors, the `garbage_collect()` method can be
-//   removed. Instead a `Stream` would send a `StreamCommand::Dropped(..)`
-//   or something similar and the removal logic could happen within regular
-//   command processing instead of having to scan the whole collection of
-//   `Stream`s on each loop iteration, which is not great.
+//! This module contains the `Connection` type and associated helpers.
+//! A `Connection` wraps an underlying (async) I/O resource and multiplexes
+//! `Stream`s over it.
 
 mod cleanup;
 mod closing;
@@ -145,6 +70,11 @@ impl fmt::Display for Id {
     }
 }
 
+/// A Yamux connection object.
+///
+/// Wraps the underlying I/O resource and makes progress via its
+/// [`Connection::poll_next_inbound`] method which must be called repeatedly
+/// until `Ok(None)` signals EOF or an error is encountered.
 #[derive(Debug)]
 pub struct Connection<T> {
     inner: ConnectionState<T>,
@@ -343,11 +273,7 @@ impl<T> fmt::Debug for ConnectionState<T> {
     }
 }
 
-/// A Yamux connection object.
-///
-/// Wraps the underlying I/O resource and makes progress via its
-/// [`Connection::next_stream`] method which must be called repeatedly
-/// until `Ok(None)` signals EOF or an error is encountered.
+/// The active state of [`Connection`].
 struct Active<T> {
     id: Id,
     mode: Mode,
