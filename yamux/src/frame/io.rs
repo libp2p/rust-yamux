@@ -155,7 +155,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                         };
                         log::trace!("{}: read: {:?}", this.id, parsed_frame);
                         if parsed_frame.header().tag().expect("valid tag") != header::Tag::Data {
-                            let frame = std::mem::take(frame);
+                            let frame = std::mem::replace(frame, Frame::new(Vec::new()));
                             this.read_state = ReadState::Init;
                             return Poll::Ready(Some(Ok(frame)));
                         }
@@ -170,7 +170,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                         frame.append_bytes(&mut vec![0; body_len]);
 
                         this.read_state = ReadState::Body {
-                            frame: std::mem::take(frame),
+                            frame: std::mem::replace(frame, Frame::new(Vec::new())),
                             offset: HEADER_SIZE,
                         };
 
@@ -198,7 +198,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                     let body_len = parsed_frame.header().len().val() as usize;
 
                     if *offset == HEADER_SIZE + body_len {
-                        let frame = std::mem::take(frame);
+                        let frame = std::mem::replace(frame, Frame::new(Vec::new()));
                         this.read_state = ReadState::Init;
                         return Poll::Ready(Some(Ok(frame)));
                     }

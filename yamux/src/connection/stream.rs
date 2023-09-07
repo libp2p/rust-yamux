@@ -8,12 +8,12 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-use crate::frame::header::{ACK, HEADER_SIZE};
+use crate::frame::header::{Flags, ACK, HEADER_SIZE};
 use crate::{
     chunks::Chunks,
     connection::{self, StreamCommand},
     frame::{
-        header::{Data, Header, StreamId, WindowUpdate},
+        header::{Data, StreamId, WindowUpdate},
         Frame,
     },
     Config, WindowUpdateMode, DEFAULT_CREDIT,
@@ -183,18 +183,21 @@ impl Stream {
     }
 
     /// Set ACK or SYN flag if necessary.
-    fn add_flag(&mut self, header: &mut Header<Either<Data, WindowUpdate>>) {
+    fn add_flag(&mut self, frame: &mut Frame<Either<Data, WindowUpdate>>) -> Flags {
+        let mut parsed_frame = frame.parse_mut().expect("valid frame");
+        let header = parsed_frame.header_mut();
         match self.flag {
-            Flag::None => (),
+            Flag::None => {}
             Flag::Syn => {
                 header.syn();
-                self.flag = Flag::None
+                self.flag = Flag::None;
             }
             Flag::Ack => {
                 header.ack();
-                self.flag = Flag::None
+                self.flag = Flag::None;
             }
         }
+        header.flags()
     }
 
     /// Send new credit to the sending side via a window update message if
@@ -218,8 +221,7 @@ impl Stream {
             drop(shared);
 
             let mut frame = Frame::window_update(self.id, credit).right();
-            let mut parsed_frame = frame.parse_mut().expect("valid frame");
-            self.add_flag(parsed_frame.header_mut());
+            self.add_flag(&mut frame);
             let cmd = StreamCommand::SendFrame(frame);
             self.sender
                 .start_send(cmd)
@@ -373,15 +375,14 @@ impl AsyncWrite for Stream {
         };
         let n = body.len();
         let mut frame = Frame::data(self.id, body).expect("body <= u32::MAX").left();
-        let mut parsed_frame = frame.parse_mut().expect("valid frame");
-        self.add_flag(parsed_frame.header_mut());
+        let flags = self.add_flag(&mut frame);
         log::trace!("{}/{}: write {} bytes", self.conn, self.id, n);
 
         // technically, the frame hasn't been sent yet on the wire but from the perspective of this data structure, we've queued the frame for sending
         // We are tracking this information:
         // a) to be consistent with outbound streams
         // b) to correctly test our behaviour around timing of when ACKs are sent. See `ack_timing.rs` test.
-        if parsed_frame.header().flags().contains(ACK) {
+        if flags.contains(ACK) {
             self.shared()
                 .update_state(self.conn, self.id, State::Open { acknowledged: true });
         }

@@ -548,7 +548,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         log::trace!(
             "{}/{}: sending: {}",
             self.id,
-            parsed_frame.header().stream_id(),
+            parsed_frame.stream_id(),
             parsed_frame.header()
         );
         self.pending_frames.push_back(frame.into());
@@ -620,8 +620,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             frame
         };
         if let Some(f) = frame {
-            let pf = f.parse().expect("valid frame");
-            log::trace!("{}/{}: sending: {}", self.id, stream_id, pf.header());
+            log::trace!("{}/{}: sending: {:?}", self.id, stream_id, f);
             self.pending_frames.push_back(f.into());
         }
     }
@@ -634,10 +633,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     /// if one was opened by the remote.
     fn on_frame(&mut self, frame: Frame<()>) -> Result<Option<Stream>> {
         let parsed_frame = frame.parse().expect("valid frame");
-        log::trace!("{}: received: {}", self.id, parsed_frame.header());
+        log::trace!("{}: received: {:?}", self.id, parsed_frame);
 
-        if parsed_frame.header().flags().contains(header::ACK) {
-            let id = parsed_frame.header().stream_id();
+        if parsed_frame.has_flag(header::ACK) {
+            let id = parsed_frame.stream_id();
             if let Some(stream) = self.streams.get(&id.val()) {
                 stream
                     .lock()
@@ -648,7 +647,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             }
         }
 
-        let action = match parsed_frame.header().tag().expect("valid header's tag") {
+        let action = match parsed_frame.tag().expect("valid header's tag") {
             Tag::Data => self.on_data(frame.into_data()),
             Tag::WindowUpdate => self.on_window_update(&frame.into_window_update()),
             Tag::Ping => self.on_ping(&frame.into_ping()),
@@ -660,7 +659,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 log::trace!("{}: new inbound {} of {}", self.id, stream, self);
                 if let Some(f) = update {
                     let pf = f.parse().expect("valid frame");
-                    log::trace!("{}/{}: sending update", self.id, pf.header().stream_id());
+                    log::trace!("{}/{}: sending update", self.id, pf.stream_id());
                     self.pending_frames.push_back(f.into());
                 }
                 return Ok(Some(stream));
@@ -672,12 +671,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             }
             Action::Ping(f) => {
                 let pf = f.parse().expect("valid frame");
-                log::trace!("{}/{}: pong", self.id, pf.header().stream_id());
+                log::trace!("{}/{}: pong", self.id, pf.stream_id());
                 self.pending_frames.push_back(f.into());
             }
             Action::Reset(f) => {
                 let pf = f.parse().expect("valid frame");
-                log::trace!("{}/{}: sending reset", self.id, pf.header().stream_id());
+                log::trace!("{}/{}: sending reset", self.id, pf.stream_id());
                 self.pending_frames.push_back(f.into());
             }
             Action::Terminate(f) => {
@@ -691,9 +690,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
     fn on_data(&mut self, frame: Frame<Data>) -> Action {
         let parsed_frame = frame.parse().expect("valid frame");
-        let stream_id = parsed_frame.header().stream_id();
+        let stream_id = parsed_frame.stream_id();
 
-        if parsed_frame.header().flags().contains(header::RST) {
+        if parsed_frame.has_flag(header::RST) {
             // stream reset
             if let Some(s) = self.streams.get_mut(&stream_id.val()) {
                 let mut shared = s.lock();
@@ -708,9 +707,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             return Action::None;
         }
 
-        let is_finish = parsed_frame.header().flags().contains(header::FIN); // half-close
+        let is_finish = parsed_frame.has_flag(header::FIN); // half-close
 
-        if parsed_frame.header().flags().contains(header::SYN) {
+        if parsed_frame.has_flag(header::SYN) {
             // new stream
             if !self.is_valid_remote_id(stream_id, Tag::Data) {
                 log::error!("{}: invalid stream id {}", self.id, stream_id);
@@ -817,9 +816,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
     fn on_window_update(&mut self, frame: &Frame<WindowUpdate>) -> Action {
         let parsed_frame = frame.parse().expect("valid frame");
-        let stream_id = parsed_frame.header().stream_id();
+        let stream_id = parsed_frame.stream_id();
 
-        if parsed_frame.header().flags().contains(header::RST) {
+        if parsed_frame.has_flag(header::RST) {
             // stream reset
             if let Some(s) = self.streams.get_mut(&stream_id.val()) {
                 let mut shared = s.lock();
@@ -834,9 +833,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             return Action::None;
         }
 
-        let is_finish = parsed_frame.header().flags().contains(header::FIN); // half-close
+        let is_finish = parsed_frame.has_flag(header::FIN); // half-close
 
-        if parsed_frame.header().flags().contains(header::SYN) {
+        if parsed_frame.has_flag(header::SYN) {
             // new stream
             if !self.is_valid_remote_id(stream_id, Tag::WindowUpdate) {
                 log::error!("{}: invalid stream id {}", self.id, stream_id);
@@ -851,7 +850,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 return Action::Terminate(Frame::protocol_error());
             }
 
-            let credit = parsed_frame.header().credit() + DEFAULT_CREDIT;
+            let credit = parsed_frame.credit() + DEFAULT_CREDIT;
             let mut stream = self.make_new_inbound_stream(stream_id, credit);
             stream.set_flag(stream::Flag::Ack);
 
@@ -866,7 +865,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
         if let Some(s) = self.streams.get_mut(&stream_id.val()) {
             let mut shared = s.lock();
-            shared.credit += parsed_frame.header().credit();
+            shared.credit += parsed_frame.credit();
             if is_finish {
                 shared.update_state(self.id, stream_id, State::RecvClosed);
             }
@@ -894,13 +893,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
     fn on_ping(&mut self, frame: &Frame<Ping>) -> Action {
         let parsed_frame = frame.parse().expect("valid frame");
-        let stream_id = parsed_frame.header().stream_id();
-        if parsed_frame.header().flags().contains(header::ACK) {
+        let stream_id = parsed_frame.stream_id();
+        if parsed_frame.has_flag(header::ACK) {
             // pong
             return Action::None;
         }
         if stream_id == CONNECTION_ID || self.streams.contains_key(&stream_id.val()) {
-            let mut hdr = Header::ping(parsed_frame.header().nonce());
+            let mut hdr = Header::ping(parsed_frame.nonce());
             hdr.ack();
             return Action::Ping(Frame::from_header(hdr));
         }

@@ -19,7 +19,9 @@ use zerocopy::{AsBytes, ByteSlice, ByteSliceMut, Ref};
 pub use io::FrameDecodeError;
 pub(crate) use io::Io;
 
-use self::header::HEADER_SIZE;
+use crate::HeaderDecodeError;
+
+use self::header::{HEADER_SIZE, Flags, Tag};
 
 /// A Yamux message frame consisting of header and body in a single buffer
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -28,20 +30,27 @@ pub struct Frame<T> {
     _marker: std::marker::PhantomData<T>,
 }
 
-impl<T> Default for Frame<T> {
-    fn default() -> Self {
-        Self {
-            buffer: Vec::new(),
-            _marker: PhantomData,
-        }
-    }
-}
-
 impl<T> Frame<T> {
     pub(crate) fn new(buffer: Vec<u8>) -> Self {
         Self {
             buffer,
             _marker: std::marker::PhantomData,
+        }
+    }
+
+    /// Introduce this frame to the right of a binary frame type.
+    pub(crate) fn right<U>(self) -> Frame<Either<U, T>> {
+        Frame {
+            buffer: self.buffer,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Introduce this frame to the left of a binary frame type.
+    pub(crate) fn left<U>(self) -> Frame<Either<T, U>> {
+        Frame {
+            buffer: self.buffer,
+            _marker: PhantomData,
         }
     }
 
@@ -77,36 +86,12 @@ impl<T> Frame<T> {
         Self::make_parsed_frame(header, body)
     }
 
-    pub fn into_buffer(self) -> Vec<u8> {
-        self.buffer
-    }
-
-    pub fn buffer(&self) -> &[u8] {
-        &self.buffer
-    }
-
     pub fn buffer_mut(&mut self) -> &mut [u8] {
         &mut self.buffer
     }
 
     pub fn append_bytes(&mut self, bytes: &mut Vec<u8>) {
         self.buffer.append(bytes);
-    }
-
-    /// Introduce this frame to the right of a binary frame type.
-    pub(crate) fn right<U>(self) -> Frame<Either<U, T>> {
-        Frame {
-            buffer: self.buffer,
-            _marker: PhantomData,
-        }
-    }
-
-    /// Introduce this frame to the left of a binary frame type.
-    pub(crate) fn left<U>(self) -> Frame<Either<T, U>> {
-        Frame {
-            buffer: self.buffer,
-            _marker: PhantomData,
-        }
     }
 }
 
@@ -164,6 +149,16 @@ impl Frame<Data> {
     }
 }
 
+impl<T> Frame<T> {
+    pub fn buffer(&self) -> &[u8] {
+        &self.buffer
+    }
+
+    pub fn into_buffer(self) -> Vec<u8> {
+        self.buffer
+    }
+}
+
 impl Frame<WindowUpdate> {
     pub fn window_update(id: StreamId, credit: u32) -> Frame<WindowUpdate> {
         Frame::from_header(Header::window_update(id, credit))
@@ -199,6 +194,24 @@ impl<B: ByteSlice, T: Debug> Debug for ParsedFrame<B, T> {
     }
 }
 
+impl<B: ByteSliceMut, T> ParsedFrame<B, T> {
+    pub fn header_mut(&mut self) -> &mut Header<T> {
+        &mut self.header
+    }
+}
+
+impl<B: ByteSlice> ParsedFrame<B, WindowUpdate> {
+    pub fn credit(&self) -> u32 {
+        self.header().credit()
+    }
+}
+
+impl<B: ByteSlice> ParsedFrame<B, Ping> {
+    pub fn nonce(&self) -> u32 {
+        self.header().nonce()
+    }
+}
+
 impl<B: ByteSlice, T> ParsedFrame<B, T> {
     pub fn header(&self) -> &Header<T> {
         &self.header
@@ -218,10 +231,16 @@ impl<B: ByteSlice, T> ParsedFrame<B, T> {
     pub fn bytes(&self) -> &[u8] {
         self.header.bytes()
     }
-}
 
-impl<B: ByteSliceMut, T> ParsedFrame<B, T> {
-    pub fn header_mut(&mut self) -> &mut Header<T> {
-        &mut self.header
+    pub fn has_flag(&self, flag: Flags) -> bool {
+        self.header().flags().contains(flag)
+    }
+
+    pub fn stream_id(&self) -> StreamId {
+        self.header().stream_id()
+    }
+
+    pub fn tag(&self) -> Result<Tag, HeaderDecodeError> {
+        self.header().tag()
     }
 }
