@@ -21,7 +21,7 @@ pub(crate) use io::Io;
 
 use crate::HeaderDecodeError;
 
-use self::header::{HEADER_SIZE, Flags, Tag};
+use self::header::{Flags, Tag, HEADER_SIZE};
 
 /// A Yamux message frame consisting of header and body in a single buffer
 #[derive(Clone, Debug, Eq, PartialEq)]
