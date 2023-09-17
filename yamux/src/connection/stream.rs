@@ -8,12 +8,12 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-use crate::frame::header::{Flags, ACK, HEADER_SIZE};
+use crate::frame::header::ACK;
 use crate::{
     chunks::Chunks,
     connection::{self, StreamCommand},
     frame::{
-        header::{Data, StreamId, WindowUpdate},
+        header::{Data, Header, StreamId, WindowUpdate},
         Frame,
     },
     Config, WindowUpdateMode, DEFAULT_CREDIT,
@@ -183,21 +183,18 @@ impl Stream {
     }
 
     /// Set ACK or SYN flag if necessary.
-    fn add_flag(&mut self, frame: &mut Frame<Either<Data, WindowUpdate>>) -> Flags {
-        let mut parsed_frame = frame.parse_mut().expect("valid frame");
-        let header = parsed_frame.header_mut();
+    fn add_flag(&mut self, header: &mut Header<Either<Data, WindowUpdate>>) {
         match self.flag {
-            Flag::None => {}
+            Flag::None => (),
             Flag::Syn => {
                 header.syn();
-                self.flag = Flag::None;
+                self.flag = Flag::None
             }
             Flag::Ack => {
                 header.ack();
-                self.flag = Flag::None;
+                self.flag = Flag::None
             }
         }
-        header.flags()
     }
 
     /// Send new credit to the sending side via a window update message if
@@ -221,7 +218,7 @@ impl Stream {
             drop(shared);
 
             let mut frame = Frame::window_update(self.id, credit).right();
-            self.add_flag(&mut frame);
+            self.add_flag(frame.header_mut());
             let cmd = StreamCommand::SendFrame(frame);
             self.sender
                 .start_send(cmd)
@@ -260,8 +257,7 @@ impl futures::stream::Stream for Stream {
         let mut shared = self.shared();
 
         if let Some(bytes) = shared.buffer.pop() {
-            // Every chunk starts with a frame header, so we add HEADER_SIZE to offset.
-            let off = bytes.offset() + HEADER_SIZE;
+            let off = bytes.offset();
             let mut vec = bytes.into_vec();
             if off != 0 {
                 // This should generally not happen when the stream is used only as
@@ -273,7 +269,7 @@ impl futures::stream::Stream for Stream {
                     self.conn,
                     self.id
                 );
-                vec = vec.split_off(off);
+                vec = vec.split_off(off)
             }
             return Poll::Ready(Some(Ok(Packet(vec))));
         }
@@ -375,14 +371,14 @@ impl AsyncWrite for Stream {
         };
         let n = body.len();
         let mut frame = Frame::data(self.id, body).expect("body <= u32::MAX").left();
-        let flags = self.add_flag(&mut frame);
+        self.add_flag(frame.header_mut());
         log::trace!("{}/{}: write {} bytes", self.conn, self.id, n);
 
         // technically, the frame hasn't been sent yet on the wire but from the perspective of this data structure, we've queued the frame for sending
         // We are tracking this information:
         // a) to be consistent with outbound streams
         // b) to correctly test our behaviour around timing of when ACKs are sent. See `ack_timing.rs` test.
-        if flags.contains(ACK) {
+        if frame.header().flags().contains(ACK) {
             self.shared()
                 .update_state(self.conn, self.id, State::Open { acknowledged: true });
         }
