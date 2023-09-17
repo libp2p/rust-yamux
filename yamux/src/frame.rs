@@ -34,7 +34,7 @@ impl<T> Frame<T> {
     pub(crate) fn new(header: Header<T>) -> Self {
         let total_buffer_size = HEADER_SIZE + header.len().val() as usize;
 
-        let mut buffer = Vec::with_capacity(total_buffer_size);
+        let mut buffer = vec![0; total_buffer_size];
         header
             .write_to_prefix(&mut buffer)
             .expect("buffer always fits the header");

@@ -70,11 +70,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Sink<Frame<()>> for Io<T> {
                 WriteState::Init => return Poll::Ready(Ok(())),
                 WriteState::Writing {
                     frame,
-                    ref mut offset,
-                } => match Pin::new(&mut this.io).poll_write(cx, &frame.buffer()[*offset..]) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
-                    Poll::Ready(Ok(n)) => {
+                    offset,
+                } => match ready!(Pin::new(&mut this.io).poll_write(cx, &frame.buffer()[*offset..])) {
+                    Err(e) => return Poll::Ready(Err(e)),
+                    Ok(n) => {
                         if n == 0 {
                             return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
                         }
@@ -165,8 +164,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                         continue;
                     }
 
-                    let buf = &mut buffer[offset..header::HEADER_SIZE];
-                    match ready!(Pin::new(&mut this.io).poll_read(cx, buf))? {
+                    match ready!(Pin::new(&mut this.io).poll_read(cx, &mut buffer[offset..]))? {
                         0 => {
                             if offset == 0 {
                                 return Poll::Ready(None);

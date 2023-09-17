@@ -11,6 +11,7 @@
 use futures::future::Either;
 use std::cmp::Ordering;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use zerocopy::big_endian::{U16, U32};
 use zerocopy::{AsBytes, FromBytes, FromZeroes};
 
@@ -322,7 +323,7 @@ pub const CONNECTION_ID: StreamId = StreamId(U32::ZERO);
 /// The ID of a stream.
 ///
 /// The value 0 denotes no particular stream but the whole session.
-#[derive(Copy, Clone, Debug, Hash, Eq, FromBytes, AsBytes, FromZeroes)]
+#[derive(Copy, Clone, Debug, Eq, FromBytes, AsBytes, FromZeroes)]
 #[repr(packed)]
 pub struct StreamId(U32);
 
@@ -342,6 +343,12 @@ impl PartialOrd for StreamId {
 impl Ord for StreamId {
     fn cmp(&self, other: &Self) -> Ordering {
         self.0.get().cmp(&other.0.get())
+    }
+}
+
+impl Hash for StreamId {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.get().hash(state)
     }
 }
 
