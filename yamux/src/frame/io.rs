@@ -13,8 +13,7 @@ use super::{
     Frame,
 };
 use crate::connection::Id;
-use crate::frame::header::{Data, Header};
-use futures::future::Either;
+use crate::frame::header::Data;
 use futures::{prelude::*, ready};
 use std::ops::AddAssign;
 use std::{
@@ -130,26 +129,26 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
     type Item = Result<Frame<()>, FrameDecodeError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        let mut this = &mut *self;
+        let this = &mut *self;
         loop {
             log::trace!("{}: read: {:?}", this.id, this.read_state);
 
             match &mut this.read_state {
                 ReadState::Header { offset, mut buffer } => {
                     if *offset == header::HEADER_SIZE {
-                        let header = header::decode(&buffer)?;
+                        let frame = Frame::try_from_header_buffer(buffer)?;
 
-                        log::trace!("{}: read: {}", this.id, header);
+                        log::trace!("{}: read: {:?}", this.id, frame);
 
-                        let header = match header.try_into_data() {
-                            Ok(data_header) => data_header,
-                            Err(other_header) => {
+                        let mut frame = match frame.try_into_data() {
+                            Ok(data_frame) => data_frame,
+                            Err(other_frame) => {
                                 this.read_state = ReadState::header();
-                                return Poll::Ready(Some(Ok(Frame::no_body(other_header))));
+                                return Poll::Ready(Some(Ok(other_frame)));
                             }
                         };
 
-                        let body_len = header.len().val() as usize;
+                        let body_len = frame.header().len().val() as usize;
 
                         if body_len > this.max_body_len {
                             return Poll::Ready(Some(Err(FrameDecodeError::FrameTooLarge(
@@ -157,10 +156,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                             ))));
                         }
 
-                        this.read_state = ReadState::Body {
-                            frame: Frame::new(header),
-                            offset: 0,
-                        };
+                        frame.ensure_buffer_len();
+
+                        this.read_state = ReadState::Body { frame, offset: 0 };
                         continue;
                     }
 
@@ -272,51 +270,53 @@ impl From<HeaderDecodeError> for FrameDecodeError {
     }
 }
 
-// TODO: Fix this.
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use quickcheck::{Arbitrary, Gen, QuickCheck};
-//     use rand::RngCore;
-//
-//     impl Arbitrary for Frame<()> {
-//         fn arbitrary(g: &mut Gen) -> Self {
-//             let mut header: header::Header<()> = Arbitrary::arbitrary(g);
-//             let body = if header.tag() == header::Tag::Data {
-//                 header.set_len(header.len().val() % 4096);
-//                 let mut b = vec![0; header.len().val() as usize];
-//                 rand::thread_rng().fill_bytes(&mut b);
-//                 b
-//             } else {
-//                 Vec::new()
-//             };
-//             Frame { header, body }
-//         }
-//     }
-//
-//     #[test]
-//     fn encode_decode_identity() {
-//         fn property(f: Frame<()>) -> bool {
-//             futures::executor::block_on(async move {
-//                 let id = crate::connection::Id::random();
-//                 let mut io = Io::new(id, futures::io::Cursor::new(Vec::new()), f.body.len());
-//                 if io.send(f.clone()).await.is_err() {
-//                     return false;
-//                 }
-//                 if io.flush().await.is_err() {
-//                     return false;
-//                 }
-//                 io.io.set_position(0);
-//                 if let Ok(Some(x)) = io.try_next().await {
-//                     x == f
-//                 } else {
-//                     false
-//                 }
-//             })
-//         }
-//
-//         QuickCheck::new()
-//             .tests(10_000)
-//             .quickcheck(property as fn(Frame<()>) -> bool)
-//     }
-// }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quickcheck::{Arbitrary, Gen, QuickCheck};
+    use rand::RngCore;
+
+    impl Arbitrary for Frame<()> {
+        fn arbitrary(g: &mut Gen) -> Self {
+            let mut header: header::Header<()> = Arbitrary::arbitrary(g);
+            if header.tag() == header::Tag::Data {
+                header.set_len(header.len().val() % 4096);
+                let mut frame = Frame::new(header.into_data());
+                rand::thread_rng().fill_bytes(frame.body_mut());
+                frame.into_generic_frame()
+            } else {
+                Frame::no_body(header)
+            }
+        }
+    }
+
+    #[test]
+    fn encode_decode_identity() {
+        fn property(f: Frame<()>) -> bool {
+            futures::executor::block_on(async move {
+                let id = crate::connection::Id::random();
+                let mut io = Io::new(
+                    id,
+                    futures::io::Cursor::new(Vec::new()),
+                    f.body_len() as usize,
+                );
+                if io.send(f.clone()).await.is_err() {
+                    return false;
+                }
+                if io.flush().await.is_err() {
+                    return false;
+                }
+                io.io.set_position(0);
+                if let Ok(Some(x)) = io.try_next().await {
+                    x == f
+                } else {
+                    false
+                }
+            })
+        }
+
+        QuickCheck::new()
+            .tests(10_000)
+            .quickcheck(property as fn(Frame<()>) -> bool)
+    }
+}

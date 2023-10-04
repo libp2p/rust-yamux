@@ -500,7 +500,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         }
     }
 
-    fn poll_new_outbound(&mut self, cx: &mut Context<'_>) -> Poll<Result<Stream>> {
+    fn poll_new_outbound(&mut self, cx: &Context<'_>) -> Poll<Result<Stream>> {
         if self.streams.len() >= self.config.max_num_streams {
             log::error!("{}: maximum number of streams reached", self.id);
             return Poll::Ready(Err(ConnectionError::TooManyStreams));

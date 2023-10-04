@@ -9,7 +9,6 @@
 // at https://opensource.org/licenses/MIT.
 
 use futures::future::Either;
-use std::cmp::Ordering;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 use zerocopy::big_endian::{U16, U32};
@@ -37,13 +36,6 @@ impl<T> fmt::Debug for Header<T> {
             .field("length", &self.length)
             .field("_marker", &self._marker)
             .finish()
-    }
-}
-
-impl<T> Header<T> {
-    #[must_use]
-    pub(crate) fn has_valid_tag(&self) -> bool {
-        (0..4).contains(&self.tag)
     }
 }
 
@@ -86,7 +78,7 @@ impl<T> Header<T> {
 
     #[cfg(test)]
     pub fn set_len(&mut self, len: u32) {
-        self.length = Len(len)
+        self.length = Len(len.into());
     }
 
     /// Arbitrary type cast, use with caution.
@@ -101,15 +93,23 @@ impl<T> Header<T> {
         }
     }
 
-    /// Introduce this header to the right of a binary header type.
-    pub(crate) fn right<U>(self) -> Header<Either<U, T>> {
-        self.cast()
+    pub(crate) fn is_data(&self) -> bool {
+        self.tag == Tag::Data as u8
     }
 
-    /// Introduce this header to the left of a binary header type.
-    pub(crate) fn left<U>(self) -> Header<Either<T, U>> {
-        self.cast()
+    /// Validate a [`Header`] value.
+    pub fn validate(&self) -> Result<(), HeaderDecodeError> {
+        if self.version.0 != 0 {
+            return Err(HeaderDecodeError::Version(self.version.0));
+        }
+
+        if !(0..4).contains(&self.tag) {
+            return Err(HeaderDecodeError::Type(self.tag));
+        }
+
+        Ok(())
     }
+
 }
 
 impl<A: private::Sealed> From<Header<A>> for Header<()> {
@@ -120,28 +120,8 @@ impl<A: private::Sealed> From<Header<A>> for Header<()> {
 
 impl Header<()> {
     pub(crate) fn into_data(self) -> Header<Data> {
-        // FIXME debug_assert_eq!(self.tag, Tag::Data);
+        debug_assert!(self.is_data());
         self.cast()
-    }
-
-    pub(crate) fn into_window_update(self) -> Header<WindowUpdate> {
-        // FIXME debug_assert_eq!(self.tag, Tag::WindowUpdate);
-        self.cast()
-    }
-
-    pub(crate) fn into_ping(self) -> Header<Ping> {
-        // FIXME debug_assert_eq!(self.tag, Tag::Ping);
-        self.cast()
-    }
-}
-
-impl Header<()> {
-    pub(crate) fn try_into_data(self) -> Result<Header<Data>, Self> {
-        if self.tag == Tag::Data as u8 {
-            return Ok(self.cast());
-        }
-
-        Err(self)
     }
 }
 
@@ -155,21 +135,21 @@ impl<T: HasSyn> Header<T> {
 impl<T: HasAck> Header<T> {
     /// Set the [`ACK`] flag.
     pub fn ack(&mut self) {
-        // self.flags.0 |= ACK.0
+        self.flags.0.set(self.flags.val() | ACK.0.get());
     }
 }
 
 impl<T: HasFin> Header<T> {
     /// Set the [`FIN`] flag.
     pub fn fin(&mut self) {
-        // self.flags.0 |= FIN.0
+        self.flags.0.set(self.flags.val() | FIN.0.get());
     }
 }
 
 impl<T: HasRst> Header<T> {
     /// Set the [`RST`] flag.
     pub fn rst(&mut self) {
-        // self.flags.0 |= RST.0
+        self.flags.0.set(self.flags.val() | RST.0.get());
     }
 }
 
@@ -181,7 +161,7 @@ impl Header<Data> {
             tag: Tag::Data as u8,
             flags: Flags(U16::new(0)),
             stream_id: id,
-            length: Len(len),
+            length: Len(len.into()),
             _marker: std::marker::PhantomData,
         }
     }
@@ -195,14 +175,14 @@ impl Header<WindowUpdate> {
             tag: Tag::WindowUpdate as u8,
             flags: Flags(U16::new(0)),
             stream_id: id,
-            length: Len(credit),
+            length: Len(credit.into()),
             _marker: std::marker::PhantomData,
         }
     }
 
     /// The credit this window update grants to the remote.
     pub fn credit(&self) -> u32 {
-        self.length.0
+        self.length.0.into()
     }
 }
 
@@ -214,14 +194,14 @@ impl Header<Ping> {
             tag: Tag::Ping as u8,
             flags: Flags(U16::new(0)),
             stream_id: CONNECTION_ID,
-            length: Len(nonce),
+            length: Len(nonce.into()),
             _marker: std::marker::PhantomData,
         }
     }
 
     /// The nonce of this ping.
     pub fn nonce(&self) -> u32 {
-        self.length.0
+        self.length.0.into()
     }
 }
 
@@ -247,7 +227,7 @@ impl Header<GoAway> {
             tag: Tag::GoAway as u8,
             flags: Flags(U16::new(0)),
             stream_id: CONNECTION_ID,
-            length: Len(code),
+            length: Len(code.into()),
             _marker: std::marker::PhantomData,
         }
     }
@@ -321,11 +301,11 @@ pub struct Version(u8);
 /// The message length.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, FromBytes, AsBytes, FromZeroes)]
 #[repr(packed)]
-pub struct Len(u32);
+pub struct Len(U32);
 
 impl Len {
     pub fn val(self) -> u32 {
-        self.0
+        self.0.into()
     }
 }
 
@@ -334,28 +314,9 @@ pub const CONNECTION_ID: StreamId = StreamId(U32::ZERO);
 /// The ID of a stream.
 ///
 /// The value 0 denotes no particular stream but the whole session.
-#[derive(Copy, Clone, Debug, Eq, FromBytes, AsBytes, FromZeroes)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, FromBytes, AsBytes, FromZeroes)]
 #[repr(packed)]
 pub struct StreamId(U32);
-
-// TODO: Research why these can't be derived. Is this wrong?
-impl PartialEq for StreamId {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.get() == other.0.get()
-    }
-}
-
-impl PartialOrd for StreamId {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        self.0.get().partial_cmp(&other.0.get())
-    }
-}
-
-impl Ord for StreamId {
-    fn cmp(&self, other: &Self) -> Ordering {
-        self.0.get().cmp(&other.0.get())
-    }
-}
 
 impl Hash for StreamId {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -423,30 +384,6 @@ pub const RST: Flags = Flags(U16::from_bytes([0, 8]));
 /// The serialised header size in bytes.
 pub const HEADER_SIZE: usize = 12;
 
-/// Encode a [`Header`] value.
-pub fn encode<T>(hdr: &Header<T>) -> [u8; HEADER_SIZE] {
-    let mut buf = [0; HEADER_SIZE];
-
-    hdr.write_to(&mut buf).expect("buffer to be correct length");
-    buf
-}
-
-/// Decode a [`Header`] value.
-pub fn decode(buf: &[u8; HEADER_SIZE]) -> Result<Header<()>, HeaderDecodeError> {
-    if buf[0] != 0 {
-        return Err(HeaderDecodeError::Version(buf[0]));
-    }
-
-    let tag = buf[1];
-    if !(0..4).contains(&tag) {
-        return Err(HeaderDecodeError::Type(tag));
-    }
-
-    let hdr = Header::read_from(buf).expect("buffer to be correct size"); // FIXME do we know this here?
-
-    Ok(hdr)
-}
-
 /// Possible errors while decoding a message frame header.
 #[non_exhaustive]
 #[derive(Debug)]
@@ -468,42 +405,53 @@ impl std::fmt::Display for HeaderDecodeError {
 
 impl std::error::Error for HeaderDecodeError {}
 
-// FIXME
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use quickcheck::{Arbitrary, Gen, QuickCheck};
-//
-//     impl Arbitrary for Header<()> {
-//         fn arbitrary(g: &mut Gen) -> Self {
-//             let tag = *g
-//                 .choose(&[Tag::Data, Tag::WindowUpdate, Tag::Ping, Tag::GoAway])
-//                 .unwrap();
-//
-//             Header {
-//                 version: Version(0),
-//                 tag: tag as u8,
-//                 flags: Flags(Arbitrary::arbitrary(g)),
-//                 stream_id: StreamId(Arbitrary::arbitrary(g)),
-//                 length: Len(Arbitrary::arbitrary(g)),
-//                 _marker: std::marker::PhantomData,
-//             }
-//         }
-//     }
-//
-//     #[test]
-//     fn encode_decode_identity() {
-//         fn property(hdr: Header<()>) -> bool {
-//             match decode(&encode(&hdr)) {
-//                 Ok(x) => x == hdr,
-//                 Err(e) => {
-//                     eprintln!("decode error: {}", e);
-//                     false
-//                 }
-//             }
-//         }
-//         QuickCheck::new()
-//             .tests(10_000)
-//             .quickcheck(property as fn(Header<()>) -> bool)
-//     }
-// }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quickcheck::{Arbitrary, Gen, QuickCheck};
+
+    impl Arbitrary for Header<()> {
+        fn arbitrary(g: &mut Gen) -> Self {
+            let tag = *g
+                .choose(&[Tag::Data, Tag::WindowUpdate, Tag::Ping, Tag::GoAway])
+                .unwrap();
+
+            Header {
+                version: Version(0),
+                tag: tag as u8,
+                flags: Flags(u16::arbitrary(g).into()),
+                stream_id: StreamId(u32::arbitrary(g).into()),
+                length: Len(u32::arbitrary(g).into()),
+                _marker: std::marker::PhantomData,
+            }
+        }
+    }
+
+    fn decode(buf: &[u8; HEADER_SIZE]) -> Result<Header<()>, HeaderDecodeError> {
+        let hdr = Header::read_from(buf).expect("buffer to be correct size");
+        hdr.validate().map(|_| hdr)
+    }
+
+    /// Encode a [`Header`] value.
+    fn encode<T>(hdr: &Header<T>) -> [u8; HEADER_SIZE] {
+        let mut buf = [0; HEADER_SIZE];
+        hdr.write_to(&mut buf).expect("buffer to be correct length");
+        buf
+    }
+
+    #[test]
+    fn encode_decode_identity() {
+        fn property(hdr: Header<()>) -> bool {
+            match decode(&encode(&hdr)) {
+                Ok(x) => x == hdr,
+                Err(e) => {
+                    eprintln!("decode error: {}", e);
+                    false
+                }
+            }
+        }
+        QuickCheck::new()
+            .tests(10_000)
+            .quickcheck(property as fn(Header<()>) -> bool)
+    }
+}

@@ -14,16 +14,15 @@ mod io;
 use futures::future::Either;
 use header::{Data, GoAway, Header, Ping, StreamId, WindowUpdate};
 use std::{convert::TryInto, fmt::Debug, marker::PhantomData, num::TryFromIntError};
-use zerocopy::{AsBytes, ByteSlice, ByteSliceMut, Ref};
+use zerocopy::{AsBytes, Ref};
 
 pub use io::FrameDecodeError;
 pub(crate) use io::Io;
 
-use crate::HeaderDecodeError;
+use self::header::HEADER_SIZE;
 
-use self::header::{Flags, Tag, HEADER_SIZE};
-
-/// A Yamux message frame consisting of header and body in a single buffer
+/// A Yamux message frame consisting of a single buffer with header followed by body.
+/// The header can be zerocopy parsed into a Header struct by calling header()/header_mut().
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Frame<T> {
     buffer: Vec<u8>,
@@ -43,14 +42,25 @@ impl<T> Frame<T> {
         }
     }
 
-    pub(crate) fn header(&self) -> &Header<T> {
+    pub fn try_from_header_buffer(buffer: [u8; HEADER_SIZE]) -> Result<Self, FrameDecodeError> {
+        let frame = Self {
+            buffer: buffer.to_vec(),
+            _marker: PhantomData,
+        };
+        let header = frame.header();
+        header.validate()?;
+
+        Ok(frame)
+    }
+
+    pub fn header(&self) -> &Header<T> {
         Ref::<_, Header<T>>::new_from_prefix(self.buffer.as_slice())
             .expect("buffer always holds a valid header")
             .0
             .into_ref()
     }
 
-    pub(crate) fn header_mut(&mut self) -> &mut Header<T> {
+    pub fn header_mut(&mut self) -> &mut Header<T> {
         Ref::<_, Header<T>>::new_from_prefix(self.buffer.as_mut_slice())
             .expect("buffer always holds a valid header")
             .0
@@ -112,6 +122,14 @@ impl<A: header::private::Sealed> From<Frame<A>> for Frame<()> {
 }
 
 impl Frame<()> {
+    pub(crate) fn try_into_data(self) -> Result<Frame<Data>, Self> {
+        if self.header().is_data() {
+            Ok(self.into_data())
+        } else {
+            Err(self)
+        }
+    }
+
     pub(crate) fn into_data(self) -> Frame<Data> {
         Frame {
             buffer: self.buffer,
@@ -135,7 +153,7 @@ impl Frame<()> {
 }
 
 impl Frame<Data> {
-    pub(crate) fn new(header: Header<Data>) -> Self {
+    pub fn new(header: Header<Data>) -> Self {
         let total_buffer_size = HEADER_SIZE + header.len().val() as usize;
 
         let mut buffer = vec![0; total_buffer_size];
@@ -153,6 +171,7 @@ impl Frame<Data> {
         let header = Header::data(id, body.len().try_into()?);
 
         let mut frame = Frame::new(header);
+
         frame.body_mut().copy_from_slice(body);
 
         Ok(frame)
@@ -167,6 +186,12 @@ impl Frame<Data> {
 
         Frame::new(header)
     }
+
+    fn ensure_buffer_len(&mut self) {
+        self.buffer
+            .resize(HEADER_SIZE + self.header().len().val() as usize, 0);
+    }
+
 }
 
 impl Frame<WindowUpdate> {
@@ -176,15 +201,15 @@ impl Frame<WindowUpdate> {
 }
 
 impl Frame<GoAway> {
-    pub fn term() -> Frame<GoAway> {
+    pub fn term() -> Self {
         Frame::<GoAway>::no_body(Header::term())
     }
 
-    pub fn protocol_error() -> Frame<GoAway> {
+    pub fn protocol_error() -> Self {
         Frame::<GoAway>::no_body(Header::protocol_error())
     }
 
-    pub fn internal_error() -> Frame<GoAway> {
+    pub fn internal_error() -> Self {
         Frame::<GoAway>::no_body(Header::internal_error())
     }
 }
