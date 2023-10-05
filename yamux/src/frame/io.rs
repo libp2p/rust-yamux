@@ -21,6 +21,7 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
 };
+use std::ops::AddAssign;
 
 /// A [`Stream`] and writer of [`Frame`] values.
 #[derive(Debug)]
@@ -139,10 +140,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
             match &mut this.read_state {
                 ReadState::Header { offset, mut buffer } => {
                     if *offset == header::HEADER_SIZE {
-                        let header = match header::decode(&buffer) {
-                            Ok(hd) => hd,
-                            Err(e) => return Poll::Ready(Some(Err(e.into()))),
-                        };
+                        let header = header::decode(&buffer)?;
 
                         log::trace!("{}: read: {}", this.id, header);
 
@@ -199,7 +197,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                             return Poll::Ready(Some(Err(e)));
                         }
                         n => {
-                            *offset += n;
+                            offset.add_assign(n)
                         }
                     }
                 }
