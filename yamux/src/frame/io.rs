@@ -37,7 +37,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Io<T> {
         Io {
             id,
             io,
-            read_state: ReadState::Init,
+            read_state: ReadState::Header {
+                offset: 0,
+                buffer: [0; header::HEADER_SIZE],
+            },
             write_state: WriteState::Init,
             max_body_len: max_frame_body_len,
         }
@@ -107,8 +110,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Sink<Frame<()>> for Io<T> {
 
 /// The stages of reading a new `Frame`.
 enum ReadState {
-    /// Initial reading state.
-    Init,
     /// Reading the frame header.
     Header {
         offset: usize,
@@ -116,6 +117,15 @@ enum ReadState {
     },
     /// Reading the frame body.
     Body { frame: Frame<()>, offset: usize },
+}
+
+impl ReadState {
+    fn header() -> Self {
+        ReadState::Header {
+            offset: 0,
+            buffer: [0u8; header::HEADER_SIZE],
+        }
+    }
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
@@ -126,16 +136,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
         loop {
             log::trace!("{}: read: {:?}", this.id, this.read_state);
 
-            match mem::replace(&mut this.read_state, ReadState::Init) {
-                ReadState::Init => {
-                    this.read_state = ReadState::Header {
-                        offset: 0,
-                        buffer: [0; header::HEADER_SIZE],
-                    };
-                    continue;
-                }
+            match &mut this.read_state {
                 ReadState::Header { offset, mut buffer } => {
-                    if offset == header::HEADER_SIZE {
+                    if *offset == header::HEADER_SIZE {
                         let header = match header::decode(&buffer) {
                             Ok(hd) => hd,
                             Err(e) => return Poll::Ready(Some(Err(e.into()))),
@@ -144,7 +147,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                         log::trace!("{}: read: {}", this.id, header);
 
                         if header.tag() != header::Tag::Data {
-                            this.read_state = ReadState::Init;
+                            this.read_state = ReadState::header();
                             return Poll::Ready(Some(Ok(Frame::new(header))));
                         }
 
@@ -163,49 +166,44 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                         continue;
                     }
 
-                    match Pin::new(&mut this.io).poll_read(cx, &mut buffer[offset..])? {
-                        Poll::Ready(0) => {
-                            if offset == 0 {
+                    match ready!(Pin::new(&mut this.io).poll_read(cx, &mut buffer[*offset..]))? {
+                        0 => {
+                            if *offset == 0 {
                                 return Poll::Ready(None);
                             }
                             let e = FrameDecodeError::Io(io::ErrorKind::UnexpectedEof.into());
                             return Poll::Ready(Some(Err(e)));
                         }
-                        Poll::Ready(n) => {
+                        n => {
                             this.read_state = ReadState::Header {
                                 buffer,
-                                offset: offset + n,
+                                offset: *offset + n,
                             };
-                            continue;
                         }
-                        Poll::Pending => {}
                     }
                 }
-                ReadState::Body { offset, mut frame } => {
+                ReadState::Body { offset, ref mut frame } => {
                     let body_len = frame.header().len().val() as usize;
 
-                    if offset == body_len {
+                    if *offset == body_len {
+                        let frame = match mem::replace(&mut self.read_state, ReadState::header()) {
+                            ReadState::Header { .. } => unreachable!("we matched above"),
+                            ReadState::Body { frame, .. } => frame
+                        };
                         return Poll::Ready(Some(Ok(frame)));
                     }
 
-                    match Pin::new(&mut this.io).poll_read(cx, &mut frame.body_mut()[offset..])? {
-                        Poll::Ready(0) => {
+                    match ready!(Pin::new(&mut this.io).poll_read(cx, &mut frame.body_mut()[*offset..]))? {
+                        0 => {
                             let e = FrameDecodeError::Io(io::ErrorKind::UnexpectedEof.into());
                             return Poll::Ready(Some(Err(e)));
                         }
-                        Poll::Ready(n) => {
-                            this.read_state = ReadState::Body {
-                                frame,
-                                offset: offset + n,
-                            };
-                            continue;
+                        n => {
+                            *offset += n;
                         }
-                        Poll::Pending => {}
                     }
                 }
             }
-
-            return Poll::Pending;
         }
     }
 }
@@ -213,7 +211,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
 impl fmt::Debug for ReadState {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            ReadState::Init => f.write_str("(ReadState::Init)"),
             ReadState::Header { offset, .. } => {
                 write!(f, "(ReadState::Header (offset {}))", offset)
             }
