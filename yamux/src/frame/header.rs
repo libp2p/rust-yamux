@@ -109,7 +109,6 @@ impl<T> Header<T> {
 
         Ok(())
     }
-
 }
 
 impl<A: private::Sealed> From<Header<A>> for Header<()> {

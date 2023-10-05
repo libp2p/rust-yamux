@@ -191,7 +191,6 @@ impl Frame<Data> {
         self.buffer
             .resize(HEADER_SIZE + self.header().len().val() as usize, 0);
     }
-
 }
 
 impl Frame<WindowUpdate> {
