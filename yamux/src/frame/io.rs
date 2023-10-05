@@ -16,12 +16,12 @@ use crate::connection::Id;
 use crate::frame::header::Data;
 use futures::future::Either;
 use futures::{prelude::*, ready};
+use std::ops::AddAssign;
 use std::{
     fmt, io, mem,
     pin::Pin,
     task::{Context, Poll},
 };
-use std::ops::AddAssign;
 
 /// A [`Stream`] and writer of [`Frame`] values.
 #[derive(Debug)]
@@ -69,21 +69,21 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Sink<Frame<()>> for Io<T> {
             log::trace!("{}: write: {:?}", this.id, this.write_state);
             match &mut this.write_state {
                 WriteState::Init => return Poll::Ready(Ok(())),
-                WriteState::Writing {
-                    frame,
-                    offset,
-                } => match ready!(Pin::new(&mut this.io).poll_write(cx, &frame.buffer()[*offset..])) {
-                    Err(e) => return Poll::Ready(Err(e)),
-                    Ok(n) => {
-                        if n == 0 {
-                            return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
-                        }
-                        *offset += n;
-                        if *offset == frame.buffer().len() {
-                            this.write_state = WriteState::Init;
+                WriteState::Writing { frame, offset } => {
+                    match ready!(Pin::new(&mut this.io).poll_write(cx, &frame.buffer()[*offset..]))
+                    {
+                        Err(e) => return Poll::Ready(Err(e)),
+                        Ok(n) => {
+                            if n == 0 {
+                                return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
+                            }
+                            *offset += n;
+                            if *offset == frame.buffer().len() {
+                                this.write_state = WriteState::Init;
+                            }
                         }
                     }
-                },
+                }
             }
         }
     }
@@ -114,7 +114,7 @@ enum ReadState {
         buffer: [u8; header::HEADER_SIZE],
     },
     /// Reading the frame body.
-    Body { frame: Frame<()>, offset: usize },
+    Body { frame: Frame<Data>, offset: usize },
 }
 
 impl ReadState {
@@ -143,7 +143,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
 
                         if header.tag() != header::Tag::Data {
                             this.read_state = ReadState::header();
-                            return Poll::Ready(Some(Ok(Frame::new(header))));
+                            return Poll::Ready(Some(Ok(Frame::no_body(header))));
                         }
 
                         let body_len = header.len().val() as usize;
@@ -155,7 +155,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                         }
 
                         this.read_state = ReadState::Body {
-                            frame: Frame::new(header),
+                            frame: Frame::new(header.cast()), // Safe to cast here because we asserted above that it is a data frame.
                             offset: 0,
                         };
                         continue;
@@ -177,25 +177,28 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                         }
                     }
                 }
-                ReadState::Body { offset, ref mut frame } => {
+                ReadState::Body {
+                    offset,
+                    ref mut frame,
+                } => {
                     let body_len = frame.header().len().val() as usize;
 
                     if *offset == body_len {
                         let frame = match mem::replace(&mut self.read_state, ReadState::header()) {
                             ReadState::Header { .. } => unreachable!("we matched above"),
-                            ReadState::Body { frame, .. } => frame
+                            ReadState::Body { frame, .. } => frame,
                         };
-                        return Poll::Ready(Some(Ok(frame)));
+                        return Poll::Ready(Some(Ok(frame.into_generic_frame())));
                     }
 
-                    match ready!(Pin::new(&mut this.io).poll_read(cx, &mut frame.body_mut()[*offset..]))? {
+                    match ready!(
+                        Pin::new(&mut this.io).poll_read(cx, &mut frame.body_mut()[*offset..])
+                    )? {
                         0 => {
                             let e = FrameDecodeError::Io(io::ErrorKind::UnexpectedEof.into());
                             return Poll::Ready(Some(Err(e)));
                         }
-                        n => {
-                            offset.add_assign(n)
-                        }
+                        n => offset.add_assign(n),
                     }
                 }
             }

@@ -89,7 +89,7 @@ impl<T> Header<T> {
     }
 
     /// Arbitrary type cast, use with caution.
-    fn cast<U>(self) -> Header<U> {
+    pub(crate) fn cast<U>(self) -> Header<U> {
         Header {
             version: self.version,
             tag: self.tag,

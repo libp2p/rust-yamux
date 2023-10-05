@@ -31,13 +31,11 @@ pub struct Frame<T> {
 }
 
 impl<T> Frame<T> {
-    pub(crate) fn new(header: Header<T>) -> Self {
-        let total_buffer_size = HEADER_SIZE + header.len().val() as usize;
-
-        let mut buffer = vec![0; total_buffer_size];
+    pub(crate) fn no_body(header: Header<T>) -> Self {
+        let mut buffer = vec![0; HEADER_SIZE];
         header
-            .write_to_prefix(&mut buffer)
-            .expect("buffer always fits the header");
+            .write_to(&mut buffer)
+            .expect("buffer is size of header");
 
         Self {
             buffer,
@@ -95,6 +93,13 @@ impl<T> Frame<T> {
             _marker: PhantomData,
         }
     }
+
+    pub(crate) fn into_generic_frame(self) -> Frame<()> {
+        Frame {
+            buffer: self.buffer,
+            _marker: PhantomData,
+        }
+    }
 }
 
 impl<A: header::private::Sealed> From<Frame<A>> for Frame<()> {
@@ -130,6 +135,20 @@ impl Frame<()> {
 }
 
 impl Frame<Data> {
+    pub(crate) fn new(header: Header<Data>) -> Self {
+        let total_buffer_size = HEADER_SIZE + header.len().val() as usize;
+
+        let mut buffer = vec![0; total_buffer_size];
+        header
+            .write_to_prefix(&mut buffer)
+            .expect("buffer always fits the header");
+
+        Self {
+            buffer,
+            _marker: PhantomData,
+        }
+    }
+
     pub fn data(id: StreamId, body: &[u8]) -> Result<Self, TryFromIntError> {
         let header = Header::data(id, body.len().try_into()?);
 
@@ -152,20 +171,20 @@ impl Frame<Data> {
 
 impl Frame<WindowUpdate> {
     pub fn window_update(id: StreamId, credit: u32) -> Frame<WindowUpdate> {
-        Frame::new(Header::window_update(id, credit))
+        Frame::no_body(Header::window_update(id, credit))
     }
 }
 
 impl Frame<GoAway> {
     pub fn term() -> Frame<GoAway> {
-        Frame::<GoAway>::new(Header::term())
+        Frame::<GoAway>::no_body(Header::term())
     }
 
     pub fn protocol_error() -> Frame<GoAway> {
-        Frame::<GoAway>::new(Header::protocol_error())
+        Frame::<GoAway>::no_body(Header::protocol_error())
     }
 
     pub fn internal_error() -> Frame<GoAway> {
-        Frame::<GoAway>::new(Header::internal_error())
+        Frame::<GoAway>::no_body(Header::internal_error())
     }
 }
