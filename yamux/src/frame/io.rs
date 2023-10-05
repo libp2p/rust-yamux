@@ -13,7 +13,7 @@ use super::{
     Frame,
 };
 use crate::connection::Id;
-use crate::frame::header::Data;
+use crate::frame::header::{Data, Header};
 use futures::future::Either;
 use futures::{prelude::*, ready};
 use std::ops::AddAssign;
@@ -141,10 +141,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
 
                         log::trace!("{}: read: {}", this.id, header);
 
-                        if header.tag() != header::Tag::Data {
-                            this.read_state = ReadState::header();
-                            return Poll::Ready(Some(Ok(Frame::no_body(header))));
-                        }
+                        let header = match header.try_into_data() {
+                            Ok(data_header) => data_header,
+                            Err(other_header) => {
+                                this.read_state = ReadState::header();
+                                return Poll::Ready(Some(Ok(Frame::no_body(other_header))));
+                            }
+                        };
 
                         let body_len = header.len().val() as usize;
 
@@ -155,7 +158,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                         }
 
                         this.read_state = ReadState::Body {
-                            frame: Frame::new(header.cast()), // Safe to cast here because we asserted above that it is a data frame.
+                            frame: Frame::new(header),
                             offset: 0,
                         };
                         continue;

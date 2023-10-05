@@ -89,7 +89,7 @@ impl<T> Header<T> {
     }
 
     /// Arbitrary type cast, use with caution.
-    pub(crate) fn cast<U>(self) -> Header<U> {
+    fn cast<U>(self) -> Header<U> {
         Header {
             version: self.version,
             tag: self.tag,
@@ -131,6 +131,16 @@ impl Header<()> {
     pub(crate) fn into_ping(self) -> Header<Ping> {
         // FIXME debug_assert_eq!(self.tag, Tag::Ping);
         self.cast()
+    }
+}
+
+impl Header<()> {
+    pub(crate) fn try_into_data(self) -> Result<Header<Data>, Self> {
+        if self.tag == Tag::Data as u8 {
+            return Ok(self.cast());
+        }
+
+        Err(self)
     }
 }
 
