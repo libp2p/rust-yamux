@@ -79,6 +79,7 @@ impl<T> Header<T> {
         self.stream_id
     }
 
+    // FIXME: This should not be a generic accessor because its semantic depends on the type.
     pub fn len(&self) -> Len {
         self.length
     }
