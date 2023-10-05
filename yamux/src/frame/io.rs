@@ -133,6 +133,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                         offset: 0,
                         buffer: [0; header::HEADER_SIZE],
                     };
+                    continue;
                 }
                 ReadState::Header { offset, mut buffer } => {
                     if offset == header::HEADER_SIZE {
@@ -160,24 +161,25 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                             frame: Frame::new(header),
                             offset: 0,
                         };
-
                         continue;
                     }
 
-                    match ready!(Pin::new(&mut this.io).poll_read(cx, &mut buffer[offset..]))? {
-                        0 => {
+                    match Pin::new(&mut this.io).poll_read(cx, &mut buffer[offset..])? {
+                        Poll::Ready(0) => {
                             if offset == 0 {
                                 return Poll::Ready(None);
                             }
                             let e = FrameDecodeError::Io(io::ErrorKind::UnexpectedEof.into());
                             return Poll::Ready(Some(Err(e)));
                         }
-                        n => {
+                        Poll::Ready(n) => {
                             this.read_state = ReadState::Header {
                                 buffer,
                                 offset: offset + n,
-                            }
+                            };
+                            continue;
                         }
+                        Poll::Pending => {}
                     }
                 }
                 ReadState::Body { offset, mut frame } => {
@@ -187,22 +189,24 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                         return Poll::Ready(Some(Ok(frame)));
                     }
 
-                    match ready!(
-                        Pin::new(&mut this.io).poll_read(cx, &mut frame.body_mut()[offset..])
-                    )? {
-                        0 => {
+                    match Pin::new(&mut this.io).poll_read(cx, &mut frame.body_mut()[offset..])? {
+                        Poll::Ready(0) => {
                             let e = FrameDecodeError::Io(io::ErrorKind::UnexpectedEof.into());
                             return Poll::Ready(Some(Err(e)));
                         }
-                        n => {
+                        Poll::Ready(n) => {
                             this.read_state = ReadState::Body {
                                 frame,
                                 offset: offset + n,
-                            }
+                            };
+                            continue;
                         }
+                        Poll::Pending => {}
                     }
                 }
             }
+
+            return Poll::Pending;
         }
     }
 }
