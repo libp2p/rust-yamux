@@ -125,9 +125,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
         let mut this = &mut *self;
         loop {
             log::trace!("{}: read: {:?}", this.id, this.read_state);
-            let state = mem::replace(&mut this.read_state, ReadState::Init);
 
-            match state {
+            match mem::replace(&mut this.read_state, ReadState::Init) {
                 ReadState::Init => {
                     this.read_state = ReadState::Header {
                         offset: 0,
