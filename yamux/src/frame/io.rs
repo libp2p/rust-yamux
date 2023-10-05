@@ -38,10 +38,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Io<T> {
         Io {
             id,
             io,
-            read_state: ReadState::Header {
-                offset: 0,
-                buffer: [0; header::HEADER_SIZE],
-            },
+            read_state: ReadState::header(),
             write_state: WriteState::Init,
             max_body_len: max_frame_body_len,
         }
