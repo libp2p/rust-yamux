@@ -139,7 +139,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
         let this = &mut *self;
         loop {
             log::trace!("{}: read: {:?}", this.id, this.read_state);
-
             match this.read_state {
                 ReadState::Header {
                     ref mut offset,
@@ -158,7 +157,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                             }
                         };
 
-                        let body_len = frame.header().len().val() as usize;
+                        let body_len = frame.body_len() as usize;
 
                         if body_len > this.max_body_len {
                             return Poll::Ready(Some(Err(FrameDecodeError::FrameTooLarge(
@@ -186,7 +185,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                     ref mut offset,
                     ref mut frame,
                 } => {
-                    let body_len = frame.header().len().val() as usize;
+                    let body_len = frame.body_len() as usize;
 
                     if *offset == body_len {
                         let frame = match mem::replace(&mut self.read_state, ReadState::header()) {
