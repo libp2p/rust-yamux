@@ -54,7 +54,14 @@ impl fmt::Debug for WriteState {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             WriteState::Init => f.write_str("(WriteState::Init)"),
-            _ => todo!(),
+            WriteState::Writing { offset, frame } => {
+                write!(
+                    f,
+                    "(WriteState::Writing (offset {}) (buffer-len {}))",
+                    offset,
+                    frame.len()
+                )
+            }
         }
     }
 }
