@@ -14,6 +14,7 @@ use super::{
 };
 use crate::connection::Id;
 use crate::frame::header::Data;
+use futures::future::Either;
 use futures::{prelude::*, ready};
 use std::{
     fmt, io, mem,
@@ -139,9 +140,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
 
                         log::trace!("{}: read: {:?}", this.id, frame);
 
-                        let mut frame = match frame.try_into_data() {
-                            Ok(data_frame) => data_frame,
-                            Err(other_frame) => {
+                        let frame = match frame {
+                            Either::Right(data_frame) => data_frame,
+                            Either::Left(other_frame) => {
                                 this.read_state = ReadState::header();
                                 return Poll::Ready(Some(Ok(other_frame)));
                             }
@@ -154,8 +155,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                                 body_len,
                             ))));
                         }
-
-                        frame.ensure_buffer_len();
 
                         this.read_state = ReadState::Body { frame, offset: 0 };
                         continue;

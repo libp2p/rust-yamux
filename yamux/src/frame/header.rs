@@ -96,19 +96,6 @@ impl<T> Header<T> {
     pub(crate) fn is_data(&self) -> bool {
         self.tag == Tag::Data as u8
     }
-
-    /// Validate a [`Header`] value.
-    pub fn validate(&self) -> Result<(), HeaderDecodeError> {
-        if self.version.0 != 0 {
-            return Err(HeaderDecodeError::Version(self.version.0));
-        }
-
-        if !(0..4).contains(&self.tag) {
-            return Err(HeaderDecodeError::Type(self.tag));
-        }
-
-        Ok(())
-    }
 }
 
 impl<A: private::Sealed> From<Header<A>> for Header<()> {
@@ -121,6 +108,14 @@ impl Header<()> {
     pub(crate) fn into_data(self) -> Header<Data> {
         debug_assert!(self.is_data());
         self.cast()
+    }
+
+    pub(crate) fn try_into_data(self) -> Result<Header<Data>, Self> {
+        if self.tag == Tag::Data as u8 {
+            return Ok(self.into_data());
+        }
+
+        Err(self)
     }
 }
 
@@ -383,6 +378,22 @@ pub const RST: Flags = Flags(U16::from_bytes([0, 8]));
 /// The serialised header size in bytes.
 pub const HEADER_SIZE: usize = 12;
 
+// Decode a [`Header`] value.
+pub fn decode(buf: &[u8; HEADER_SIZE]) -> Result<Header<()>, HeaderDecodeError> {
+    if buf[0] != 0 {
+        return Err(HeaderDecodeError::Version(buf[0]));
+    }
+
+    let tag = buf[1];
+    if !(0..4).contains(&tag) {
+        return Err(HeaderDecodeError::Type(tag));
+    }
+
+    let hdr = Header::read_from(buf).expect("buffer to be correct size");
+
+    Ok(hdr)
+}
+
 /// Possible errors while decoding a message frame header.
 #[non_exhaustive]
 #[derive(Debug)]
@@ -424,11 +435,6 @@ mod tests {
                 _marker: std::marker::PhantomData,
             }
         }
-    }
-
-    fn decode(buf: &[u8; HEADER_SIZE]) -> Result<Header<()>, HeaderDecodeError> {
-        let hdr = Header::read_from(buf).expect("buffer to be correct size");
-        hdr.validate().map(|_| hdr)
     }
 
     /// Encode a [`Header`] value.

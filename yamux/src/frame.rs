@@ -42,17 +42,6 @@ impl<T> Frame<T> {
         }
     }
 
-    pub fn try_from_header_buffer(buffer: [u8; HEADER_SIZE]) -> Result<Self, FrameDecodeError> {
-        let frame = Self {
-            buffer: buffer.to_vec(),
-            _marker: PhantomData,
-        };
-        let header = frame.header();
-        header.validate()?;
-
-        Ok(frame)
-    }
-
     pub fn header(&self) -> &Header<T> {
         Ref::<_, Header<T>>::new_from_prefix(self.buffer.as_slice())
             .expect("buffer always holds a valid header")
@@ -122,12 +111,17 @@ impl<A: header::private::Sealed> From<Frame<A>> for Frame<()> {
 }
 
 impl Frame<()> {
-    pub(crate) fn try_into_data(self) -> Result<Frame<Data>, Self> {
-        if self.header().is_data() {
-            Ok(self.into_data())
-        } else {
-            Err(self)
-        }
+    pub(crate) fn try_from_header_buffer(
+        buffer: [u8; HEADER_SIZE],
+    ) -> Result<Either<Frame<()>, Frame<Data>>, FrameDecodeError> {
+        let header = header::decode(&buffer)?;
+
+        let either = match header.try_into_data() {
+            Ok(data) => Either::Right(Frame::new(data)),
+            Err(other) => Either::Left(Frame::no_body(other)),
+        };
+
+        Ok(either)
     }
 
     pub(crate) fn into_data(self) -> Frame<Data> {
@@ -185,11 +179,6 @@ impl Frame<Data> {
         }
 
         Frame::new(header)
-    }
-
-    fn ensure_buffer_len(&mut self) {
-        self.buffer
-            .resize(HEADER_SIZE + self.header().len().val() as usize, 0);
     }
 }
 
