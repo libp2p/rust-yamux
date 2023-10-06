@@ -140,7 +140,7 @@ impl Frame<Data> {
     }
 
     pub fn new(header: Header<Data>) -> Self {
-        let total_buffer_size = HEADER_SIZE + header.len().val() as usize;
+        let total_buffer_size = HEADER_SIZE + header.body_len();
 
         let mut buffer = vec![0; total_buffer_size];
         header

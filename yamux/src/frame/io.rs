@@ -280,10 +280,11 @@ mod tests {
 
     impl Arbitrary for Frame<()> {
         fn arbitrary(g: &mut Gen) -> Self {
-            let mut header: header::Header<()> = Arbitrary::arbitrary(g);
+            let header: header::Header<()> = Arbitrary::arbitrary(g);
             if header.tag() == header::Tag::Data {
-                header.set_len(header.len().val() % 4096);
-                let mut frame = Frame::new(header.into_data());
+                let mut header = header.into_data();
+                header.set_len(header.body_len() % 4096);
+                let mut frame = Frame::new(header);
                 rand::thread_rng().fill_bytes(frame.body_mut());
                 frame.into_generic_frame()
             } else {

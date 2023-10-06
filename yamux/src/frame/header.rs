@@ -71,14 +71,9 @@ impl<T> Header<T> {
         self.stream_id
     }
 
-    // FIXME: This should not be a generic accessor because its semantic depends on the type.
-    pub fn len(&self) -> Len {
-        self.length
-    }
-
     #[cfg(test)]
-    pub fn set_len(&mut self, len: u32) {
-        self.length = Len(len.into());
+    pub fn set_len(&mut self, len: usize) {
+        self.length = Len((len as u32).into());
     }
 
     /// Arbitrary type cast, use with caution.
@@ -158,6 +153,14 @@ impl Header<Data> {
             length: Len(len.into()),
             _marker: std::marker::PhantomData,
         }
+    }
+
+    /// Returns the length of the body.
+    ///
+    /// The `length` field in the header has a different semantic meaning depending on the tag.
+    /// For [`Tag::Data`], it describes the length of the body.
+    pub fn body_len(&self) -> usize {
+        self.length.val() as usize
     }
 }
 
