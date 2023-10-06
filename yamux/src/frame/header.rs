@@ -87,10 +87,6 @@ impl<T> Header<T> {
             _marker: std::marker::PhantomData,
         }
     }
-
-    pub(crate) fn is_data(&self) -> bool {
-        self.tag == Tag::Data as u8
-    }
 }
 
 impl<A: private::Sealed> From<Header<A>> for Header<()> {
@@ -101,7 +97,7 @@ impl<A: private::Sealed> From<Header<A>> for Header<()> {
 
 impl Header<()> {
     pub(crate) fn into_data(self) -> Header<Data> {
-        debug_assert!(self.is_data());
+        debug_assert_eq!(self.tag, Tag::Data as u8);
         self.cast()
     }
 
