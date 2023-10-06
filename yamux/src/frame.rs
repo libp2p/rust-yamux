@@ -163,21 +163,19 @@ impl Frame<Data> {
         Frame::new(header)
     }
 
-
-    pub(crate) fn body(&self) -> &[u8] {
+    pub fn body(&self) -> &[u8] {
         &self.buffer[HEADER_SIZE..]
     }
 
-
-    pub(crate) fn body_mut(&mut self) -> &mut [u8] {
+    pub fn body_mut(&mut self) -> &mut [u8] {
         &mut self.buffer[HEADER_SIZE..]
     }
 
-    pub(crate) fn body_len(&self) -> u32 {
+    pub fn body_len(&self) -> u32 {
         self.body().len() as u32
     }
 
-    pub(crate) fn into_body(mut self) -> Vec<u8> {
+    pub fn into_body(mut self) -> Vec<u8> {
         // FIXME: Should we implement this more efficiently with `BytesMut`? I think that one would allow us to split of the body without allocating again ..
         self.buffer.split_off(HEADER_SIZE)
     }
