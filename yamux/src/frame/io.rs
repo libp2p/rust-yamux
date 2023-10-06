@@ -140,9 +140,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
         loop {
             log::trace!("{}: read: {:?}", this.id, this.read_state);
 
-            match &mut this.read_state {
+            match this.read_state {
                 ReadState::Header {
-                    offset,
+                    ref mut offset,
                     ref mut buffer,
                 } => {
                     if *offset == header::HEADER_SIZE {
@@ -183,7 +183,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                     }
                 }
                 ReadState::Body {
-                    offset,
+                    ref mut offset,
                     ref mut frame,
                 } => {
                     let body_len = frame.header().len().val() as usize;
