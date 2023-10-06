@@ -60,23 +60,6 @@ impl<T> Frame<T> {
         self.buffer.as_slice()
     }
 
-    pub(crate) fn body(&self) -> &[u8] {
-        &self.buffer[HEADER_SIZE..]
-    }
-
-    pub(crate) fn body_len(&self) -> u32 {
-        self.body().len() as u32
-    }
-
-    pub(crate) fn into_body(mut self) -> Vec<u8> {
-        // FIXME: Should we implement this more efficiently with `BytesMut`? I think that one would allow us to split of the body without allocating again ..
-        self.buffer.split_off(HEADER_SIZE)
-    }
-
-    pub(crate) fn body_mut(&mut self) -> &mut [u8] {
-        &mut self.buffer[HEADER_SIZE..]
-    }
-
     /// Introduce this frame to the right of a binary frame type.
     pub(crate) fn right<U>(self) -> Frame<Either<U, T>> {
         Frame {
@@ -147,6 +130,15 @@ impl Frame<()> {
 }
 
 impl Frame<Data> {
+    pub fn data(id: StreamId, b: &[u8]) -> Result<Self, TryFromIntError> {
+        let header = Header::data(id, b.len().try_into()?);
+
+        let mut frame = Frame::new(header);
+        frame.body_mut().copy_from_slice(b);
+
+        Ok(frame)
+    }
+
     pub fn new(header: Header<Data>) -> Self {
         let total_buffer_size = HEADER_SIZE + header.len().val() as usize;
 
@@ -161,16 +153,6 @@ impl Frame<Data> {
         }
     }
 
-    pub fn data(id: StreamId, body: &[u8]) -> Result<Self, TryFromIntError> {
-        let header = Header::data(id, body.len().try_into()?);
-
-        let mut frame = Frame::new(header);
-
-        frame.body_mut().copy_from_slice(body);
-
-        Ok(frame)
-    }
-
     pub fn close_stream(id: StreamId, ack: bool) -> Self {
         let mut header = Header::data(id, 0);
         header.fin();
@@ -180,10 +162,29 @@ impl Frame<Data> {
 
         Frame::new(header)
     }
+
+
+    pub(crate) fn body(&self) -> &[u8] {
+        &self.buffer[HEADER_SIZE..]
+    }
+
+
+    pub(crate) fn body_mut(&mut self) -> &mut [u8] {
+        &mut self.buffer[HEADER_SIZE..]
+    }
+
+    pub(crate) fn body_len(&self) -> u32 {
+        self.body().len() as u32
+    }
+
+    pub(crate) fn into_body(mut self) -> Vec<u8> {
+        // FIXME: Should we implement this more efficiently with `BytesMut`? I think that one would allow us to split of the body without allocating again ..
+        self.buffer.split_off(HEADER_SIZE)
+    }
 }
 
 impl Frame<WindowUpdate> {
-    pub fn window_update(id: StreamId, credit: u32) -> Frame<WindowUpdate> {
+    pub fn window_update(id: StreamId, credit: u32) -> Self {
         Frame::no_body(Header::window_update(id, credit))
     }
 }

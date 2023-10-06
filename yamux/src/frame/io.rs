@@ -295,7 +295,7 @@ mod tests {
                 let mut io = Io::new(
                     id,
                     futures::io::Cursor::new(Vec::new()),
-                    f.body_len() as usize,
+                    f.buffer.len(),
                 );
                 if io.send(f.clone()).await.is_err() {
                     return false;
