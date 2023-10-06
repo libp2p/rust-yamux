@@ -59,7 +59,7 @@ impl fmt::Debug for WriteState {
                     f,
                     "(WriteState::Writing (offset {}) (buffer-len {}))",
                     offset,
-                    frame.len()
+                    frame.buffer().len()
                 )
             }
         }
@@ -141,7 +141,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
             log::trace!("{}: read: {:?}", this.id, this.read_state);
 
             match &mut this.read_state {
-                ReadState::Header { offset, mut buffer } => {
+                ReadState::Header {
+                    offset,
+                    ref mut buffer,
+                } => {
                     if *offset == header::HEADER_SIZE {
                         let frame = Frame::try_from_header_buffer(buffer)?;
 
@@ -167,7 +170,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                         continue;
                     }
 
-                    match ready!(Pin::new(&mut this.io).poll_read(cx, &mut buffer[*offset..]))? {
+                    let buf = &mut buffer[*offset..header::HEADER_SIZE];
+                    match ready!(Pin::new(&mut this.io).poll_read(cx, buf))? {
                         0 => {
                             if *offset == 0 {
                                 return Poll::Ready(None);
@@ -175,12 +179,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                             let e = FrameDecodeError::Io(io::ErrorKind::UnexpectedEof.into());
                             return Poll::Ready(Some(Err(e)));
                         }
-                        n => {
-                            this.read_state = ReadState::Header {
-                                buffer,
-                                offset: *offset + n,
-                            };
-                        }
+                        n => *offset += n,
                     }
                 }
                 ReadState::Body {
@@ -299,11 +298,7 @@ mod tests {
         fn property(f: Frame<()>) -> bool {
             futures::executor::block_on(async move {
                 let id = crate::connection::Id::random();
-                let mut io = Io::new(
-                    id,
-                    futures::io::Cursor::new(Vec::new()),
-                    f.buffer.len(),
-                );
+                let mut io = Io::new(id, futures::io::Cursor::new(Vec::new()), f.buffer.len());
                 if io.send(f.clone()).await.is_err() {
                     return false;
                 }

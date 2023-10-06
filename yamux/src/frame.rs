@@ -95,9 +95,9 @@ impl<A: header::private::Sealed> From<Frame<A>> for Frame<()> {
 
 impl Frame<()> {
     pub(crate) fn try_from_header_buffer(
-        buffer: [u8; HEADER_SIZE],
+        buffer: &[u8; HEADER_SIZE],
     ) -> Result<Either<Frame<()>, Frame<Data>>, FrameDecodeError> {
-        let header = header::decode(&buffer)?;
+        let header = header::decode(buffer)?;
 
         let either = match header.try_into_data() {
             Ok(data) => Either::Right(Frame::new(data)),
