@@ -221,7 +221,7 @@ impl fmt::Debug for ReadState {
                     "(ReadState::Body (header {}) (offset {}) (buffer-len {}))",
                     frame.header(),
                     offset,
-                    frame.header().len().val()
+                    frame.body_len()
                 )
             }
         }
