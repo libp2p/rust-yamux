@@ -15,7 +15,6 @@ use super::{
 use crate::connection::Id;
 use crate::frame::header::Data;
 use futures::{prelude::*, ready};
-use std::ops::AddAssign;
 use std::{
     fmt, io, mem,
     pin::Pin,
@@ -192,14 +191,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                         return Poll::Ready(Some(Ok(frame.into_generic_frame())));
                     }
 
-                    match ready!(
-                        Pin::new(&mut this.io).poll_read(cx, &mut frame.body_mut()[*offset..])
-                    )? {
+                    let buf = &mut frame.body_mut()[*offset..];
+                    match ready!(Pin::new(&mut this.io).poll_read(cx, buf))? {
                         0 => {
                             let e = FrameDecodeError::Io(io::ErrorKind::UnexpectedEof.into());
                             return Poll::Ready(Some(Err(e)));
                         }
-                        n => offset.add_assign(n),
+                        n => *offset += n,
                     }
                 }
             }
