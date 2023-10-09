@@ -722,7 +722,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                     shared.update_state(self.id, stream_id, State::RecvClosed);
                 }
                 shared.window = shared.window.saturating_sub(frame.body_len());
-                shared.buffer.push(frame.into_body());
+                shared.buffer.push(frame.into_body().into());
 
                 if matches!(self.config.window_update_mode, WindowUpdateMode::OnReceive) {
                     if let Some(credit) = shared.next_window_update() {
@@ -765,7 +765,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 return Action::Reset(Frame::new(header));
             }
             shared.window = shared.window.saturating_sub(frame.body_len());
-            shared.buffer.push(frame.into_body());
+            shared.buffer.push(frame.into_body().into());
             if let Some(w) = shared.reader.take() {
                 w.wake()
             }

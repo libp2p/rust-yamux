@@ -11,6 +11,7 @@
 pub mod header;
 mod io;
 
+use bytes::{Buf, Bytes, BytesMut};
 use futures::future::Either;
 use header::{Data, GoAway, Header, Ping, StreamId, WindowUpdate};
 use std::{convert::TryInto, fmt::Debug, marker::PhantomData, num::TryFromIntError};
@@ -25,13 +26,13 @@ use self::header::HEADER_SIZE;
 /// The header can be zerocopy parsed into a Header struct by calling header()/header_mut().
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Frame<T> {
-    buffer: Vec<u8>,
+    buffer: BytesMut,
     _marker: PhantomData<T>,
 }
 
 impl<T> Frame<T> {
     pub(crate) fn no_body(header: Header<T>) -> Self {
-        let mut buffer = vec![0; HEADER_SIZE];
+        let mut buffer = BytesMut::zeroed(HEADER_SIZE);
         header
             .write_to(&mut buffer)
             .expect("buffer is size of header");
@@ -43,21 +44,21 @@ impl<T> Frame<T> {
     }
 
     pub fn header(&self) -> &Header<T> {
-        Ref::<_, Header<T>>::new_from_prefix(self.buffer.as_slice())
+        Ref::<_, Header<T>>::new_from_prefix(self.buffer.as_ref())
             .expect("buffer always holds a valid header")
             .0
             .into_ref()
     }
 
     pub fn header_mut(&mut self) -> &mut Header<T> {
-        Ref::<_, Header<T>>::new_from_prefix(self.buffer.as_mut_slice())
+        Ref::<_, Header<T>>::new_from_prefix(self.buffer.as_mut())
             .expect("buffer always holds a valid header")
             .0
             .into_mut()
     }
 
     pub(crate) fn buffer(&self) -> &[u8] {
-        self.buffer.as_slice()
+        self.buffer.as_ref()
     }
 
     /// Introduce this frame to the right of a binary frame type.
@@ -146,7 +147,7 @@ impl Frame<Data> {
     pub fn new(header: Header<Data>) -> Self {
         let total_buffer_size = HEADER_SIZE + header.body_len();
 
-        let mut buffer = vec![0; total_buffer_size];
+        let mut buffer = BytesMut::zeroed(total_buffer_size);
         header
             .write_to_prefix(&mut buffer)
             .expect("buffer always fits the header");
@@ -179,9 +180,9 @@ impl Frame<Data> {
         self.body().len() as u32
     }
 
-    pub fn into_body(mut self) -> Vec<u8> {
-        // FIXME: Should we implement this more efficiently with `BytesMut`? I think that one would allow us to split of the body without allocating again ..
-        self.buffer.split_off(HEADER_SIZE)
+    pub fn into_body(mut self) -> Bytes {
+        self.buffer.advance(HEADER_SIZE);
+        self.buffer.freeze()
     }
 }
 
