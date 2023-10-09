@@ -145,7 +145,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                     ref mut buffer,
                 } => {
                     if *offset == header::HEADER_SIZE {
-                        let frame = Frame::try_from_header_buffer(buffer)?;
+                        let frame = Frame::try_from_header_buffer(buffer, this.max_body_len)?;
 
                         log::trace!("{}: read: {:?}", this.id, frame);
 
@@ -156,14 +156,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                                 return Poll::Ready(Some(Ok(other_frame)));
                             }
                         };
-
-                        let body_len = frame.body_len() as usize;
-
-                        if body_len > this.max_body_len {
-                            return Poll::Ready(Some(Err(FrameDecodeError::FrameTooLarge(
-                                body_len,
-                            ))));
-                        }
 
                         this.read_state = ReadState::Body { frame, offset: 0 };
                         continue;

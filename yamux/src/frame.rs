@@ -96,10 +96,14 @@ impl<A: header::private::Sealed> From<Frame<A>> for Frame<()> {
 impl Frame<()> {
     pub(crate) fn try_from_header_buffer(
         buffer: &[u8; HEADER_SIZE],
+        max_body_len: usize,
     ) -> Result<Either<Frame<()>, Frame<Data>>, FrameDecodeError> {
         let header = header::decode(buffer)?;
 
         let either = match header.try_into_data() {
+            Ok(data) if data.body_len() > max_body_len => {
+                return Err(FrameDecodeError::FrameTooLarge(data.body_len()));
+            }
             Ok(data) => Either::Right(Frame::new(data)),
             Err(other) => Either::Left(Frame::no_body(other)),
         };
