@@ -880,7 +880,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         if stream_id == CONNECTION_ID || self.streams.contains_key(&stream_id) {
             let mut hdr = Header::ping(frame.header().nonce());
             hdr.ack();
-            return Action::Ping(Frame::no_body(hdr));
+            return Action::Ping(Frame::new(hdr));
         }
         log::trace!(
             "{}/{}: ping for unknown stream, possibly dropped earlier: {:?}",

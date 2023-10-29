@@ -13,7 +13,7 @@ use super::{
     Frame,
 };
 use crate::connection::Id;
-use crate::frame::header::Data;
+use crate::frame::header::{Data, HEADER_SIZE};
 use futures::future::Either;
 use futures::{prelude::*, ready};
 use std::{
@@ -21,6 +21,7 @@ use std::{
     pin::Pin,
     task::{Context, Poll},
 };
+use std::io::{IoSlice};
 
 /// A [`Stream`] and writer of [`Frame`] values.
 #[derive(Debug)]
@@ -59,7 +60,7 @@ impl fmt::Debug for WriteState {
                     f,
                     "(WriteState::Writing (offset {}) (buffer-len {}))",
                     offset,
-                    frame.buffer().len()
+                    frame.len()
                 )
             }
         }
@@ -76,18 +77,22 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Sink<Frame<()>> for Io<T> {
             match &mut this.write_state {
                 WriteState::Init => return Poll::Ready(Ok(())),
                 WriteState::Writing { frame, offset } => {
-                    match ready!(Pin::new(&mut this.io).poll_write(cx, &frame.buffer()[*offset..]))
-                    {
-                        Err(e) => return Poll::Ready(Err(e)),
-                        Ok(n) => {
-                            if n == 0 {
-                                return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
-                            }
-                            *offset += n;
-                            if *offset == frame.buffer().len() {
-                                this.write_state = WriteState::Init;
-                            }
-                        }
+                    let io = Pin::new(&mut this.io);
+
+                    let n = if *offset < HEADER_SIZE {
+                        ready!(io.poll_write_vectored(cx, &[IoSlice::new(&header::encode(frame.header())[*offset..]), IoSlice::new(frame.body())]))?
+                    } else {
+                        let body_offset = *offset - HEADER_SIZE;
+                        ready!(io.poll_write_vectored(cx, &[IoSlice::new(&frame.body()[body_offset..])]))?
+                    };
+
+                    if n == 0 {
+                        return Poll::Ready(Err(io::ErrorKind::WriteZero.into()));
+                    }
+
+                    *offset += n;
+                    if *offset == frame.len() {
+                        this.write_state = WriteState::Init;
                     }
                 }
             }
@@ -184,7 +189,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
                             ReadState::Header { .. } => unreachable!("we matched above"),
                             ReadState::Body { frame, .. } => frame,
                         };
-                        return Poll::Ready(Some(Ok(frame.into_generic_frame())));
+                        return Poll::Ready(Some(Ok(frame.into())));
                     }
 
                     let buf = &mut frame.body_mut()[*offset..];
@@ -278,9 +283,9 @@ mod tests {
                 header.set_len(header.body_len() % 4096);
                 let mut frame = Frame::new(header);
                 rand::thread_rng().fill_bytes(frame.body_mut());
-                frame.into_generic_frame()
+                frame.into()
             } else {
-                Frame::no_body(header)
+                Frame::new(header)
             }
         }
     }
@@ -290,7 +295,7 @@ mod tests {
         fn property(f: Frame<()>) -> bool {
             futures::executor::block_on(async move {
                 let id = crate::connection::Id::random();
-                let mut io = Io::new(id, futures::io::Cursor::new(Vec::new()), f.buffer.len());
+                let mut io = Io::new(id, futures::io::Cursor::new(Vec::new()), f.len());
                 if io.send(f.clone()).await.is_err() {
                     return false;
                 }

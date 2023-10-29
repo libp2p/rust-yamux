@@ -367,7 +367,7 @@ impl AsyncWrite for Stream {
             let k = std::cmp::min(shared.credit as usize, buf.len());
             let k = std::cmp::min(k, self.config.split_send_size);
             shared.credit = shared.credit.saturating_sub(k as u32);
-            &buf[..k]
+            Vec::from(&buf[..k])
         };
         let n = body.len();
         let mut frame = Frame::data(self.id, body).expect("body <= u32::MAX").left();
