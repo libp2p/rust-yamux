@@ -293,10 +293,10 @@ struct Active<T> {
 }
 
 #[derive(Clone, Debug)]
-struct Rtt(Arc<Mutex<RttInner>>);
+pub struct Rtt(Arc<Mutex<RttInner>>);
 
 impl Rtt {
-    pub fn new() -> Self {
+    fn new() -> Self {
         Self(Arc::new(Mutex::new(RttInner {
             rtt: None,
             state: RttState::Initial,
