@@ -10,7 +10,8 @@ repository = "https://github.com/paritytech/yamux"
 edition = "2021"
 
 [dependencies]
-futures = { version = "0.3.12", default-features = false, features = ["std"] }
+futures = { version = "0.3.12", default-features = false, features = ["std", "executor"] }
+futures-timer = "3"
 log = "0.4.8"
 nohash-hasher = "0.2"
 parking_lot = "0.12"

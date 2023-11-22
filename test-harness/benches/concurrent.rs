@@ -8,9 +8,9 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
-use constrained_connection::{new_unconstrained_connection, samples, Endpoint};
+use constrained_connection::{new_unconstrained_connection, samples, Endpoint, new_constrained_connection};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use std::iter;
+use std::{iter, time::Duration};
 use std::sync::Arc;
 use test_harness::{dev_null_server, MessageSender, MessageSenderStrategy, Msg};
 use tokio::{runtime::Runtime, task};
@@ -29,26 +29,19 @@ impl AsRef<[u8]> for Bytes {
 }
 
 fn concurrent(c: &mut Criterion) {
-    let data = Bytes(Arc::new(vec![0x42; 4096]));
+    let _ = env_logger::try_init();
+
+    let data = Bytes(Arc::new(vec![0x42; 10*1024*1024*1024]));
     let networks = vec![
-        ("mobile", (|| samples::mobile_hsdpa().2) as fn() -> (_, _)),
-        (
-            "adsl2+",
-            (|| samples::residential_adsl2().2) as fn() -> (_, _),
-        ),
-        ("gbit-lan", (|| samples::gbit_lan().2) as fn() -> (_, _)),
-        (
-            "unconstrained",
-            new_unconstrained_connection as fn() -> (_, _),
-        ),
+        ("aws-east-west", (|| new_constrained_connection(10*1000*1000*1000, Duration::from_millis(60))) as fn() -> (_, _)),
     ];
 
     let mut group = c.benchmark_group("concurrent");
     group.sample_size(10);
 
     for (network_name, new_connection) in networks.into_iter() {
-        for nstreams in [1, 10, 100].iter() {
-            for nmessages in [1, 10, 100].iter() {
+        for nstreams in [1].iter() {
+            for nmessages in [1].iter() {
                 let data = data.clone();
                 let rt = Runtime::new().unwrap();
 

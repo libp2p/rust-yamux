@@ -11,7 +11,7 @@
 use crate::frame::header::ACK;
 use crate::{
     chunks::Chunks,
-    connection::{self, StreamCommand},
+    connection::{self, Rtt, StreamCommand},
     frame::{
         header::{Data, Header, StreamId, WindowUpdate},
         Frame,
@@ -26,6 +26,7 @@ use futures::{
 };
 use parking_lot::{Mutex, MutexGuard};
 use std::convert::TryInto;
+use std::time::Instant;
 use std::{
     fmt, io,
     pin::Pin,
@@ -118,6 +119,7 @@ impl Stream {
         config: Arc<Config>,
         credit: u32,
         sender: mpsc::Sender<StreamCommand>,
+        rtt: Rtt,
     ) -> Self {
         Self {
             id,
@@ -125,7 +127,7 @@ impl Stream {
             config: config.clone(),
             sender,
             flag: Flag::None,
-            shared: Arc::new(Mutex::new(Shared::new(DEFAULT_CREDIT, credit, config))),
+            shared: Arc::new(Mutex::new(Shared::new(DEFAULT_CREDIT, credit, config, rtt))),
         }
     }
 
@@ -135,6 +137,7 @@ impl Stream {
         config: Arc<Config>,
         window: u32,
         sender: mpsc::Sender<StreamCommand>,
+        rtt: Rtt,
     ) -> Self {
         Self {
             id,
@@ -142,7 +145,7 @@ impl Stream {
             config: config.clone(),
             sender,
             flag: Flag::None,
-            shared: Arc::new(Mutex::new(Shared::new(window, DEFAULT_CREDIT, config))),
+            shared: Arc::new(Mutex::new(Shared::new(window, DEFAULT_CREDIT, config, rtt))),
         }
     }
 
@@ -419,25 +422,32 @@ impl AsyncWrite for Stream {
 pub(crate) struct Shared {
     state: State,
     pub(crate) window: u32,
+    pub(crate) window_max: u32,
     pub(crate) credit: u32,
     pub(crate) buffer: Chunks,
     pub(crate) reader: Option<Waker>,
     pub(crate) writer: Option<Waker>,
+    pub(crate) last_window_update: Instant,
     config: Arc<Config>,
+    // TODO: Doesn't make sense to have this behind a mutex (shared) again.
+    rtt: Rtt,
 }
 
 impl Shared {
-    fn new(window: u32, credit: u32, config: Arc<Config>) -> Self {
+    fn new(window: u32, credit: u32, config: Arc<Config>, rtt: Rtt) -> Self {
         Shared {
             state: State::Open {
                 acknowledged: false,
             },
             window,
+            window_max: config.receive_window,
             credit,
             buffer: Chunks::new(),
             reader: None,
             writer: None,
+            last_window_update: Instant::now(),
             config,
+            rtt,
         }
     }
 
@@ -494,24 +504,30 @@ impl Shared {
             return None;
         }
 
-        let new_credit = {
-            debug_assert!(self.config.receive_window >= self.window);
-            let bytes_received = self.config.receive_window.saturating_sub(self.window);
-            let buffer_len: u32 = self.buffer.len().try_into().unwrap_or(std::u32::MAX);
+        debug_assert!(self.window_max >= self.window);
+        let bytes_received = self.window_max.saturating_sub(self.window);
+        let buffer_len: u32 = self.buffer.len().try_into().unwrap_or(std::u32::MAX);
+        let mut new_credit = bytes_received.saturating_sub(buffer_len);
 
-            bytes_received.saturating_sub(buffer_len)
-        };
-
-        // Send WindowUpdate message when half or more of the configured receive
-        // window can be granted as additional credit to the sender.
-        //
-        // See https://github.com/paritytech/yamux/issues/100 for a detailed
-        // discussion.
-        if new_credit >= self.config.receive_window / 2 {
-            Some(new_credit)
-        } else {
-            None
+        if new_credit < self.window_max / 2 {
+            return None;
         }
+
+        if let Some(rtt) = self.rtt.rtt() {
+            if self.last_window_update.elapsed() < rtt * 2 {
+                // TODO: Bound by stream limit and connection limit.
+                // E.g. take into account that connection_limit - (max_streams * 256KB) - what_is_already_taken
+                self.window_max = self.window_max.saturating_mul(2);
+                log::debug!("new window_max: {}", self.window_max);
+
+                let bytes_received = self.window_max.saturating_sub(self.window);
+                let buffer_len: u32 = self.buffer.len().try_into().unwrap_or(std::u32::MAX);
+                new_credit = bytes_received.saturating_sub(buffer_len);
+            }
+        }
+
+        self.last_window_update = Instant::now();
+        return Some(new_credit);
     }
 
     /// Whether we are still waiting for the remote to acknowledge this stream.

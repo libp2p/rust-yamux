@@ -32,6 +32,7 @@ use nohash_hasher::IntMap;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::task::{Context, Waker};
+use std::time::{Duration, Instant};
 use std::{fmt, sync::Arc, task::Poll};
 
 pub use stream::{Packet, State, Stream};
@@ -287,6 +288,80 @@ struct Active<T> {
 
     pending_frames: VecDeque<Frame<()>>,
     new_outbound_stream_waker: Option<Waker>,
+
+    rtt: Rtt,
+}
+
+#[derive(Clone, Debug)]
+struct Rtt(Arc<Mutex<RttInner>>);
+
+impl Rtt {
+    pub fn new() -> Self {
+        Self(Arc::new(Mutex::new(RttInner {
+            rtt: None,
+            state: RttState::Initial,
+        })))
+    }
+
+    fn next_ping(&mut self) -> Option<Frame<Ping>> {
+        let state = &mut self.0.lock().state;
+        match state {
+            RttState::Initial => {}
+            RttState::AwaitingPong { .. } => return None,
+            RttState::Waiting { next } => {
+                // TODO: Might be expensive in the hot path. Maybe don't put at the beginning of the overall poll?
+                if *next > Instant::now() {
+                    return None;
+                }
+            }
+        }
+
+        let nonce = 42;
+
+        *state = RttState::AwaitingPong {
+            sent_at: Instant::now(),
+            nonce,
+        };
+        // TODO: randomize nonce.
+        Some(Frame::ping(nonce))
+    }
+
+    fn received_pong(&mut self, nonce: u32) {
+        let inner = &mut self.0.lock();
+        match inner.state {
+            RttState::Initial => todo!(),
+            RttState::AwaitingPong { sent_at, nonce: n } => {
+                if nonce != n {
+                    todo!()
+                }
+
+                inner.rtt = Some(sent_at.elapsed());
+                println!("{}", inner.rtt.as_ref().unwrap().as_secs_f64());
+                // TODO
+                inner.state = RttState::Waiting {
+                    next: Instant::now() + Duration::from_secs(10),
+                };
+            }
+            RttState::Waiting { next } => todo!(),
+        }
+    }
+
+    fn rtt(&self) -> Option<Duration> {
+        self.0.lock().rtt
+    }
+}
+
+#[derive(Debug)]
+struct RttInner {
+    state: RttState,
+    rtt: Option<Duration>,
+}
+
+#[derive(Debug)]
+enum RttState {
+    Initial,
+    AwaitingPong { sent_at: Instant, nonce: u32 },
+    Waiting { next: Instant },
 }
 
 /// `Stream` to `Connection` commands.
@@ -356,6 +431,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             },
             pending_frames: VecDeque::default(),
             new_outbound_stream_waker: None,
+            rtt: Rtt::new(),
         }
     }
 
@@ -376,6 +452,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Result<Stream>> {
         loop {
             if self.socket.poll_ready_unpin(cx).is_ready() {
+                if let Some(frame) = self.rtt.next_ping() {
+                    log::debug!("sending ping");
+                    self.socket.start_send_unpin(frame.into())?;
+                    continue;
+                }
                 if let Some(frame) = self.pending_frames.pop_front() {
                     self.socket.start_send_unpin(frame)?;
                     continue;
@@ -537,7 +618,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     fn on_frame(&mut self, frame: Frame<()>) -> Result<Option<Stream>> {
         log::trace!("{}: received: {}", self.id, frame.header());
 
-        if frame.header().flags().contains(header::ACK) {
+        // TODO: Clean this change up.
+        if frame.header().flags().contains(header::ACK)
+            && (frame.header().tag() == Tag::Data || frame.header().tag() == Tag::WindowUpdate)
+        {
             let id = frame.header().stream_id();
             if let Some(stream) = self.streams.get(&id) {
                 stream
@@ -647,12 +731,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             if is_finish {
                 shared.update_state(self.id, stream_id, State::RecvClosed);
             }
-            let max_buffer_size = self.config.max_buffer_size;
+            // TODO
+            let max_buffer_size = shared.window_max as usize;
             if shared.buffer.len() >= max_buffer_size {
-                log::error!(
+                panic!(
                     "{}/{}: buffer of stream grows beyond limit",
-                    self.id,
-                    stream_id
+                    self.id, stream_id
                 );
                 let mut header = Header::data(stream_id, 0);
                 header.rst();
@@ -761,7 +845,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     fn on_ping(&mut self, frame: &Frame<Ping>) -> Action {
         let stream_id = frame.header().stream_id();
         if frame.header().flags().contains(header::ACK) {
-            // pong
+            self.rtt.received_pong(frame.nonce());
             return Action::None;
         }
         if stream_id == CONNECTION_ID || self.streams.contains_key(&stream_id) {
@@ -769,7 +853,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             hdr.ack();
             return Action::Ping(Frame::new(hdr));
         }
-        log::trace!(
+        log::debug!(
             "{}/{}: ping for unknown stream, possibly dropped earlier: {:?}",
             self.id,
             stream_id,
@@ -794,7 +878,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             waker.wake();
         }
 
-        Stream::new_inbound(id, self.id, config, credit, sender)
+        Stream::new_inbound(id, self.id, config, credit, sender, self.rtt.clone())
     }
 
     fn make_new_outbound_stream(&mut self, id: StreamId, window: u32) -> Stream {
@@ -806,7 +890,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             waker.wake();
         }
 
-        Stream::new_outbound(id, self.id, config, window, sender)
+        Stream::new_outbound(id, self.id, config, window, sender, self.rtt.clone())
     }
 
     fn next_stream_id(&mut self) -> Result<StreamId> {

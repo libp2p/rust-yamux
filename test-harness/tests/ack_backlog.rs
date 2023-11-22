@@ -197,8 +197,8 @@ where
                         this.worker_streams.push(ping_pong(stream.unwrap()).boxed());
                         continue;
                     }
-                    (Poll::Ready(_), Some(_)) => {
-                        panic!("should not be able to open stream if server hasn't acknowledged existing streams")
+                    (Poll::Ready(e), Some(_)) => {
+                        panic!("should not be able to open stream if server hasn't acknowledged existing streams: {:?}", e)
                     }
                     (Poll::Pending, None) => {}
                 }
