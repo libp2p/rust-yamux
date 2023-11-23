@@ -73,20 +73,13 @@ pub enum WindowUpdateMode {
     /// data in its buffer which may reach its limit (see `set_max_buffer_size`).
     /// In this mode, window updates merely prevent head of line blocking but do not
     /// effectively exercise back pressure on senders.
+    #[deprecated(note = "Use `WindowUpdateMode::OnRead` instead.")]
     OnReceive,
 
     /// Send window updates only when data is read on the receiving end.
     ///
     /// This ensures that senders do not overwhelm receivers and keeps buffer usage
-    /// low. However, depending on the protocol, there is a risk of deadlock, namely
-    /// if both endpoints want to send data larger than the receivers window and they
-    /// do not read before finishing their writes. Use this mode only if you are sure
-    /// that this will never happen, i.e. if
-    ///
-    /// - Endpoints *A* and *B* never write at the same time, *or*
-    /// - Endpoints *A* and *B* write at most *n* frames concurrently such that the sum
-    ///   of the frame lengths is less or equal to the available credit of *A* and *B*
-    ///   respectively.
+    /// low.
     OnRead,
 }
 
