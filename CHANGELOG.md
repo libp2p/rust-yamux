@@ -3,7 +3,7 @@
 - Deprecate `WindowUpdateMode::OnReceive`.
   It does not enforce flow-control, i.e. breaks backpressure.
   Use `WindowUpdateMode::OnRead` instead.
-  See [PR #XXX](https://github.com/libp2p/rust-yamux/pull/XXX).
+  See [PR #177](https://github.com/libp2p/rust-yamux/pull/177).
 
 # 0.12.0
 
