@@ -16,7 +16,7 @@ use crate::{
         header::{Data, Header, StreamId, WindowUpdate},
         Frame,
     },
-    Config, WindowUpdateMode, DEFAULT_CREDIT,
+    Config, DEFAULT_CREDIT,
 };
 use futures::{
     channel::mpsc,
@@ -200,12 +200,6 @@ impl Stream {
     /// Send new credit to the sending side via a window update message if
     /// permitted.
     fn send_window_update(&mut self, cx: &mut Context) -> Poll<io::Result<()>> {
-        // When using [`WindowUpdateMode::OnReceive`] window update messages are
-        // send early on data receival (see [`crate::Connection::on_frame`]).
-        if matches!(self.config.window_update_mode, WindowUpdateMode::OnReceive) {
-            return Poll::Ready(Ok(()));
-        }
-
         let mut shared = self.shared.lock();
 
         if let Some(credit) = shared.next_window_update() {
@@ -487,6 +481,7 @@ impl Shared {
         current // Return the previous stream state for informational purposes.
     }
 
+    // TODO: This does not need to live in shared any longer.
     /// Calculate the number of additional window bytes the receiving side
     /// should grant the sending side via a window update message.
     ///
@@ -499,19 +494,12 @@ impl Shared {
             return None;
         }
 
-        let new_credit = match self.config.window_update_mode {
-            WindowUpdateMode::OnReceive => {
-                debug_assert!(self.config.receive_window >= self.window);
+        let new_credit = {
+            debug_assert!(self.config.receive_window >= self.window);
+            let bytes_received = self.config.receive_window.saturating_sub(self.window);
+            let buffer_len: u32 = self.buffer.len().try_into().unwrap_or(std::u32::MAX);
 
-                self.config.receive_window.saturating_sub(self.window)
-            }
-            WindowUpdateMode::OnRead => {
-                debug_assert!(self.config.receive_window >= self.window);
-                let bytes_received = self.config.receive_window.saturating_sub(self.window);
-                let buffer_len: u32 = self.buffer.len().try_into().unwrap_or(std::u32::MAX);
-
-                bytes_received.saturating_sub(buffer_len)
-            }
+            bytes_received.saturating_sub(buffer_len)
         };
 
         // Send WindowUpdate message when half or more of the configured receive

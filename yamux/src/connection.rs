@@ -21,7 +21,7 @@ use crate::{
     error::ConnectionError,
     frame::header::{self, Data, GoAway, Header, Ping, StreamId, Tag, WindowUpdate, CONNECTION_ID},
     frame::{self, Frame},
-    Config, WindowUpdateMode, DEFAULT_CREDIT,
+    Config, DEFAULT_CREDIT,
 };
 use crate::{Result, MAX_ACK_BACKLOG};
 use cleanup::Cleanup;
@@ -304,9 +304,7 @@ enum Action {
     /// Nothing to be done.
     None,
     /// A new stream has been opened by the remote.
-    New(Stream, Option<Frame<WindowUpdate>>),
-    /// A window update should be sent to the remote.
-    Update(Frame<WindowUpdate>),
+    New(Stream),
     /// A ping should be answered.
     Ping(Frame<Ping>),
     /// A stream should be reset.
@@ -504,23 +502,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 // The remote may be out of credit though and blocked on
                 // writing more data. We may need to reset the stream.
                 State::SendClosed => {
-                    if self.config.window_update_mode == WindowUpdateMode::OnRead
-                        && shared.window == 0
-                    {
-                        // The remote may be waiting for a window update
-                        // which we will never send, so reset the stream now.
-                        let mut header = Header::data(stream_id, 0);
-                        header.rst();
-                        Some(Frame::new(header))
-                    } else {
-                        // The remote has either still credit or will be given more
-                        // (due to an enqueued window update or because the update
-                        // mode is `OnReceive`) or we already have inbound frames in
-                        // the socket buffer which will be processed later. In any
-                        // case we will reply with an RST in `Connection::on_data`
-                        // because the stream will no longer be known.
-                        None
-                    }
+                    // The remote has either still credit or will be given more
+                    // (due to an enqueued window update or because the update
+                    // mode is `OnReceive`) or we already have inbound frames in
+                    // the socket buffer which will be processed later. In any
+                    // case we will reply with an RST in `Connection::on_data`
+                    // because the stream will no longer be known.
+                    None
                 }
                 // The stream was properly closed. We already have sent our FIN frame. The
                 // remote end has already done so in the past.
@@ -569,17 +557,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         };
         match action {
             Action::None => {}
-            Action::New(stream, update) => {
+            Action::New(stream) => {
                 log::trace!("{}: new inbound {} of {}", self.id, stream, self);
-                if let Some(f) = update {
-                    log::trace!("{}/{}: sending update", self.id, f.header().stream_id());
-                    self.pending_frames.push_back(f.into());
-                }
                 return Ok(Some(stream));
-            }
-            Action::Update(f) => {
-                log::trace!("{}: sending update: {:?}", self.id, f.header());
-                self.pending_frames.push_back(f.into());
             }
             Action::Ping(f) => {
                 log::trace!("{}/{}: pong", self.id, f.header().stream_id());
@@ -641,7 +621,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 return Action::Terminate(Frame::internal_error());
             }
             let mut stream = self.make_new_inbound_stream(stream_id, DEFAULT_CREDIT);
-            let mut window_update = None;
             {
                 let mut shared = stream.shared();
                 if is_finish {
@@ -649,21 +628,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 }
                 shared.window = shared.window.saturating_sub(frame.body_len());
                 shared.buffer.push(frame.into_body());
-
-                if matches!(self.config.window_update_mode, WindowUpdateMode::OnReceive) {
-                    if let Some(credit) = shared.next_window_update() {
-                        shared.window += credit;
-                        let mut frame = Frame::window_update(stream_id, credit);
-                        frame.header_mut().ack();
-                        window_update = Some(frame)
-                    }
-                }
             }
-            if window_update.is_none() {
-                stream.set_flag(stream::Flag::Ack)
-            }
+            stream.set_flag(stream::Flag::Ack);
             self.streams.insert(stream_id, stream.clone_shared());
-            return Action::New(stream, window_update);
+            return Action::New(stream);
         }
 
         if let Some(s) = self.streams.get_mut(&stream_id) {
@@ -694,13 +662,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             shared.buffer.push(frame.into_body());
             if let Some(w) = shared.reader.take() {
                 w.wake()
-            }
-            if matches!(self.config.window_update_mode, WindowUpdateMode::OnReceive) {
-                if let Some(credit) = shared.next_window_update() {
-                    shared.window += credit;
-                    let frame = Frame::window_update(stream_id, credit);
-                    return Action::Update(frame);
-                }
             }
         } else {
             log::trace!(
@@ -766,7 +727,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                     .update_state(self.id, stream_id, State::RecvClosed);
             }
             self.streams.insert(stream_id, stream.clone_shared());
-            return Action::New(stream, None);
+            return Action::New(stream);
         }
 
         if let Some(s) = self.streams.get_mut(&stream_id) {
