@@ -76,7 +76,7 @@ const DEFAULT_SPLIT_SEND_SIZE: usize = 16 * 1024;
 #[derive(Debug, Clone)]
 pub struct Config {
     // TODO: Rename to max_stream_receive_window
-    receive_window: usize,
+    receive_window: Option<usize>,
     // TODO: Rename to max_connection_receive_window
     connection_window: usize,
     max_buffer_size: usize,
@@ -88,7 +88,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            receive_window: 16 * 1024 * 1024,
+            // TODO: Add rational: given that we have a connection window, ...
+            receive_window: None,
             // TODO: reevaluate default.
             // TODO: Add setter.
             connection_window: 1 * 1024 * 1024 * 1024,
@@ -107,12 +108,12 @@ impl Config {
     /// # Panics
     ///
     /// If the given receive window is < 256 KiB.
-    pub fn set_receive_window(&mut self, n: usize) -> &mut Self {
+    pub fn set_receive_window(&mut self, n: Option<usize>) -> &mut Self {
         self.receive_window = n;
         self.check();
         self
     }
-    
+
     pub fn set_connection_window(&mut self, n: usize) -> &mut Self {
         self.connection_window = n;
         self.check();
@@ -149,8 +150,9 @@ impl Config {
         self
     }
 
+    // TODO: Consider doing the check on creation, not on each builder method call.
     fn check(&self) {
-        assert!(self.receive_window >= DEFAULT_CREDIT);
+        assert!(self.receive_window.unwrap_or(usize::MAX) >= DEFAULT_CREDIT);
         assert!(self.connection_window >= self.max_num_streams * DEFAULT_CREDIT);
     }
 }

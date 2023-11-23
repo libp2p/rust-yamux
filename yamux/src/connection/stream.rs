@@ -25,7 +25,6 @@ use futures::{
     ready, SinkExt,
 };
 use parking_lot::{Mutex, MutexGuard};
-use std::convert::TryInto;
 use std::time::Instant;
 use std::{
     fmt, io,
@@ -546,6 +545,7 @@ impl Shared {
             self.window_max,
             self.window
         );
+
         let bytes_received = self.window_max.saturating_sub(self.window);
         let buffer_len = self.buffer.len();
         let mut new_credit = bytes_received.saturating_sub(buffer_len);
@@ -571,7 +571,7 @@ impl Shared {
                 self.window_max = std::cmp::min(
                     std::cmp::min(
                         self.window_max.saturating_mul(2),
-                        self.config.receive_window,
+                        self.config.receive_window.unwrap_or(usize::MAX),
                     ),
                     self.window_max
                         + ((self.config.connection_window
