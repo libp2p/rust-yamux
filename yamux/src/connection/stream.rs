@@ -117,9 +117,10 @@ impl Stream {
         id: StreamId,
         conn: connection::Id,
         config: Arc<Config>,
-        credit: u32,
+        credit: usize,
         sender: mpsc::Sender<StreamCommand>,
         rtt: Rtt,
+        accumulated_max_stream_windows: Arc<Mutex<usize>>,
     ) -> Self {
         Self {
             id,
@@ -127,7 +128,13 @@ impl Stream {
             config: config.clone(),
             sender,
             flag: Flag::None,
-            shared: Arc::new(Mutex::new(Shared::new(DEFAULT_CREDIT, credit, config, rtt))),
+            shared: Arc::new(Mutex::new(Shared::new(
+                DEFAULT_CREDIT,
+                credit,
+                config,
+                rtt,
+                accumulated_max_stream_windows,
+            ))),
         }
     }
 
@@ -135,9 +142,9 @@ impl Stream {
         id: StreamId,
         conn: connection::Id,
         config: Arc<Config>,
-        window: u32,
         sender: mpsc::Sender<StreamCommand>,
         rtt: Rtt,
+        accumulated_max_stream_windows: Arc<Mutex<usize>>,
     ) -> Self {
         Self {
             id,
@@ -145,7 +152,13 @@ impl Stream {
             config: config.clone(),
             sender,
             flag: Flag::None,
-            shared: Arc::new(Mutex::new(Shared::new(window, DEFAULT_CREDIT, config, rtt))),
+            shared: Arc::new(Mutex::new(Shared::new(
+                DEFAULT_CREDIT,
+                DEFAULT_CREDIT,
+                config,
+                rtt,
+                accumulated_max_stream_windows,
+            ))),
         }
     }
 
@@ -214,7 +227,9 @@ impl Stream {
             shared.window += credit;
             drop(shared);
 
-            let mut frame = Frame::window_update(self.id, credit).right();
+            // TODO: Handle the case where credit is larger than u32::MAX. Use the smaller and don't
+            // bump shared.window with the higher.
+            let mut frame = Frame::window_update(self.id, credit as u32).right();
             self.add_flag(frame.header_mut());
             let cmd = StreamCommand::SendFrame(frame);
             self.sender
@@ -363,7 +378,7 @@ impl AsyncWrite for Stream {
             }
             let k = std::cmp::min(shared.credit as usize, buf.len());
             let k = std::cmp::min(k, self.config.split_send_size);
-            shared.credit = shared.credit.saturating_sub(k as u32);
+            shared.credit = shared.credit.saturating_sub(k);
             Vec::from(&buf[..k])
         };
         let n = body.len();
@@ -421,9 +436,11 @@ impl AsyncWrite for Stream {
 #[derive(Debug)]
 pub(crate) struct Shared {
     state: State,
-    pub(crate) window: u32,
-    pub(crate) window_max: u32,
-    pub(crate) credit: u32,
+    // TODO: Rename this to inbound_window or receive_window?
+    pub(crate) window: usize,
+    pub(crate) window_max: usize,
+    // TODO: Rename this to outbound_window or better event send_window?
+    pub(crate) credit: usize,
     pub(crate) buffer: Chunks,
     pub(crate) reader: Option<Waker>,
     pub(crate) writer: Option<Waker>,
@@ -431,16 +448,34 @@ pub(crate) struct Shared {
     config: Arc<Config>,
     // TODO: Doesn't make sense to have this behind a mutex (shared) again.
     rtt: Rtt,
+    // TODO: Doesn't make sense to have this behind a mutex (shared) again.
+    accumulated_max_stream_windows: Arc<Mutex<usize>>,
+}
+
+impl Drop for Shared {
+    fn drop(&mut self) {
+        *self.accumulated_max_stream_windows.lock() -= self.window_max - DEFAULT_CREDIT;
+    }
 }
 
 impl Shared {
-    fn new(window: u32, credit: u32, config: Arc<Config>, rtt: Rtt) -> Self {
+    fn new(
+        window: usize,
+        credit: usize,
+        config: Arc<Config>,
+        rtt: Rtt,
+        accumulated_max_stream_windows: Arc<Mutex<usize>>,
+    ) -> Self {
+        let window_max = DEFAULT_CREDIT;
+        // TODO: We don't add it here. default credit is implied
+        // *accumulated_max_stream_windows.lock() = window_max;
+
         Shared {
             state: State::Open {
                 acknowledged: false,
             },
             window,
-            window_max: config.receive_window,
+            window_max,
             credit,
             buffer: Chunks::new(),
             reader: None,
@@ -448,6 +483,7 @@ impl Shared {
             last_window_update: Instant::now(),
             config,
             rtt,
+            accumulated_max_stream_windows,
         }
     }
 
@@ -499,14 +535,19 @@ impl Shared {
     ///
     /// Note: Once a caller successfully sent a window update message, the
     /// locally tracked window size needs to be updated manually by the caller.
-    pub(crate) fn next_window_update(&mut self) -> Option<u32> {
+    pub(crate) fn next_window_update(&mut self) -> Option<usize> {
         if !self.state.can_read() {
             return None;
         }
 
-        debug_assert!(self.window_max >= self.window);
+        debug_assert!(
+            self.window_max >= self.window,
+            "window_max {} window {}",
+            self.window_max,
+            self.window
+        );
         let bytes_received = self.window_max.saturating_sub(self.window);
-        let buffer_len: u32 = self.buffer.len().try_into().unwrap_or(std::u32::MAX);
+        let buffer_len = self.buffer.len();
         let mut new_credit = bytes_received.saturating_sub(buffer_len);
 
         if new_credit < self.window_max / 2 {
@@ -515,13 +556,30 @@ impl Shared {
 
         if let Some(rtt) = self.rtt.rtt() {
             if self.last_window_update.elapsed() < rtt * 2 {
-                // TODO: Bound by stream limit and connection limit.
-                // E.g. take into account that connection_limit - (max_streams * 256KB) - what_is_already_taken
-                self.window_max = self.window_max.saturating_mul(2);
-                log::debug!("new window_max: {}", self.window_max);
+                let previous_window_max = self.window_max;
+
+                let mut accumulated_max_stream_windows = self.accumulated_max_stream_windows.lock();
+
+                self.window_max = std::cmp::min(
+                    std::cmp::min(
+                        self.window_max.saturating_mul(2),
+                        self.config.receive_window,
+                    ),
+                    self.window_max
+                        + ((self.config.connection_window
+                            - self.config.max_num_streams * DEFAULT_CREDIT)
+                            - *accumulated_max_stream_windows),
+                );
+
+                *accumulated_max_stream_windows += self.window_max - previous_window_max;
+                log::debug!(
+                    "old/new window_max: {}/{}",
+                    previous_window_max,
+                    self.window_max
+                );
 
                 let bytes_received = self.window_max.saturating_sub(self.window);
-                let buffer_len: u32 = self.buffer.len().try_into().unwrap_or(std::u32::MAX);
+                let buffer_len = self.buffer.len();
                 new_credit = bytes_received.saturating_sub(buffer_len);
             }
         }

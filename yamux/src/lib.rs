@@ -38,7 +38,7 @@ pub use crate::frame::{
     FrameDecodeError,
 };
 
-pub const DEFAULT_CREDIT: u32 = 256 * 1024; // as per yamux specification
+pub const DEFAULT_CREDIT: usize = 256 * 1024; // as per yamux specification
 
 pub type Result<T> = std::result::Result<T, ConnectionError>;
 
@@ -75,7 +75,10 @@ const DEFAULT_SPLIT_SEND_SIZE: usize = 16 * 1024;
 /// - split send size = 16 KiB
 #[derive(Debug, Clone)]
 pub struct Config {
-    receive_window: u32,
+    // TODO: Rename to max_stream_receive_window
+    receive_window: usize,
+    // TODO: Rename to max_connection_receive_window
+    connection_window: usize,
     max_buffer_size: usize,
     max_num_streams: usize,
     read_after_close: bool,
@@ -86,9 +89,12 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             receive_window: 16 * 1024 * 1024,
-            max_buffer_size: 16*1024*1024,
+            // TODO: reevaluate default.
+            // TODO: Add setter.
+            connection_window: 1 * 1024 * 1024 * 1024,
+            max_buffer_size: 16 * 1024 * 1024,
             // TODO
-            max_num_streams: 8192,
+            max_num_streams: 512,
             read_after_close: true,
             split_send_size: DEFAULT_SPLIT_SEND_SIZE,
         }
@@ -101,21 +107,29 @@ impl Config {
     /// # Panics
     ///
     /// If the given receive window is < 256 KiB.
-    pub fn set_receive_window(&mut self, n: u32) -> &mut Self {
-        assert!(n >= DEFAULT_CREDIT);
+    pub fn set_receive_window(&mut self, n: usize) -> &mut Self {
         self.receive_window = n;
+        self.check();
+        self
+    }
+    
+    pub fn set_connection_window(&mut self, n: usize) -> &mut Self {
+        self.connection_window = n;
+        self.check();
         self
     }
 
     /// Set the max. buffer size per stream.
     pub fn set_max_buffer_size(&mut self, n: usize) -> &mut Self {
         self.max_buffer_size = n;
+        self.check();
         self
     }
 
     /// Set the max. number of streams.
     pub fn set_max_num_streams(&mut self, n: usize) -> &mut Self {
         self.max_num_streams = n;
+        self.check();
         self
     }
 
@@ -123,6 +137,7 @@ impl Config {
     /// the connection has been closed.
     pub fn set_read_after_close(&mut self, b: bool) -> &mut Self {
         self.read_after_close = b;
+        self.check();
         self
     }
 
@@ -130,7 +145,13 @@ impl Config {
     /// than the configured max. will be split.
     pub fn set_split_send_size(&mut self, n: usize) -> &mut Self {
         self.split_send_size = n;
+        self.check();
         self
+    }
+
+    fn check(&self) {
+        assert!(self.receive_window >= DEFAULT_CREDIT);
+        assert!(self.connection_window >= self.max_num_streams * DEFAULT_CREDIT);
     }
 }
 

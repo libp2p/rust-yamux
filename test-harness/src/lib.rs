@@ -449,7 +449,7 @@ impl Arbitrary for TestConfig {
     fn arbitrary(g: &mut Gen) -> Self {
         let mut c = Config::default();
         c.set_read_after_close(Arbitrary::arbitrary(g));
-        c.set_receive_window(256 * 1024 + u32::arbitrary(g) % (768 * 1024));
+        c.set_receive_window(256 * 1024 + usize::arbitrary(g) % (768 * 1024));
         TestConfig(c)
     }
 }

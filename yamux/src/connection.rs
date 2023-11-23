@@ -290,6 +290,8 @@ struct Active<T> {
     new_outbound_stream_waker: Option<Waker>,
 
     rtt: Rtt,
+
+    accumulated_max_stream_windows: Arc<Mutex<usize>>,
 }
 
 #[derive(Clone, Debug)]
@@ -432,6 +434,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             pending_frames: VecDeque::default(),
             new_outbound_stream_waker: None,
             rtt: Rtt::new(),
+            accumulated_max_stream_windows: Default::default(),
         }
     }
 
@@ -520,20 +523,24 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         log::trace!("{}: creating new outbound stream", self.id);
 
         let id = self.next_stream_id()?;
-        let extra_credit = self.config.receive_window - DEFAULT_CREDIT;
+        // TODO: I don't think we want this with a dynamic receive window!
+        //
+        // let extra_credit = self.config.receive_window - DEFAULT_CREDIT;
+        //
+        // if extra_credit > 0 {
+        //     let mut frame = Frame::window_update(id, extra_credit);
+        //     frame.header_mut().syn();
+        //     log::trace!("{}/{}: sending initial {}", self.id, id, frame.header());
+        //     self.pending_frames.push_back(frame.into());
+        // }
 
-        if extra_credit > 0 {
-            let mut frame = Frame::window_update(id, extra_credit);
-            frame.header_mut().syn();
-            log::trace!("{}/{}: sending initial {}", self.id, id, frame.header());
-            self.pending_frames.push_back(frame.into());
-        }
+        let mut stream = self.make_new_outbound_stream(id);
 
-        let mut stream = self.make_new_outbound_stream(id, self.config.receive_window);
-
-        if extra_credit == 0 {
-            stream.set_flag(stream::Flag::Syn)
-        }
+        // TODO: I don't think we want this with a dynamic receive window!
+        // if extra_credit == 0 {
+        //     stream.set_flag(stream::Flag::Syn)
+        // }
+        stream.set_flag(stream::Flag::Syn);
 
         log::debug!("{}: new outbound {} of {}", self.id, stream, self);
         self.streams.insert(id, stream.clone_shared());
@@ -734,9 +741,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             // TODO
             let max_buffer_size = shared.window_max as usize;
             if shared.buffer.len() >= max_buffer_size {
-                panic!(
+                log::error!(
                     "{}/{}: buffer of stream grows beyond limit",
-                    self.id, stream_id
+                    self.id,
+                    stream_id
                 );
                 let mut header = Header::data(stream_id, 0);
                 header.rst();
@@ -801,7 +809,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 return Action::Terminate(Frame::protocol_error());
             }
 
-            let credit = frame.header().credit() + DEFAULT_CREDIT;
+            // TODO: Is the cast safe?
+            let credit = frame.header().credit() as usize + DEFAULT_CREDIT;
             let mut stream = self.make_new_inbound_stream(stream_id, credit);
             stream.set_flag(stream::Flag::Ack);
 
@@ -816,7 +825,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
         if let Some(s) = self.streams.get_mut(&stream_id) {
             let mut shared = s.lock();
-            shared.credit += frame.header().credit();
+            // TODO: Is the cast safe?
+            shared.credit += frame.header().credit() as usize;
             if is_finish {
                 shared.update_state(self.id, stream_id, State::RecvClosed);
             }
@@ -869,7 +879,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         Action::None
     }
 
-    fn make_new_inbound_stream(&mut self, id: StreamId, credit: u32) -> Stream {
+    fn make_new_inbound_stream(&mut self, id: StreamId, credit: usize) -> Stream {
         let config = self.config.clone();
 
         let (sender, receiver) = mpsc::channel(10); // 10 is an arbitrary number.
@@ -878,10 +888,18 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             waker.wake();
         }
 
-        Stream::new_inbound(id, self.id, config, credit, sender, self.rtt.clone())
+        Stream::new_inbound(
+            id,
+            self.id,
+            config,
+            credit,
+            sender,
+            self.rtt.clone(),
+            self.accumulated_max_stream_windows.clone(),
+        )
     }
 
-    fn make_new_outbound_stream(&mut self, id: StreamId, window: u32) -> Stream {
+    fn make_new_outbound_stream(&mut self, id: StreamId) -> Stream {
         let config = self.config.clone();
 
         let (sender, receiver) = mpsc::channel(10); // 10 is an arbitrary number.
@@ -890,7 +908,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             waker.wake();
         }
 
-        Stream::new_outbound(id, self.id, config, window, sender, self.rtt.clone())
+        Stream::new_outbound(
+            id,
+            self.id,
+            config,
+            sender,
+            self.rtt.clone(),
+            self.accumulated_max_stream_windows.clone(),
+        )
     }
 
     fn next_stream_id(&mut self) -> Result<StreamId> {

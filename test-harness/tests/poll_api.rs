@@ -12,7 +12,7 @@ use tokio::net::TcpStream;
 use tokio::runtime::Runtime;
 use tokio::task;
 use tokio_util::compat::TokioAsyncReadCompatExt;
-use yamux::{Config, Connection, ConnectionError, Mode};
+use yamux::{Config, Connection, ConnectionError, Mode, DEFAULT_CREDIT};
 
 #[test]
 fn prop_config_send_recv_multi() {
@@ -61,6 +61,12 @@ fn concurrent_streams() {
 
         let mut cfg = Config::default();
         cfg.set_split_send_size(PAYLOAD_SIZE); // Use a large frame size to speed up the test.
+
+        println!("here");
+
+        // TODO: Rethink these.
+        cfg.set_connection_window(n_streams * DEFAULT_CREDIT);
+        cfg.set_max_num_streams(n_streams);
 
         Runtime::new().expect("new runtime").block_on(async move {
             let (server, client) = connected_peers(cfg.clone(), cfg, tcp_buffer_sizes)
