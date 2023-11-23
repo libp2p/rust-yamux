@@ -338,7 +338,10 @@ impl Rtt {
                 }
 
                 inner.rtt = Some(sent_at.elapsed());
-                println!("{}", inner.rtt.as_ref().unwrap().as_secs_f64());
+                log::debug!(
+                    "estimated round-trip-time: {}s",
+                    inner.rtt.as_ref().unwrap().as_secs_f64()
+                );
                 // TODO
                 inner.state = RttState::Waiting {
                     next: Instant::now() + Duration::from_secs(10),

@@ -550,6 +550,14 @@ impl Shared {
         let buffer_len = self.buffer.len();
         let mut new_credit = bytes_received.saturating_sub(buffer_len);
 
+        log::debug!(
+            "received {} mb in {} seconds ({} mbit/s)",
+            new_credit as f64 / 1024.0 / 1024.0,
+            self.last_window_update.elapsed().as_secs_f64(),
+            new_credit as f64 / 1024.0 / 1024.0 * 8.0
+                / self.last_window_update.elapsed().as_secs_f64()
+        );
+
         if new_credit < self.window_max / 2 {
             return None;
         }
@@ -573,9 +581,9 @@ impl Shared {
 
                 *accumulated_max_stream_windows += self.window_max - previous_window_max;
                 log::debug!(
-                    "old/new window_max: {}/{}",
-                    previous_window_max,
-                    self.window_max
+                    "old window_max: {} mb, new window_max: {} mb",
+                    previous_window_max as f64 / 1024.0 / 1024.0,
+                    self.window_max as f64 / 1024.0 / 1024.0
                 );
 
                 let bytes_received = self.window_max.saturating_sub(self.window);

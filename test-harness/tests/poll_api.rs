@@ -62,8 +62,6 @@ fn concurrent_streams() {
         let mut cfg = Config::default();
         cfg.set_split_send_size(PAYLOAD_SIZE); // Use a large frame size to speed up the test.
 
-        println!("here");
-
         // TODO: Rethink these.
         cfg.set_connection_window(n_streams * DEFAULT_CREDIT);
         cfg.set_max_num_streams(n_streams);
