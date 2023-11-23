@@ -550,6 +550,10 @@ impl Shared {
         let buffer_len = self.buffer.len();
         let mut new_credit = bytes_received.saturating_sub(buffer_len);
 
+        if new_credit < self.window_max / 2 {
+            return None;
+        }
+
         log::debug!(
             "received {} mb in {} seconds ({} mbit/s)",
             new_credit as f64 / 1024.0 / 1024.0,
@@ -557,10 +561,6 @@ impl Shared {
             new_credit as f64 / 1024.0 / 1024.0 * 8.0
                 / self.last_window_update.elapsed().as_secs_f64()
         );
-
-        if new_credit < self.window_max / 2 {
-            return None;
-        }
 
         if let Some(rtt) = self.rtt.rtt() {
             if self.last_window_update.elapsed() < rtt * 2 {
