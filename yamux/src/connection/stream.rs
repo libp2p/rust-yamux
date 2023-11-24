@@ -25,6 +25,7 @@ use futures::{
     ready, SinkExt,
 };
 use parking_lot::{Mutex, MutexGuard};
+use std::cmp;
 use std::time::Instant;
 use std::{
     fmt, io,
@@ -94,6 +95,9 @@ pub struct Stream {
     sender: mpsc::Sender<StreamCommand>,
     flag: Flag,
     shared: Arc<Mutex<Shared>>,
+    accumulated_max_stream_windows: Arc<Mutex<usize>>,
+    rtt: Rtt,
+    last_window_update: Instant,
 }
 
 impl fmt::Debug for Stream {
@@ -127,13 +131,10 @@ impl Stream {
             config: config.clone(),
             sender,
             flag: Flag::None,
-            shared: Arc::new(Mutex::new(Shared::new(
-                DEFAULT_CREDIT,
-                credit,
-                config,
-                rtt,
-                accumulated_max_stream_windows,
-            ))),
+            shared: Arc::new(Mutex::new(Shared::new(DEFAULT_CREDIT, credit, config))),
+            accumulated_max_stream_windows,
+            rtt,
+            last_window_update: Instant::now(),
         }
     }
 
@@ -155,9 +156,10 @@ impl Stream {
                 DEFAULT_CREDIT,
                 DEFAULT_CREDIT,
                 config,
-                rtt,
-                accumulated_max_stream_windows,
             ))),
+            accumulated_max_stream_windows,
+            rtt,
+            last_window_update: Instant::now(),
         }
     }
 
@@ -215,28 +217,134 @@ impl Stream {
     /// Send new credit to the sending side via a window update message if
     /// permitted.
     fn send_window_update(&mut self, cx: &mut Context) -> Poll<io::Result<()>> {
-        let mut shared = self.shared.lock();
-
-        if let Some(credit) = shared.next_window_update() {
-            ready!(self
-                .sender
-                .poll_ready(cx)
-                .map_err(|_| self.write_zero_err())?);
-
-            shared.window += credit;
-            drop(shared);
-
-            // TODO: Handle the case where credit is larger than u32::MAX. Use the smaller and don't
-            // bump shared.window with the higher.
-            let mut frame = Frame::window_update(self.id, credit as u32).right();
-            self.add_flag(frame.header_mut());
-            let cmd = StreamCommand::SendFrame(frame);
-            self.sender
-                .start_send(cmd)
-                .map_err(|_| self.write_zero_err())?;
+        if !self.shared.lock().state.can_read() {
+            return Poll::Ready(Ok(()));
         }
 
+        ready!(self
+            .sender
+            .poll_ready(cx)
+            .map_err(|_| self.write_zero_err())?);
+
+        let Some(credit) = self.next_window_update() else {
+            return Poll::Ready(Ok(()));
+        };
+
+        // TODO: Handle the case where credit is larger than u32::MAX. Use the smaller and don't
+        // bump shared.window with the higher.
+        let mut frame = Frame::window_update(self.id, credit as u32).right();
+        self.add_flag(frame.header_mut());
+        let cmd = StreamCommand::SendFrame(frame);
+        self.sender
+            .start_send(cmd)
+            .map_err(|_| self.write_zero_err())?;
+
         Poll::Ready(Ok(()))
+    }
+
+    /// Calculate the number of additional window bytes the receiving side (local) should grant the
+    /// sending side (remote) via a window update message.
+    ///
+    /// Returns `None` if too small to justify a window update message.
+    fn next_window_update(&mut self) -> Option<usize> {
+        let mut shared = self.shared.lock();
+
+        debug_assert!(
+            shared.max_receive_window_size >= shared.current_receive_window_size,
+            "max_receive_window_size: {} current_receive_window_size: {}",
+            shared.max_receive_window_size,
+            shared.current_receive_window_size
+        );
+
+        let bytes_received = shared.max_receive_window_size - shared.current_receive_window_size;
+        let mut next_window_update = bytes_received.saturating_sub(shared.buffer.len());
+
+        // Don't send an update in case half or more of the window is still available to the sender.
+        if next_window_update < shared.max_receive_window_size / 2 {
+            return None;
+        }
+
+        log::debug!(
+            "received {} mb in {} seconds ({} mbit/s)",
+            next_window_update as f64 / 1024.0 / 1024.0,
+            self.last_window_update.elapsed().as_secs_f64(),
+            next_window_update as f64 / 1024.0 / 1024.0 * 8.0
+                / self.last_window_update.elapsed().as_secs_f64()
+        );
+
+        // Auto-tuning `max_receive_window_size`
+        //
+        // The ideal `max_receive_window_size` is equal to the bandwidth-delay-product (BDP), thus
+        // allowing the remote sender to exhaust the entire available bandwidth on a single stream.
+        // Choosing `max_receive_window_size` too small prevents the remote sender from exhausting
+        // the available bandwidth. Choosing `max_receive_window_size` to large is wasteful and
+        // delays backpressure from the receiver to the sender on the stream.
+        //
+        // In case the remote sender has exhausted half or more of its credit in less than 2
+        // round-trips, try to double `max_receive_window_size`.
+        //
+        // For simplicity `max_receive_window_size` is never decreased.
+        //
+        // This implementation is heavily influenced by QUIC. See document below for rational on the
+        // above strategy.
+        //
+        // https://docs.google.com/document/d/1F2YfdDXKpy20WVKJueEf4abn_LVZHhMUMS5gX6Pgjl4/edit?usp=sharing
+        if self
+            .rtt
+            .rtt()
+            .map(|rtt| self.last_window_update.elapsed() < rtt * 2)
+            .unwrap_or(false)
+        {
+            let mut accumulated_max_stream_windows = self.accumulated_max_stream_windows.lock();
+
+            // Ideally one can just double it:
+            let mut new_max = shared.max_receive_window_size.saturating_mul(2);
+
+            // Then one has to consider the configured stream limit:
+            new_max = cmp::min(
+                new_max,
+                shared
+                    .config
+                    .max_stream_receive_window
+                    .unwrap_or(usize::MAX),
+            );
+
+            // Then one has to consider the configured connection limit:
+            new_max = {
+                let connection_limit = shared.max_receive_window_size +
+                    // the overall configured conneciton limit
+                    shared.config.max_connection_receive_window
+                    // minus the minimum amount of window guaranteed to each stream
+                    - shared.config.max_num_streams * DEFAULT_CREDIT
+                    // minus the amount of bytes beyond the minimum amount (`DEFAULT_CREDIT`)
+                    // already allocated by this and other streams on the connection.
+                    - *accumulated_max_stream_windows;
+
+                cmp::min(new_max, connection_limit)
+            };
+
+            // Account for the additional credit on the accumulated connection counter.
+            *accumulated_max_stream_windows += new_max - shared.max_receive_window_size;
+            drop(accumulated_max_stream_windows);
+
+            log::debug!(
+                "old window_max: {} mb, new window_max: {} mb",
+                shared.max_receive_window_size as f64 / 1024.0 / 1024.0,
+                new_max as f64 / 1024.0 / 1024.0
+            );
+
+            shared.max_receive_window_size = new_max;
+
+            // Recalculate `next_window_update` with the new `max_receive_window_size`.
+            let bytes_received =
+                shared.max_receive_window_size - shared.current_receive_window_size;
+            next_window_update = bytes_received.saturating_sub(shared.buffer.len());
+        }
+
+        self.last_window_update = Instant::now();
+        shared.current_receive_window_size += next_window_update;
+
+        return Some(next_window_update);
     }
 }
 
@@ -370,14 +478,14 @@ impl AsyncWrite for Stream {
                 log::debug!("{}/{}: can no longer write", self.conn, self.id);
                 return Poll::Ready(Err(self.write_zero_err()));
             }
-            if shared.credit == 0 {
+            if shared.current_send_window_size == 0 {
                 log::trace!("{}/{}: no more credit left", self.conn, self.id);
                 shared.writer = Some(cx.waker().clone());
                 return Poll::Pending;
             }
-            let k = std::cmp::min(shared.credit as usize, buf.len());
+            let k = std::cmp::min(shared.current_send_window_size as usize, buf.len());
             let k = std::cmp::min(k, self.config.split_send_size);
-            shared.credit = shared.credit.saturating_sub(k);
+            shared.current_send_window_size = shared.current_send_window_size.saturating_sub(k);
             Vec::from(&buf[..k])
         };
         let n = body.len();
@@ -432,57 +540,38 @@ impl AsyncWrite for Stream {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct Shared {
-    state: State,
-    // TODO: Rename this to inbound_window or receive_window?
-    pub(crate) window: usize,
-    pub(crate) window_max: usize,
-    // TODO: Rename this to outbound_window or better event send_window?
-    pub(crate) credit: usize,
-    pub(crate) buffer: Chunks,
-    pub(crate) reader: Option<Waker>,
-    pub(crate) writer: Option<Waker>,
-    pub(crate) last_window_update: Instant,
-    config: Arc<Config>,
-    // TODO: Doesn't make sense to have this behind a mutex (shared) again.
-    rtt: Rtt,
-    // TODO: Doesn't make sense to have this behind a mutex (shared) again.
-    accumulated_max_stream_windows: Arc<Mutex<usize>>,
-}
-
-impl Drop for Shared {
+impl Drop for Stream {
     fn drop(&mut self) {
-        *self.accumulated_max_stream_windows.lock() -= self.window_max - DEFAULT_CREDIT;
+        *self.accumulated_max_stream_windows.lock() -=
+            self.shared.lock().max_receive_window_size - DEFAULT_CREDIT;
     }
 }
 
-impl Shared {
-    fn new(
-        window: usize,
-        credit: usize,
-        config: Arc<Config>,
-        rtt: Rtt,
-        accumulated_max_stream_windows: Arc<Mutex<usize>>,
-    ) -> Self {
-        let window_max = DEFAULT_CREDIT;
-        // TODO: We don't add it here. default credit is implied
-        // *accumulated_max_stream_windows.lock() = window_max;
+#[derive(Debug)]
+pub(crate) struct Shared {
+    state: State,
+    pub(crate) current_receive_window_size: usize,
+    pub(crate) max_receive_window_size: usize,
+    pub(crate) current_send_window_size: usize,
+    pub(crate) buffer: Chunks,
+    pub(crate) reader: Option<Waker>,
+    pub(crate) writer: Option<Waker>,
+    config: Arc<Config>,
+}
 
+impl Shared {
+    fn new(window: usize, credit: usize, config: Arc<Config>) -> Self {
         Shared {
             state: State::Open {
                 acknowledged: false,
             },
-            window,
-            window_max,
-            credit,
+            current_receive_window_size: window,
+            max_receive_window_size: DEFAULT_CREDIT,
+            current_send_window_size: credit,
             buffer: Chunks::new(),
             reader: None,
             writer: None,
-            last_window_update: Instant::now(),
             config,
-            rtt,
-            accumulated_max_stream_windows,
         }
     }
 
@@ -524,76 +613,6 @@ impl Shared {
         );
 
         current // Return the previous stream state for informational purposes.
-    }
-
-    // TODO: This does not need to live in shared any longer.
-    /// Calculate the number of additional window bytes the receiving side
-    /// should grant the sending side via a window update message.
-    ///
-    /// Returns `None` if too small to justify a window update message.
-    ///
-    /// Note: Once a caller successfully sent a window update message, the
-    /// locally tracked window size needs to be updated manually by the caller.
-    pub(crate) fn next_window_update(&mut self) -> Option<usize> {
-        if !self.state.can_read() {
-            return None;
-        }
-
-        debug_assert!(
-            self.window_max >= self.window,
-            "window_max {} window {}",
-            self.window_max,
-            self.window
-        );
-
-        let bytes_received = self.window_max.saturating_sub(self.window);
-        let buffer_len = self.buffer.len();
-        let mut new_credit = bytes_received.saturating_sub(buffer_len);
-
-        if new_credit < self.window_max / 2 {
-            return None;
-        }
-
-        log::debug!(
-            "received {} mb in {} seconds ({} mbit/s)",
-            new_credit as f64 / 1024.0 / 1024.0,
-            self.last_window_update.elapsed().as_secs_f64(),
-            new_credit as f64 / 1024.0 / 1024.0 * 8.0
-                / self.last_window_update.elapsed().as_secs_f64()
-        );
-
-        if let Some(rtt) = self.rtt.rtt() {
-            if self.last_window_update.elapsed() < rtt * 2 {
-                let previous_window_max = self.window_max;
-
-                let mut accumulated_max_stream_windows = self.accumulated_max_stream_windows.lock();
-
-                self.window_max = std::cmp::min(
-                    std::cmp::min(
-                        self.window_max.saturating_mul(2),
-                        self.config.max_stream_receive_window.unwrap_or(usize::MAX),
-                    ),
-                    self.window_max
-                        + ((self.config.max_connection_receive_window
-                            - self.config.max_num_streams * DEFAULT_CREDIT)
-                            - *accumulated_max_stream_windows),
-                );
-
-                *accumulated_max_stream_windows += self.window_max - previous_window_max;
-                log::debug!(
-                    "old window_max: {} mb, new window_max: {} mb",
-                    previous_window_max as f64 / 1024.0 / 1024.0,
-                    self.window_max as f64 / 1024.0 / 1024.0
-                );
-
-                let bytes_received = self.window_max.saturating_sub(self.window);
-                let buffer_len = self.buffer.len();
-                new_credit = bytes_received.saturating_sub(buffer_len);
-            }
-        }
-
-        self.last_window_update = Instant::now();
-        return Some(new_credit);
     }
 
     /// Whether we are still waiting for the remote to acknowledge this stream.

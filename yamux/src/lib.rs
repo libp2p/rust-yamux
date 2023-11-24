@@ -77,11 +77,8 @@ const DEFAULT_SPLIT_SEND_SIZE: usize = 16 * 1024;
 /// - split send size = 16 KiB
 #[derive(Debug, Clone)]
 pub struct Config {
-    // TODO: Rename to max_stream_receive_window
     max_stream_receive_window: Option<usize>,
-    // TODO: Rename to max_connection_receive_window
     max_connection_receive_window: usize,
-    max_buffer_size: usize,
     max_num_streams: usize,
     read_after_close: bool,
     split_send_size: usize,
@@ -95,7 +92,6 @@ impl Default for Config {
             // TODO: reevaluate default.
             // TODO: Add setter.
             max_connection_receive_window: 1 * 1024 * 1024 * 1024,
-            max_buffer_size: 16 * 1024 * 1024,
             // TODO
             max_num_streams: 512,
             read_after_close: true,
@@ -118,13 +114,6 @@ impl Config {
 
     pub fn set_max_connection_receive_window(&mut self, n: usize) -> &mut Self {
         self.max_connection_receive_window = n;
-        self.check();
-        self
-    }
-
-    /// Set the max. buffer size per stream.
-    pub fn set_max_buffer_size(&mut self, n: usize) -> &mut Self {
-        self.max_buffer_size = n;
         self.check();
         self
     }

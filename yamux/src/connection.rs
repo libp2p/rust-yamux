@@ -421,7 +421,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     fn new(socket: T, cfg: Config, mode: Mode) -> Self {
         let id = Id::random();
         log::debug!("new connection: {} ({:?})", id, mode);
-        let socket = frame::Io::new(id, socket, cfg.max_buffer_size).fuse();
+        let socket = frame::Io::new(id, socket).fuse();
         Active {
             id,
             mode,
@@ -720,7 +720,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 if is_finish {
                     shared.update_state(self.id, stream_id, State::RecvClosed);
                 }
-                shared.window = shared.window.saturating_sub(frame.body_len());
+                shared.current_receive_window_size = shared
+                    .current_receive_window_size
+                    .saturating_sub(frame.body_len());
                 shared.buffer.push(frame.into_body());
             }
             stream.set_flag(stream::Flag::Ack);
@@ -730,7 +732,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
         if let Some(s) = self.streams.get_mut(&stream_id) {
             let mut shared = s.lock();
-            if frame.body().len() > shared.window as usize {
+            if frame.body().len() > shared.current_receive_window_size as usize {
                 log::error!(
                     "{}/{}: frame body larger than window of stream",
                     self.id,
@@ -742,7 +744,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 shared.update_state(self.id, stream_id, State::RecvClosed);
             }
             // TODO
-            let max_buffer_size = shared.window_max as usize;
+            let max_buffer_size = shared.max_receive_window_size as usize;
             if shared.buffer.len() >= max_buffer_size {
                 log::error!(
                     "{}/{}: buffer of stream grows beyond limit",
@@ -753,7 +755,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 header.rst();
                 return Action::Reset(Frame::new(header));
             }
-            shared.window = shared.window.saturating_sub(frame.body_len());
+            shared.current_receive_window_size = shared
+                .current_receive_window_size
+                .saturating_sub(frame.body_len());
             shared.buffer.push(frame.into_body());
             if let Some(w) = shared.reader.take() {
                 w.wake()
@@ -829,7 +833,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         if let Some(s) = self.streams.get_mut(&stream_id) {
             let mut shared = s.lock();
             // TODO: Is the cast safe?
-            shared.credit += frame.header().credit() as usize;
+            shared.current_send_window_size += frame.header().credit() as usize;
             if is_finish {
                 shared.update_state(self.id, stream_id, State::RecvClosed);
             }

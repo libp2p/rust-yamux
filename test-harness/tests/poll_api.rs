@@ -177,7 +177,7 @@ fn prop_config_send_recv_single() {
         msgs.insert(0, Msg(vec![1u8; yamux::DEFAULT_CREDIT as usize]));
 
         Runtime::new().unwrap().block_on(async move {
-            let (server, mut client) = connected_peers(cfg1, cfg2, None).await?;
+            let (server, mut client) = connected_peers(cfg1, cfg2, None).await.unwrap();
             let server = echo_server(server);
 
             let client = async {
@@ -193,7 +193,7 @@ fn prop_config_send_recv_single() {
                 Ok(())
             };
 
-            futures::future::try_join(server, client).await?;
+            futures::future::try_join(server, client).await.unwrap();
 
             Ok(())
         })
