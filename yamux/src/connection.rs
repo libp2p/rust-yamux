@@ -37,6 +37,8 @@ use std::{fmt, sync::Arc, task::Poll};
 
 pub use stream::{Packet, State, Stream};
 
+const PING_INTERVAL: Duration = Duration::from_secs(10);
+
 /// How the connection is used.
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub enum Mode {
@@ -318,15 +320,12 @@ impl Rtt {
             }
         }
 
-        let nonce = 42;
-
+        let nonce = rand::random();
         *state = RttState::AwaitingPong {
             sent_at: Instant::now(),
             nonce,
         };
-
         log::debug!("sending ping {nonce}");
-        // TODO: randomize nonce.
         Some(Frame::ping(nonce))
     }
 
@@ -356,15 +355,14 @@ impl Rtt {
             inner.rtt.as_ref().unwrap().as_secs_f64()
         );
 
-        // TODO
         inner.state = RttState::Waiting {
-            next: Instant::now() + Duration::from_secs(10),
+            next: Instant::now() + PING_INTERVAL,
         };
 
         return Action::None;
     }
 
-    fn rtt(&self) -> Option<Duration> {
+    fn get(&self) -> Option<Duration> {
         self.0.lock().rtt
     }
 }
@@ -542,23 +540,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         log::trace!("{}: creating new outbound stream", self.id);
 
         let id = self.next_stream_id()?;
-        // TODO: I don't think we want this with a dynamic receive window!
-        //
-        // let extra_credit = self.config.receive_window - DEFAULT_CREDIT;
-        //
-        // if extra_credit > 0 {
-        //     let mut frame = Frame::window_update(id, extra_credit);
-        //     frame.header_mut().syn();
-        //     log::trace!("{}/{}: sending initial {}", self.id, id, frame.header());
-        //     self.pending_frames.push_back(frame.into());
-        // }
-
         let mut stream = self.make_new_outbound_stream(id);
-
-        // TODO: I don't think we want this with a dynamic receive window!
-        // if extra_credit == 0 {
-        //     stream.set_flag(stream::Flag::Syn)
-        // }
         stream.set_flag(stream::Flag::Syn);
 
         log::debug!("{}: new outbound {} of {}", self.id, stream, self);

@@ -291,7 +291,7 @@ impl Stream {
         // https://docs.google.com/document/d/1F2YfdDXKpy20WVKJueEf4abn_LVZHhMUMS5gX6Pgjl4/edit?usp=sharing
         if self
             .rtt
-            .rtt()
+            .get()
             .map(|rtt| self.last_window_update.elapsed() < rtt * 2)
             .unwrap_or(false)
         {
