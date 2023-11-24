@@ -63,7 +63,7 @@ fn concurrent_streams() {
         cfg.set_split_send_size(PAYLOAD_SIZE); // Use a large frame size to speed up the test.
 
         // TODO: Rethink these.
-        cfg.set_connection_window(n_streams * DEFAULT_CREDIT);
+        cfg.set_max_connection_receive_window(n_streams * DEFAULT_CREDIT);
         cfg.set_max_num_streams(n_streams);
 
         Runtime::new().expect("new runtime").block_on(async move {

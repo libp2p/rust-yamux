@@ -571,10 +571,10 @@ impl Shared {
                 self.window_max = std::cmp::min(
                     std::cmp::min(
                         self.window_max.saturating_mul(2),
-                        self.config.receive_window.unwrap_or(usize::MAX),
+                        self.config.max_stream_receive_window.unwrap_or(usize::MAX),
                     ),
                     self.window_max
-                        + ((self.config.connection_window
+                        + ((self.config.max_connection_receive_window
                             - self.config.max_num_streams * DEFAULT_CREDIT)
                             - *accumulated_max_stream_windows),
                 );

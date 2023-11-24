@@ -63,6 +63,8 @@ const MAX_ACK_BACKLOG: usize = 256;
 /// https://github.com/paritytech/yamux/issues/100.
 const DEFAULT_SPLIT_SEND_SIZE: usize = 16 * 1024;
 
+
+// TODO: Update
 /// Yamux configuration.
 ///
 /// The default configuration values are as follows:
@@ -76,9 +78,9 @@ const DEFAULT_SPLIT_SEND_SIZE: usize = 16 * 1024;
 #[derive(Debug, Clone)]
 pub struct Config {
     // TODO: Rename to max_stream_receive_window
-    receive_window: Option<usize>,
+    max_stream_receive_window: Option<usize>,
     // TODO: Rename to max_connection_receive_window
-    connection_window: usize,
+    max_connection_receive_window: usize,
     max_buffer_size: usize,
     max_num_streams: usize,
     read_after_close: bool,
@@ -89,10 +91,10 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             // TODO: Add rational: given that we have a connection window, ...
-            receive_window: None,
+            max_stream_receive_window: None,
             // TODO: reevaluate default.
             // TODO: Add setter.
-            connection_window: 1 * 1024 * 1024 * 1024,
+            max_connection_receive_window: 1 * 1024 * 1024 * 1024,
             max_buffer_size: 16 * 1024 * 1024,
             // TODO
             max_num_streams: 512,
@@ -108,14 +110,14 @@ impl Config {
     /// # Panics
     ///
     /// If the given receive window is < 256 KiB.
-    pub fn set_receive_window(&mut self, n: Option<usize>) -> &mut Self {
-        self.receive_window = n;
+    pub fn set_max_stream_receive_window(&mut self, n: Option<usize>) -> &mut Self {
+        self.max_stream_receive_window = n;
         self.check();
         self
     }
 
-    pub fn set_connection_window(&mut self, n: usize) -> &mut Self {
-        self.connection_window = n;
+    pub fn set_max_connection_receive_window(&mut self, n: usize) -> &mut Self {
+        self.max_connection_receive_window = n;
         self.check();
         self
     }
@@ -152,8 +154,8 @@ impl Config {
 
     // TODO: Consider doing the check on creation, not on each builder method call.
     fn check(&self) {
-        assert!(self.receive_window.unwrap_or(usize::MAX) >= DEFAULT_CREDIT);
-        assert!(self.connection_window >= self.max_num_streams * DEFAULT_CREDIT);
+        assert!(self.max_stream_receive_window.unwrap_or(usize::MAX) >= DEFAULT_CREDIT);
+        assert!(self.max_connection_receive_window >= self.max_num_streams * DEFAULT_CREDIT);
     }
 }
 
