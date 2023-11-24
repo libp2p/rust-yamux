@@ -171,7 +171,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream for Io<T> {
     type Item = Result<Frame<()>, FrameDecodeError>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        let mut this = &mut *self;
+        let this = &mut *self;
         loop {
             log::trace!("{}: read: {:?}", this.id, this.read_state);
             match this.read_state {
