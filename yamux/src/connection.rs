@@ -307,11 +307,11 @@ impl Rtt {
 
     fn next_ping(&mut self) -> Option<Frame<Ping>> {
         let state = &mut self.0.lock().state;
+
         match state {
             RttState::Initial => {}
             RttState::AwaitingPong { .. } => return None,
             RttState::Waiting { next } => {
-                // TODO: Might be expensive in the hot path. Maybe don't put at the beginning of the overall poll?
                 if *next > Instant::now() {
                     return None;
                 }
@@ -324,31 +324,44 @@ impl Rtt {
             sent_at: Instant::now(),
             nonce,
         };
+
+        log::debug!("sending ping {nonce}");
         // TODO: randomize nonce.
         Some(Frame::ping(nonce))
     }
 
-    fn received_pong(&mut self, nonce: u32) {
+    fn handle_pong(&mut self, received_nonce: u32) -> Action {
         let inner = &mut self.0.lock();
-        match inner.state {
-            RttState::Initial => todo!(),
-            RttState::AwaitingPong { sent_at, nonce: n } => {
-                if nonce != n {
-                    todo!()
-                }
 
-                inner.rtt = Some(sent_at.elapsed());
-                log::debug!(
-                    "estimated round-trip-time: {}s",
-                    inner.rtt.as_ref().unwrap().as_secs_f64()
-                );
-                // TODO
-                inner.state = RttState::Waiting {
-                    next: Instant::now() + Duration::from_secs(10),
-                };
+        let (sent_at, expected_nonce) = match inner.state {
+            RttState::Initial | RttState::Waiting { .. } => {
+                log::error!("received unexpected pong {}", received_nonce);
+                return Action::Terminate(Frame::protocol_error());
             }
-            RttState::Waiting { next } => todo!(),
+            RttState::AwaitingPong { sent_at, nonce } => (sent_at, nonce),
+        };
+
+        if received_nonce != expected_nonce {
+            log::error!(
+                "received pong with {} but expected {}",
+                received_nonce,
+                expected_nonce
+            );
+            return Action::Terminate(Frame::protocol_error());
         }
+
+        inner.rtt = Some(sent_at.elapsed());
+        log::debug!(
+            "received pong {received_nonce}, estimated round-trip-time {}s",
+            inner.rtt.as_ref().unwrap().as_secs_f64()
+        );
+
+        // TODO
+        inner.state = RttState::Waiting {
+            next: Instant::now() + Duration::from_secs(10),
+        };
+
+        return Action::None;
     }
 
     fn rtt(&self) -> Option<Duration> {
@@ -458,11 +471,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Result<Stream>> {
         loop {
             if self.socket.poll_ready_unpin(cx).is_ready() {
+                // TODO: Is this too expensive for it to be at the start of the loop? Could move it
+                // to the end, but a connection constantly writing and reading would then never send
+                // a ping. Also might be worth sending ping up front for better latency calc?
                 if let Some(frame) = self.rtt.next_ping() {
-                    log::debug!("sending ping");
                     self.socket.start_send_unpin(frame.into())?;
                     continue;
                 }
+
                 if let Some(frame) = self.pending_frames.pop_front() {
                     self.socket.start_send_unpin(frame)?;
                     continue;
@@ -862,8 +878,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     fn on_ping(&mut self, frame: &Frame<Ping>) -> Action {
         let stream_id = frame.header().stream_id();
         if frame.header().flags().contains(header::ACK) {
-            self.rtt.received_pong(frame.nonce());
-            return Action::None;
+            return self.rtt.handle_pong(frame.nonce());
         }
         if stream_id == CONNECTION_ID || self.streams.contains_key(&stream_id) {
             let mut hdr = Header::ping(frame.header().nonce());
