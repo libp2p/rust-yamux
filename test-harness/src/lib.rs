@@ -445,6 +445,7 @@ impl Arbitrary for Msg {
 #[derive(Clone, Debug)]
 pub struct TestConfig(pub Config);
 
+// TODO: use new direct implementation?
 impl Arbitrary for TestConfig {
     fn arbitrary(g: &mut Gen) -> Self {
         let mut c = Config::default();

@@ -38,7 +38,7 @@ pub use crate::frame::{
     FrameDecodeError,
 };
 
-pub const DEFAULT_CREDIT: usize = 256 * 1024; // as per yamux specification
+pub const DEFAULT_CREDIT: u32 = 256 * 1024; // as per yamux specification
 
 pub type Result<T> = std::result::Result<T, ConnectionError>;
 
@@ -63,7 +63,6 @@ const MAX_ACK_BACKLOG: usize = 256;
 /// https://github.com/paritytech/yamux/issues/100.
 const DEFAULT_SPLIT_SEND_SIZE: usize = 16 * 1024;
 
-
 // TODO: Update
 /// Yamux configuration.
 ///
@@ -77,7 +76,7 @@ const DEFAULT_SPLIT_SEND_SIZE: usize = 16 * 1024;
 /// - split send size = 16 KiB
 #[derive(Debug, Clone)]
 pub struct Config {
-    max_stream_receive_window: Option<usize>,
+    max_stream_receive_window: Option<u32>,
     max_connection_receive_window: usize,
     max_num_streams: usize,
     read_after_close: bool,
@@ -90,7 +89,6 @@ impl Default for Config {
             // TODO: Add rational: given that we have a connection window, ...
             max_stream_receive_window: None,
             // TODO: reevaluate default.
-            // TODO: Add setter.
             max_connection_receive_window: 1 * 1024 * 1024 * 1024,
             // TODO
             max_num_streams: 512,
@@ -106,12 +104,13 @@ impl Config {
     /// # Panics
     ///
     /// If the given receive window is < 256 KiB.
-    pub fn set_max_stream_receive_window(&mut self, n: Option<usize>) -> &mut Self {
+    pub fn set_max_stream_receive_window(&mut self, n: Option<u32>) -> &mut Self {
         self.max_stream_receive_window = n;
         self.check();
         self
     }
 
+    // TODO: Is a usize really needed here?
     pub fn set_max_connection_receive_window(&mut self, n: usize) -> &mut Self {
         self.max_connection_receive_window = n;
         self.check();
@@ -143,8 +142,10 @@ impl Config {
 
     // TODO: Consider doing the check on creation, not on each builder method call.
     fn check(&self) {
-        assert!(self.max_stream_receive_window.unwrap_or(usize::MAX) >= DEFAULT_CREDIT);
-        assert!(self.max_connection_receive_window >= self.max_num_streams * DEFAULT_CREDIT);
+        assert!(self.max_stream_receive_window.unwrap_or(u32::MAX) >= DEFAULT_CREDIT);
+        assert!(
+            self.max_connection_receive_window >= self.max_num_streams * DEFAULT_CREDIT as usize
+        );
     }
 }
 
@@ -156,4 +157,26 @@ static_assertions::const_assert! {
 // Check that we can safely cast a `u32` to a `usize`.
 static_assertions::const_assert! {
     std::mem::size_of::<u32>() <= std::mem::size_of::<usize>()
+}
+
+#[cfg(test)]
+impl quickcheck::Arbitrary for Config {
+    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+        use quickcheck::GenRange;
+
+        let max_num_streams = g.gen_range(0..u16::MAX as usize);
+
+        Config {
+            max_stream_receive_window: if bool::arbitrary(g) {
+                Some(g.gen_range(DEFAULT_CREDIT..u32::MAX))
+            } else {
+                None
+            },
+            max_connection_receive_window: g
+                .gen_range((DEFAULT_CREDIT as usize * max_num_streams)..usize::MAX),
+            max_num_streams,
+            read_after_close: bool::arbitrary(g),
+            split_send_size: g.gen_range(DEFAULT_SPLIT_SEND_SIZE..usize::MAX),
+        }
+    }
 }

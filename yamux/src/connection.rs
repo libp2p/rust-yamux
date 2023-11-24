@@ -293,6 +293,7 @@ struct Active<T> {
 
     rtt: Rtt,
 
+    // TODO: Document
     accumulated_max_stream_windows: Arc<Mutex<usize>>,
 }
 
@@ -367,10 +368,41 @@ impl Rtt {
     }
 }
 
+#[cfg(test)]
+impl quickcheck::Arbitrary for Rtt {
+    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+        Self(Arc::new(Mutex::new(RttInner::arbitrary(g))))
+    }
+}
+
 #[derive(Debug)]
 struct RttInner {
     state: RttState,
     rtt: Option<Duration>,
+}
+
+#[cfg(test)]
+impl Clone for RttInner {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+            rtt: self.rtt.clone(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl quickcheck::Arbitrary for RttInner {
+    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+        Self {
+            state: RttState::arbitrary(g),
+            rtt: if bool::arbitrary(g) {
+                Some(Duration::arbitrary(g))
+            } else {
+                None
+            },
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -378,6 +410,38 @@ enum RttState {
     Initial,
     AwaitingPong { sent_at: Instant, nonce: u32 },
     Waiting { next: Instant },
+}
+
+#[cfg(test)]
+impl Clone for RttState {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Initial => Self::Initial,
+            Self::AwaitingPong { sent_at, nonce } => Self::AwaitingPong {
+                sent_at: sent_at.clone(),
+                nonce: nonce.clone(),
+            },
+            Self::Waiting { next } => Self::Waiting { next: next.clone() },
+        }
+    }
+}
+
+#[cfg(test)]
+impl quickcheck::Arbitrary for RttState {
+    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+        use quickcheck::GenRange;
+        match g.gen_range(0u8..3) {
+            0 => RttState::Initial,
+            1 => RttState::AwaitingPong {
+                sent_at: Instant::now(),
+                nonce: u32::arbitrary(g),
+            },
+            2 => RttState::Waiting {
+                next: Instant::now(),
+            },
+            _ => unreachable!(),
+        }
+    }
 }
 
 /// `Stream` to `Connection` commands.
@@ -730,7 +794,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
         if let Some(s) = self.streams.get_mut(&stream_id) {
             let mut shared = s.lock();
-            if frame.body().len() > shared.current_receive_window_size as usize {
+            if frame.body_len() > shared.current_receive_window_size {
                 log::error!(
                     "{}/{}: frame body larger than window of stream",
                     self.id,
@@ -741,9 +805,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             if is_finish {
                 shared.update_state(self.id, stream_id, State::RecvClosed);
             }
-            // TODO
-            let max_buffer_size = shared.max_receive_window_size as usize;
-            if shared.buffer.len() >= max_buffer_size {
+            if shared.buffer.len() >= shared.max_receive_window_size as usize {
                 log::error!(
                     "{}/{}: buffer of stream grows beyond limit",
                     self.id,
@@ -814,8 +876,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 return Action::Terminate(Frame::protocol_error());
             }
 
-            // TODO: Is the cast safe?
-            let credit = frame.header().credit() as usize + DEFAULT_CREDIT;
+            let credit = frame.header().credit() + DEFAULT_CREDIT;
             let mut stream = self.make_new_inbound_stream(stream_id, credit);
             stream.set_flag(stream::Flag::Ack);
 
@@ -830,8 +891,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
         if let Some(s) = self.streams.get_mut(&stream_id) {
             let mut shared = s.lock();
-            // TODO: Is the cast safe?
-            shared.current_send_window_size += frame.header().credit() as usize;
+            shared.current_send_window_size += frame.header().credit();
             if is_finish {
                 shared.update_state(self.id, stream_id, State::RecvClosed);
             }
@@ -883,7 +943,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         Action::None
     }
 
-    fn make_new_inbound_stream(&mut self, id: StreamId, credit: usize) -> Stream {
+    fn make_new_inbound_stream(&mut self, id: StreamId, credit: u32) -> Stream {
         let config = self.config.clone();
 
         let (sender, receiver) = mpsc::channel(10); // 10 is an arbitrary number.
