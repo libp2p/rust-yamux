@@ -202,6 +202,7 @@ impl Stream {
     fn send_window_update(&mut self, cx: &mut Context) -> Poll<io::Result<()>> {
         // When using [`WindowUpdateMode::OnReceive`] window update messages are
         // send early on data receival (see [`crate::Connection::on_frame`]).
+        #[allow(deprecated)]
         if matches!(self.config.window_update_mode, WindowUpdateMode::OnReceive) {
             return Poll::Ready(Ok(()));
         }
@@ -500,6 +501,7 @@ impl Shared {
         }
 
         let new_credit = match self.config.window_update_mode {
+            #[allow(deprecated)]
             WindowUpdateMode::OnReceive => {
                 debug_assert!(self.config.receive_window >= self.window);
 

@@ -1,3 +1,10 @@
+# 0.12.1
+
+- Deprecate `WindowUpdateMode::OnReceive`.
+  It does not enforce flow-control, i.e. breaks backpressure.
+  Use `WindowUpdateMode::OnRead` instead.
+  See [PR #177](https://github.com/libp2p/rust-yamux/pull/177).
+
 # 0.12.0
 
 - Remove `Control` and `ControlledConnection`.

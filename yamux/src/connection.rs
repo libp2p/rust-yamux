@@ -650,6 +650,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 shared.window = shared.window.saturating_sub(frame.body_len());
                 shared.buffer.push(frame.into_body());
 
+                #[allow(deprecated)]
                 if matches!(self.config.window_update_mode, WindowUpdateMode::OnReceive) {
                     if let Some(credit) = shared.next_window_update() {
                         shared.window += credit;
@@ -695,6 +696,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             if let Some(w) = shared.reader.take() {
                 w.wake()
             }
+            #[allow(deprecated)]
             if matches!(self.config.window_update_mode, WindowUpdateMode::OnReceive) {
                 if let Some(credit) = shared.next_window_update() {
                     shared.window += credit;
