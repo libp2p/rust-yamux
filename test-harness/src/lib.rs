@@ -445,13 +445,12 @@ impl Arbitrary for Msg {
 #[derive(Clone, Debug)]
 pub struct TestConfig(pub Config);
 
-// TODO: use new direct implementation?
 impl Arbitrary for TestConfig {
     fn arbitrary(g: &mut Gen) -> Self {
         let mut c = Config::default();
         c.set_read_after_close(Arbitrary::arbitrary(g));
         if bool::arbitrary(g) {
-            c.set_max_stream_receive_window(Some(256 * 1024 + usize::arbitrary(g) % (768 * 1024)));
+            c.set_max_stream_receive_window(Some(256 * 1024 + u32::arbitrary(g) % (768 * 1024)));
         } else {
             c.set_max_stream_receive_window(None);
         }

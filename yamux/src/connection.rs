@@ -293,7 +293,10 @@ struct Active<T> {
 
     rtt: Rtt,
 
-    // TODO: Document
+    /// A stream's `max_stream_receive_window` can grow beyond [`DEFAULT_CREDIT`], see
+    /// [`Stream::next_window_update`]. This field is the sum of the bytes by which all streams'
+    /// `max_stream_receive_window` have each exceeded [`DEFAULT_CREDIT`]. Used to enforce
+    /// [`Config::max_connection_receive_window`].
     accumulated_max_stream_windows: Arc<Mutex<usize>>,
 }
 
@@ -533,9 +536,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Result<Stream>> {
         loop {
             if self.socket.poll_ready_unpin(cx).is_ready() {
-                // TODO: Is this too expensive for it to be at the start of the loop? Could move it
-                // to the end, but a connection constantly writing and reading would then never send
-                // a ping. Also might be worth sending ping up front for better latency calc?
                 if let Some(frame) = self.rtt.next_ping() {
                     self.socket.start_send_unpin(frame.into())?;
                     continue;
@@ -690,9 +690,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     fn on_frame(&mut self, frame: Frame<()>) -> Result<Option<Stream>> {
         log::trace!("{}: received: {}", self.id, frame.header());
 
-        // TODO: Clean this change up.
         if frame.header().flags().contains(header::ACK)
-            && (frame.header().tag() == Tag::Data || frame.header().tag() == Tag::WindowUpdate)
+            && matches!(frame.header().tag(), Tag::Data | Tag::WindowUpdate)
         {
             let id = frame.header().stream_id();
             if let Some(stream) = self.streams.get(&id) {

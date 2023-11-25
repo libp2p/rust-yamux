@@ -283,8 +283,6 @@ impl Stream {
     fn next_window_update(&mut self) -> Option<u32> {
         let mut shared = self.shared.lock();
 
-        println!("1");
-
         debug_assert!(
             shared.max_receive_window_size >= shared.current_receive_window_size,
             "max_receive_window_size: {} current_receive_window_size: {}",
@@ -300,8 +298,6 @@ impl Stream {
         if next_window_update < shared.max_receive_window_size / 2 {
             return None;
         }
-
-        println!("2");
 
         log::debug!(
             "received {} mb in {} seconds ({} mbit/s)",
@@ -383,12 +379,8 @@ impl Stream {
                 bytes_received.saturating_sub(shared.buffer.len().try_into().unwrap_or(u32::MAX));
         }
 
-        println!("3");
-
         self.last_window_update = Instant::now();
         shared.current_receive_window_size += next_window_update;
-
-        println!("4");
 
         return Some(next_window_update);
     }
@@ -594,7 +586,6 @@ impl AsyncWrite for Stream {
 
 impl Drop for Stream {
     fn drop(&mut self) {
-        println!("drop");
         let mut accumulated_max_stream_windows = self.accumulated_max_stream_windows.lock();
         let max_receive_window_size = self.shared.lock().max_receive_window_size;
 
@@ -791,12 +782,6 @@ mod tests {
     #[test]
     fn next_window_update() {
         fn property(mut stream: Stream) {
-            println!("next: {stream}");
-            println!(
-                "{}, {}",
-                stream.accumulated_max_stream_windows.lock(),
-                stream.shared.lock().max_receive_window_size
-            );
             stream.next_window_update();
         }
 

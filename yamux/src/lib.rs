@@ -111,6 +111,7 @@ impl Config {
     }
 
     // TODO: Is a usize really needed here?
+    // TODO: Should this be an option?
     pub fn set_max_connection_receive_window(&mut self, n: usize) -> &mut Self {
         self.max_connection_receive_window = n;
         self.check();
