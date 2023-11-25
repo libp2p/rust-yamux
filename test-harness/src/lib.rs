@@ -451,6 +451,7 @@ impl Arbitrary for TestConfig {
         c.set_window_update_mode(if bool::arbitrary(g) {
             WindowUpdateMode::OnRead
         } else {
+            #[allow(deprecated)]
             WindowUpdateMode::OnReceive
         });
         c.set_read_after_close(Arbitrary::arbitrary(g));
