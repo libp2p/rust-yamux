@@ -503,11 +503,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 // writing more data. We may need to reset the stream.
                 State::SendClosed => {
                     // The remote has either still credit or will be given more
-                    // (due to an enqueued window update or because the update
-                    // mode is `OnReceive`) or we already have inbound frames in
-                    // the socket buffer which will be processed later. In any
-                    // case we will reply with an RST in `Connection::on_data`
-                    // because the stream will no longer be known.
+                    // due to an enqueued window update or we already have
+                    // inbound frames in the socket buffer which will be
+                    // processed later. In any case we will reply with an RST in
+                    // `Connection::on_data` because the stream will no longer
+                    // be known.
                     None
                 }
                 // The stream was properly closed. We already have sent our FIN frame. The
