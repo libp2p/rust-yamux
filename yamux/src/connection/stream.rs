@@ -11,7 +11,7 @@
 use crate::frame::header::ACK;
 use crate::{
     chunks::Chunks,
-    connection::{self, Rtt, StreamCommand},
+    connection::{self, rtt, StreamCommand},
     frame::{
         header::{Data, Header, StreamId, WindowUpdate},
         Frame,
@@ -127,7 +127,7 @@ pub struct Stream {
     flag: Flag,
     shared: Arc<Mutex<Shared>>,
     accumulated_max_stream_windows: Arc<Mutex<usize>>,
-    rtt: Rtt,
+    rtt: rtt::Rtt,
     last_window_update: Instant,
 }
 
@@ -153,7 +153,7 @@ impl Stream {
         config: Arc<Config>,
         curent_send_window_size: u32,
         sender: mpsc::Sender<StreamCommand>,
-        rtt: Rtt,
+        rtt: rtt::Rtt,
         accumulated_max_stream_windows: Arc<Mutex<usize>>,
     ) -> Self {
         Self {
@@ -177,7 +177,7 @@ impl Stream {
         conn: connection::Id,
         config: Arc<Config>,
         sender: mpsc::Sender<StreamCommand>,
-        rtt: Rtt,
+        rtt: rtt::Rtt,
         accumulated_max_stream_windows: Arc<Mutex<usize>>,
     ) -> Self {
         Self {
@@ -649,7 +649,7 @@ impl quickcheck::Arbitrary for Stream {
 
         let mut shared = Shared::arbitrary(g);
         let config = Arc::new(Config::arbitrary(g));
-        let rtt = Rtt::arbitrary(g);
+        let rtt = rtt::Rtt::arbitrary(g);
 
         // Update `shared` to align with `config` and rtt.
         shared.max_receive_window_size = if rtt.get().is_none() {

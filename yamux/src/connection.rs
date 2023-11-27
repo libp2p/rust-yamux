@@ -14,6 +14,7 @@
 
 mod cleanup;
 mod closing;
+mod rtt;
 mod stream;
 
 use crate::tagged_stream::TaggedStream;
@@ -32,12 +33,9 @@ use nohash_hasher::IntMap;
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::task::{Context, Waker};
-use std::time::{Duration, Instant};
 use std::{fmt, sync::Arc, task::Poll};
 
 pub use stream::{Packet, State, Stream};
-
-const PING_INTERVAL: Duration = Duration::from_secs(10);
 
 /// How the connection is used.
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
@@ -291,7 +289,7 @@ struct Active<T> {
     pending_frames: VecDeque<Frame<()>>,
     new_outbound_stream_waker: Option<Waker>,
 
-    rtt: Rtt,
+    rtt: rtt::Rtt,
 
     /// A stream's `max_stream_receive_window` can grow beyond [`DEFAULT_CREDIT`], see
     /// [`Stream::next_window_update`]. This field is the sum of the bytes by which all streams'
@@ -299,154 +297,6 @@ struct Active<T> {
     /// [`Config::max_connection_receive_window`].
     accumulated_max_stream_windows: Arc<Mutex<usize>>,
 }
-
-#[derive(Clone, Debug)]
-pub struct Rtt(Arc<Mutex<RttInner>>);
-
-impl Rtt {
-    fn new() -> Self {
-        Self(Arc::new(Mutex::new(RttInner {
-            rtt: None,
-            state: RttState::Initial,
-        })))
-    }
-
-    fn next_ping(&mut self) -> Option<Frame<Ping>> {
-        let state = &mut self.0.lock().state;
-
-        match state {
-            RttState::Initial => {}
-            RttState::AwaitingPong { .. } => return None,
-            RttState::Waiting { next } => {
-                if *next > Instant::now() {
-                    return None;
-                }
-            }
-        }
-
-        let nonce = rand::random();
-        *state = RttState::AwaitingPong {
-            sent_at: Instant::now(),
-            nonce,
-        };
-        log::debug!("sending ping {nonce}");
-        Some(Frame::ping(nonce))
-    }
-
-    fn handle_pong(&mut self, received_nonce: u32) -> Action {
-        let inner = &mut self.0.lock();
-
-        let (sent_at, expected_nonce) = match inner.state {
-            RttState::Initial | RttState::Waiting { .. } => {
-                log::error!("received unexpected pong {}", received_nonce);
-                return Action::Terminate(Frame::protocol_error());
-            }
-            RttState::AwaitingPong { sent_at, nonce } => (sent_at, nonce),
-        };
-
-        if received_nonce != expected_nonce {
-            log::error!(
-                "received pong with {} but expected {}",
-                received_nonce,
-                expected_nonce
-            );
-            return Action::Terminate(Frame::protocol_error());
-        }
-
-        inner.rtt = Some(sent_at.elapsed());
-        log::debug!(
-            "received pong {received_nonce}, estimated round-trip-time {}s",
-            inner.rtt.as_ref().unwrap().as_secs_f64()
-        );
-
-        inner.state = RttState::Waiting {
-            next: Instant::now() + PING_INTERVAL,
-        };
-
-        return Action::None;
-    }
-
-    fn get(&self) -> Option<Duration> {
-        self.0.lock().rtt
-    }
-}
-
-#[cfg(test)]
-impl quickcheck::Arbitrary for Rtt {
-    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
-        Self(Arc::new(Mutex::new(RttInner::arbitrary(g))))
-    }
-}
-
-#[derive(Debug)]
-struct RttInner {
-    state: RttState,
-    rtt: Option<Duration>,
-}
-
-#[cfg(test)]
-impl Clone for RttInner {
-    fn clone(&self) -> Self {
-        Self {
-            state: self.state.clone(),
-            rtt: self.rtt.clone(),
-        }
-    }
-}
-
-#[cfg(test)]
-impl quickcheck::Arbitrary for RttInner {
-    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
-        Self {
-            state: RttState::arbitrary(g),
-            rtt: if bool::arbitrary(g) {
-                Some(Duration::arbitrary(g))
-            } else {
-                None
-            },
-        }
-    }
-}
-
-#[derive(Debug)]
-enum RttState {
-    Initial,
-    AwaitingPong { sent_at: Instant, nonce: u32 },
-    Waiting { next: Instant },
-}
-
-#[cfg(test)]
-impl Clone for RttState {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Initial => Self::Initial,
-            Self::AwaitingPong { sent_at, nonce } => Self::AwaitingPong {
-                sent_at: sent_at.clone(),
-                nonce: nonce.clone(),
-            },
-            Self::Waiting { next } => Self::Waiting { next: next.clone() },
-        }
-    }
-}
-
-#[cfg(test)]
-impl quickcheck::Arbitrary for RttState {
-    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
-        use quickcheck::GenRange;
-        match g.gen_range(0u8..3) {
-            0 => RttState::Initial,
-            1 => RttState::AwaitingPong {
-                sent_at: Instant::now(),
-                nonce: u32::arbitrary(g),
-            },
-            2 => RttState::Waiting {
-                next: Instant::now(),
-            },
-            _ => unreachable!(),
-        }
-    }
-}
-
 /// `Stream` to `Connection` commands.
 #[derive(Debug)]
 pub(crate) enum StreamCommand {
@@ -458,7 +308,7 @@ pub(crate) enum StreamCommand {
 
 /// Possible actions as a result of incoming frame handling.
 #[derive(Debug)]
-enum Action {
+pub(crate) enum Action {
     /// Nothing to be done.
     None,
     /// A new stream has been opened by the remote.
@@ -514,7 +364,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             },
             pending_frames: VecDeque::default(),
             new_outbound_stream_waker: None,
-            rtt: Rtt::new(),
+            rtt: rtt::Rtt::new(),
             accumulated_max_stream_windows: Default::default(),
         }
     }
