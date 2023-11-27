@@ -1,2 +1,3 @@
 [workspace]
 members = ["yamux", "test-harness"]
+resolver = "2"

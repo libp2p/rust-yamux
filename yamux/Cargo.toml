@@ -7,7 +7,7 @@ description = "Multiplexer over reliable, ordered connections"
 keywords = ["network", "protocol"]
 categories = ["network-programming"]
 repository = "https://github.com/paritytech/yamux"
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 futures = { version = "0.3.12", default-features = false, features = ["std"] }
