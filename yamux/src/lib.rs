@@ -63,7 +63,6 @@ const MAX_ACK_BACKLOG: usize = 256;
 /// https://github.com/paritytech/yamux/issues/100.
 const DEFAULT_SPLIT_SEND_SIZE: usize = 16 * 1024;
 
-
 /// Yamux configuration.
 ///
 /// The default configuration values are as follows:
