@@ -99,7 +99,15 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Set the receive window per stream (must be >= 256 KiB).
+    /// Set the maximum receive window per stream .
+    ///
+    /// Must be `>= 256 KiB`.
+    ///
+    /// The window of a stream starts at 256 KiB and is increased (auto-tuned) based on the
+    /// connection's round-trip time and the stream's bandwidth (striving for the
+    /// bandwidth-delay-product).
+    ///
+    /// Set to `None` to disable the per stream maximum receive window.
     ///
     /// # Panics
     ///
@@ -112,13 +120,16 @@ impl Config {
 
     // TODO: Is a usize really needed here?
     // TODO: Should this be an option?
+    /// Set the maximum sum of all stream receive windows per connection.
+    ///
+    /// Must be `>= 256 KiB * max_num_streams` to allow each stream the Yamux default window size.
     pub fn set_max_connection_receive_window(&mut self, n: usize) -> &mut Self {
         self.max_connection_receive_window = n;
         self.check();
         self
     }
 
-    /// Set the max. number of streams.
+    /// Set the max. number of streams per connection.
     pub fn set_max_num_streams(&mut self, n: usize) -> &mut Self {
         self.max_num_streams = n;
         self.check();
