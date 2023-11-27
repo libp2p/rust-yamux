@@ -12,7 +12,7 @@ use tokio::net::TcpStream;
 use tokio::runtime::Runtime;
 use tokio::task;
 use tokio_util::compat::TokioAsyncReadCompatExt;
-use yamux::{Config, Connection, ConnectionError, Mode, DEFAULT_CREDIT};
+use yamux::{Config, Connection, ConnectionError, Mode};
 
 #[test]
 fn prop_config_send_recv_multi() {
@@ -61,10 +61,6 @@ fn concurrent_streams() {
 
         let mut cfg = Config::default();
         cfg.set_split_send_size(PAYLOAD_SIZE); // Use a large frame size to speed up the test.
-
-        // TODO: Rethink these.
-        cfg.set_max_connection_receive_window(n_streams * DEFAULT_CREDIT as usize);
-        cfg.set_max_num_streams(n_streams);
 
         Runtime::new().expect("new runtime").block_on(async move {
             let (server, client) = connected_peers(cfg.clone(), cfg, tcp_buffer_sizes)
@@ -181,9 +177,7 @@ fn prop_config_send_recv_single() {
             let server = echo_server(server);
 
             let client = async {
-                let stream = future::poll_fn(|cx| client.poll_new_outbound(cx))
-                    .await
-                    .unwrap();
+                let stream = future::poll_fn(|cx| client.poll_new_outbound(cx)).await?;
                 let client_task = noop_server(stream::poll_fn(|cx| client.poll_next_inbound(cx)));
 
                 future::select(pin!(client_task), pin!(send_on_single_stream(stream, msgs))).await;
@@ -193,7 +187,7 @@ fn prop_config_send_recv_single() {
                 Ok(())
             };
 
-            futures::future::try_join(server, client).await.unwrap();
+            futures::future::try_join(server, client).await?;
 
             Ok(())
         })
