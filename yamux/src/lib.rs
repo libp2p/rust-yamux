@@ -63,26 +63,6 @@ const MAX_ACK_BACKLOG: usize = 256;
 /// https://github.com/paritytech/yamux/issues/100.
 const DEFAULT_SPLIT_SEND_SIZE: usize = 16 * 1024;
 
-/// Specifies when window update frames are sent.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WindowUpdateMode {
-    /// Send window updates as soon as a [`Stream`]'s receive window drops to 0.
-    ///
-    /// This ensures that the sender can resume sending more data as soon as possible
-    /// but a slow reader on the receiving side may be overwhelmed, i.e. it accumulates
-    /// data in its buffer which may reach its limit (see `set_max_buffer_size`).
-    /// In this mode, window updates merely prevent head of line blocking but do not
-    /// effectively exercise back pressure on senders.
-    #[deprecated(note = "Use `WindowUpdateMode::OnRead` instead.")]
-    OnReceive,
-
-    /// Send window updates only when data is read on the receiving end.
-    ///
-    /// This ensures that senders do not overwhelm receivers and keeps buffer usage
-    /// low.
-    OnRead,
-}
-
 /// Yamux configuration.
 ///
 /// The default configuration values are as follows:
@@ -98,7 +78,6 @@ pub struct Config {
     receive_window: u32,
     max_buffer_size: usize,
     max_num_streams: usize,
-    window_update_mode: WindowUpdateMode,
     read_after_close: bool,
     split_send_size: usize,
 }
@@ -109,7 +88,6 @@ impl Default for Config {
             receive_window: DEFAULT_CREDIT,
             max_buffer_size: 1024 * 1024,
             max_num_streams: 8192,
-            window_update_mode: WindowUpdateMode::OnRead,
             read_after_close: true,
             split_send_size: DEFAULT_SPLIT_SEND_SIZE,
         }
@@ -137,12 +115,6 @@ impl Config {
     /// Set the max. number of streams.
     pub fn set_max_num_streams(&mut self, n: usize) -> &mut Self {
         self.max_num_streams = n;
-        self
-    }
-
-    /// Set the window update mode to use.
-    pub fn set_window_update_mode(&mut self, m: WindowUpdateMode) -> &mut Self {
-        self.window_update_mode = m;
         self
     }
 

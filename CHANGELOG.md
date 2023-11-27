@@ -1,3 +1,9 @@
+# 0.13.0
+
+- Remove `WindowUpdateMode`.
+  Behavior will always be `WindowUpdateMode::OnRead`, thus enabling flow-control and enforcing backpressure.
+  See [PR 178](https://github.com/libp2p/rust-yamux/pull/178).
+
 # 0.12.1
 
 - Deprecate `WindowUpdateMode::OnReceive`.

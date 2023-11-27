@@ -13,8 +13,8 @@ use std::{fmt, io, mem};
 use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio::task;
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
+use yamux::Config;
 use yamux::ConnectionError;
-use yamux::{Config, WindowUpdateMode};
 use yamux::{Connection, Mode};
 
 pub async fn connected_peers(
@@ -448,12 +448,6 @@ pub struct TestConfig(pub Config);
 impl Arbitrary for TestConfig {
     fn arbitrary(g: &mut Gen) -> Self {
         let mut c = Config::default();
-        c.set_window_update_mode(if bool::arbitrary(g) {
-            WindowUpdateMode::OnRead
-        } else {
-            #[allow(deprecated)]
-            WindowUpdateMode::OnReceive
-        });
         c.set_read_after_close(Arbitrary::arbitrary(g));
         c.set_receive_window(256 * 1024 + u32::arbitrary(g) % (768 * 1024));
         TestConfig(c)

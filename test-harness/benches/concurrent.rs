@@ -74,12 +74,6 @@ fn concurrent(c: &mut Criterion) {
     group.finish();
 }
 
-fn config() -> Config {
-    let mut c = Config::default();
-    c.set_window_update_mode(yamux::WindowUpdateMode::OnRead);
-    c
-}
-
 async fn oneway(
     nstreams: usize,
     nmessages: usize,
@@ -87,8 +81,8 @@ async fn oneway(
     server: Endpoint,
     client: Endpoint,
 ) {
-    let server = Connection::new(server, config(), Mode::Server);
-    let client = Connection::new(client, config(), Mode::Client);
+    let server = Connection::new(server, Config::default(), Mode::Server);
+    let client = Connection::new(client, Config::default(), Mode::Client);
 
     task::spawn(dev_null_server(server));
 

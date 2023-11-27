@@ -1,6 +1,6 @@
 [package]
 name = "yamux"
-version = "0.12.1"
+version = "0.13.0"
 authors = ["Parity Technologies <admin@parity.io>"]
 license = "Apache-2.0 OR MIT"
 description = "Multiplexer over reliable, ordered connections"
@@ -19,5 +19,5 @@ static_assertions = "1"
 pin-project = "1.1.0"
 
 [dev-dependencies]
-quickcheck = "1.0"
 futures = { version = "0.3.12", default-features = false, features = ["executor"] }
+quickcheck = "1.0"
