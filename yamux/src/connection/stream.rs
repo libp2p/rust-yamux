@@ -161,7 +161,7 @@ impl Stream {
             conn,
             config: config.clone(),
             sender,
-            flag: Flag::None,
+            flag: Flag::Ack,
             shared: Arc::new(Mutex::new(Shared::new(
                 DEFAULT_CREDIT,
                 curent_send_window_size,
@@ -185,7 +185,7 @@ impl Stream {
             conn,
             config: config.clone(),
             sender,
-            flag: Flag::None,
+            flag: Flag::Syn,
             shared: Arc::new(Mutex::new(Shared::new(DEFAULT_CREDIT, DEFAULT_CREDIT))),
             accumulated_max_stream_windows,
             rtt,
@@ -209,11 +209,6 @@ impl Stream {
     /// Whether we are still waiting for the remote to acknowledge this stream.
     pub fn is_pending_ack(&self) -> bool {
         self.shared().is_pending_ack()
-    }
-
-    /// Set the flag that should be set on the next outbound frame header.
-    pub(crate) fn set_flag(&mut self, flag: Flag) {
-        self.flag = flag
     }
 
     pub(crate) fn shared(&self) -> MutexGuard<'_, Shared> {

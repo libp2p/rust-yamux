@@ -454,8 +454,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         log::trace!("{}: creating new outbound stream", self.id);
 
         let id = self.next_stream_id()?;
-        let mut stream = self.make_new_outbound_stream(id);
-        stream.set_flag(stream::Flag::Syn);
+        let stream = self.make_new_outbound_stream(id);
 
         log::debug!("{}: new outbound {} of {}", self.id, stream, self);
         self.streams.insert(id, stream.clone_shared());
@@ -625,7 +624,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 log::error!("{}: maximum number of streams reached", self.id);
                 return Action::Terminate(Frame::internal_error());
             }
-            let mut stream = self.make_new_inbound_stream(stream_id, DEFAULT_CREDIT);
+            let stream = self.make_new_inbound_stream(stream_id, DEFAULT_CREDIT);
             {
                 let mut shared = stream.shared();
                 if is_finish {
@@ -636,7 +635,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                     .saturating_sub(frame.body_len());
                 shared.buffer.push(frame.into_body());
             }
-            stream.set_flag(stream::Flag::Ack);
             self.streams.insert(stream_id, stream.clone_shared());
             return Action::New(stream);
         }
@@ -726,8 +724,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             }
 
             let credit = frame.header().credit() + DEFAULT_CREDIT;
-            let mut stream = self.make_new_inbound_stream(stream_id, credit);
-            stream.set_flag(stream::Flag::Ack);
+            let stream = self.make_new_inbound_stream(stream_id, credit);
 
             if is_finish {
                 stream
