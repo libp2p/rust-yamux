@@ -20,6 +20,11 @@ use std::{
     task::{Context, Poll},
 };
 
+/// Maximum Yamux frame body length
+///
+/// Limits the amount of bytes a remote can cause the local node to allocate at once when reading.
+///
+/// Chosen based on intuition in past iterations.
 const MAX_FRAME_BODY_LEN: usize = 1024 * 1024;
 
 /// A [`Stream`] and writer of [`Frame`] values.
