@@ -630,9 +630,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 if is_finish {
                     shared.update_state(self.id, stream_id, State::RecvClosed);
                 }
-                shared.current_receive_window_size = shared
-                    .current_receive_window_size
-                    .saturating_sub(frame.body_len());
+                shared.consume_receive_window(frame.body_len());
                 shared.buffer.push(frame.into_body());
             }
             self.streams.insert(stream_id, stream.clone_shared());
@@ -641,7 +639,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
         if let Some(s) = self.streams.get_mut(&stream_id) {
             let mut shared = s.lock();
-            if frame.body_len() > shared.current_receive_window_size {
+            if frame.body_len() > shared.current_receive_window_size() {
                 log::error!(
                     "{}/{}: frame body larger than window of stream",
                     self.id,
@@ -652,7 +650,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             if is_finish {
                 shared.update_state(self.id, stream_id, State::RecvClosed);
             }
-            if shared.buffer.len() >= shared.max_receive_window_size as usize {
+            // TODO: Still relevant? This should include frame.body_len() no?
+            if shared.buffer.len() >= shared.max_receive_window_size() as usize {
                 log::error!(
                     "{}/{}: buffer of stream grows beyond limit",
                     self.id,
@@ -662,9 +661,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 header.rst();
                 return Action::Reset(Frame::new(header));
             }
-            shared.current_receive_window_size = shared
-                .current_receive_window_size
-                .saturating_sub(frame.body_len());
+            shared.consume_receive_window(frame.body_len());
             shared.buffer.push(frame.into_body());
             if let Some(w) = shared.reader.take() {
                 w.wake()
@@ -737,7 +734,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
         if let Some(s) = self.streams.get_mut(&stream_id) {
             let mut shared = s.lock();
-            shared.current_send_window_size += frame.header().credit();
+            shared.increase_send_window_by(frame.header().credit());
             if is_finish {
                 shared.update_state(self.id, stream_id, State::RecvClosed);
             }

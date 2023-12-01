@@ -8,6 +8,7 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
+use crate::connection::rtt::Rtt;
 use crate::frame::header::ACK;
 use crate::{
     chunks::Chunks,
@@ -18,6 +19,7 @@ use crate::{
     },
     Config, DEFAULT_CREDIT,
 };
+use flow_control::FlowController;
 use futures::{
     channel::mpsc,
     future::Either,
@@ -25,14 +27,14 @@ use futures::{
     ready, SinkExt,
 };
 use parking_lot::{Mutex, MutexGuard};
-use std::cmp;
-use std::time::Instant;
 use std::{
     fmt, io,
     pin::Pin,
     sync::Arc,
     task::{Context, Poll, Waker},
 };
+
+mod flow_control;
 
 /// The state of a Yamux stream.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -58,23 +60,6 @@ pub enum State {
     Closed,
 }
 
-#[cfg(test)]
-impl quickcheck::Arbitrary for State {
-    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
-        use quickcheck::GenRange;
-
-        match g.gen_range(0u8..4) {
-            0 => State::Open {
-                acknowledged: bool::arbitrary(g),
-            },
-            1 => State::SendClosed,
-            2 => State::RecvClosed,
-            3 => State::Closed,
-            _ => unreachable!(),
-        }
-    }
-}
-
 impl State {
     /// Can we receive messages over this stream?
     pub fn can_read(self) -> bool {
@@ -98,20 +83,6 @@ pub(crate) enum Flag {
     Ack,
 }
 
-#[cfg(test)]
-impl quickcheck::Arbitrary for Flag {
-    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
-        use quickcheck::GenRange;
-
-        match g.gen_range(0u8..2) {
-            0 => Flag::None,
-            1 => Flag::Syn,
-            2 => Flag::Ack,
-            _ => unreachable!(),
-        }
-    }
-}
-
 /// A multiplexed Yamux stream.
 ///
 /// Streams are created either outbound via [`crate::Connection::poll_new_outbound`]
@@ -126,9 +97,6 @@ pub struct Stream {
     sender: mpsc::Sender<StreamCommand>,
     flag: Flag,
     shared: Arc<Mutex<Shared>>,
-    accumulated_max_stream_windows: Arc<Mutex<usize>>,
-    rtt: rtt::Rtt,
-    last_window_update: Instant,
 }
 
 impl fmt::Debug for Stream {
@@ -151,7 +119,7 @@ impl Stream {
         id: StreamId,
         conn: connection::Id,
         config: Arc<Config>,
-        curent_send_window_size: u32,
+        current_send_window_size: u32,
         sender: mpsc::Sender<StreamCommand>,
         rtt: rtt::Rtt,
         accumulated_max_stream_windows: Arc<Mutex<usize>>,
@@ -164,11 +132,11 @@ impl Stream {
             flag: Flag::Ack,
             shared: Arc::new(Mutex::new(Shared::new(
                 DEFAULT_CREDIT,
-                curent_send_window_size,
+                current_send_window_size,
+                accumulated_max_stream_windows,
+                rtt,
+                config,
             ))),
-            accumulated_max_stream_windows,
-            rtt,
-            last_window_update: Instant::now(),
         }
     }
 
@@ -186,10 +154,13 @@ impl Stream {
             config: config.clone(),
             sender,
             flag: Flag::Syn,
-            shared: Arc::new(Mutex::new(Shared::new(DEFAULT_CREDIT, DEFAULT_CREDIT))),
-            accumulated_max_stream_windows,
-            rtt,
-            last_window_update: Instant::now(),
+            shared: Arc::new(Mutex::new(Shared::new(
+                DEFAULT_CREDIT,
+                DEFAULT_CREDIT,
+                accumulated_max_stream_windows,
+                rtt,
+                config,
+            ))),
         }
     }
 
@@ -251,7 +222,7 @@ impl Stream {
             .poll_ready(cx)
             .map_err(|_| self.write_zero_err())?);
 
-        let Some(credit) = self.next_window_update() else {
+        let Some(credit) = self.shared.lock().next_window_update() else {
             return Poll::Ready(Ok(()));
         };
 
@@ -263,146 +234,6 @@ impl Stream {
             .map_err(|_| self.write_zero_err())?;
 
         Poll::Ready(Ok(()))
-    }
-
-    /// Calculate the number of additional window bytes the receiving side (local) should grant the
-    /// sending side (remote) via a window update message.
-    ///
-    /// Returns `None` if too small to justify a window update message.
-    fn next_window_update(&mut self) -> Option<u32> {
-        let debug_assert = || {
-            if !cfg!(debug_assertions) {
-                return;
-            }
-
-            let config = &self.config;
-            let shared = self.shared.lock();
-            let rtt = self.rtt.get();
-            let accumulated_max_stream_windows = *self.accumulated_max_stream_windows.lock();
-
-            assert!(
-                shared.current_receive_window_size <= shared.max_receive_window_size,
-                "The current window never exceeds the maximum."
-            );
-            assert!(
-                shared.max_receive_window_size
-                    <= config.max_stream_receive_window.unwrap_or(u32::MAX),
-                "The maximum never exceeds the configured maximum."
-            );
-            assert!(
-                (shared.max_receive_window_size - DEFAULT_CREDIT) as usize
-                    <= config.max_connection_receive_window
-                        - config.max_num_streams * DEFAULT_CREDIT as usize,
-                "The maximum never exceeds its maximum portion of the configured connection limit."
-            );
-            assert!(
-                (shared.max_receive_window_size - DEFAULT_CREDIT) as usize
-                    <= accumulated_max_stream_windows,
-                    "The amount by which the stream maximum exceeds DEFAULT_CREDIT is tracked in accumulated_max_stream_windows."
-            );
-            if rtt.is_none() {
-                assert_eq!(
-                    shared.max_receive_window_size, DEFAULT_CREDIT,
-                    "The maximum is only increased iff an rtt measurement is available."
-                );
-            }
-        };
-
-        debug_assert();
-
-        let mut shared = self.shared.lock();
-
-        let bytes_received = shared.max_receive_window_size - shared.current_receive_window_size;
-        let mut next_window_update =
-            bytes_received.saturating_sub(shared.buffer.len().try_into().unwrap_or(u32::MAX));
-
-        // Don't send an update in case half or more of the window is still available to the sender.
-        if next_window_update < shared.max_receive_window_size / 2 {
-            return None;
-        }
-
-        log::trace!(
-            "received {} mb in {} seconds ({} mbit/s)",
-            next_window_update as f64 / 1024.0 / 1024.0,
-            self.last_window_update.elapsed().as_secs_f64(),
-            next_window_update as f64 / 1024.0 / 1024.0 * 8.0
-                / self.last_window_update.elapsed().as_secs_f64()
-        );
-
-        // Auto-tuning `max_receive_window_size`
-        //
-        // The ideal `max_receive_window_size` is equal to the bandwidth-delay-product (BDP), thus
-        // allowing the remote sender to exhaust the entire available bandwidth on a single stream.
-        // Choosing `max_receive_window_size` too small prevents the remote sender from exhausting
-        // the available bandwidth. Choosing `max_receive_window_size` to large is wasteful and
-        // delays backpressure from the receiver to the sender on the stream.
-        //
-        // In case the remote sender has exhausted half or more of its credit in less than 2
-        // round-trips, try to double `max_receive_window_size`.
-        //
-        // For simplicity `max_receive_window_size` is never decreased.
-        //
-        // This implementation is heavily influenced by QUIC. See document below for rational on the
-        // above strategy.
-        //
-        // https://docs.google.com/document/d/1F2YfdDXKpy20WVKJueEf4abn_LVZHhMUMS5gX6Pgjl4/edit?usp=sharing
-        if self
-            .rtt
-            .get()
-            .map(|rtt| self.last_window_update.elapsed() < rtt * 2)
-            .unwrap_or(false)
-        {
-            let mut accumulated_max_stream_windows = self.accumulated_max_stream_windows.lock();
-
-            // Ideally one can just double it:
-            let mut new_max = shared.max_receive_window_size.saturating_mul(2);
-
-            // Then one has to consider the configured stream limit:
-            new_max = cmp::min(
-                new_max,
-                self.config.max_stream_receive_window.unwrap_or(u32::MAX),
-            );
-
-            // Then one has to consider the configured connection limit:
-            new_max = {
-                let connection_limit: usize = shared.max_receive_window_size as usize +
-                    // the overall configured conneciton limit
-                    self.config.max_connection_receive_window
-                    // minus the minimum amount of window guaranteed to each stream
-                    - self.config.max_num_streams * DEFAULT_CREDIT as usize
-                    // minus the amount of bytes beyond the minimum amount (`DEFAULT_CREDIT`)
-                    // already allocated by this and other streams on the connection.
-                    - *accumulated_max_stream_windows;
-
-                cmp::min(new_max, connection_limit.try_into().unwrap_or(u32::MAX))
-            };
-
-            // Account for the additional credit on the accumulated connection counter.
-            *accumulated_max_stream_windows += (new_max - shared.max_receive_window_size) as usize;
-            drop(accumulated_max_stream_windows);
-
-            log::debug!(
-                "old window_max: {} mb, new window_max: {} mb",
-                shared.max_receive_window_size as f64 / 1024.0 / 1024.0,
-                new_max as f64 / 1024.0 / 1024.0
-            );
-
-            shared.max_receive_window_size = new_max;
-
-            // Recalculate `next_window_update` with the new `max_receive_window_size`.
-            let bytes_received =
-                shared.max_receive_window_size - shared.current_receive_window_size;
-            next_window_update =
-                bytes_received.saturating_sub(shared.buffer.len().try_into().unwrap_or(u32::MAX));
-        }
-
-        self.last_window_update = Instant::now();
-        shared.current_receive_window_size += next_window_update;
-        drop(shared);
-
-        debug_assert();
-
-        return Some(next_window_update);
     }
 }
 
@@ -536,20 +367,20 @@ impl AsyncWrite for Stream {
                 log::debug!("{}/{}: can no longer write", self.conn, self.id);
                 return Poll::Ready(Err(self.write_zero_err()));
             }
-            if shared.current_send_window_size == 0 {
+            if shared.current_send_window_size() == 0 {
                 log::trace!("{}/{}: no more credit left", self.conn, self.id);
                 shared.writer = Some(cx.waker().clone());
                 return Poll::Pending;
             }
             let k = std::cmp::min(
-                shared.current_send_window_size,
+                shared.current_send_window_size(),
                 buf.len().try_into().unwrap_or(u32::MAX),
             );
             let k = std::cmp::min(
                 k,
                 self.config.split_send_size.try_into().unwrap_or(u32::MAX),
             );
-            shared.current_send_window_size = shared.current_send_window_size.saturating_sub(k);
+            shared.consume_send_window(k);
             Vec::from(&buf[..k as usize])
         };
         let n = body.len();
@@ -604,140 +435,35 @@ impl AsyncWrite for Stream {
     }
 }
 
-impl Drop for Stream {
-    fn drop(&mut self) {
-        let max_receive_window_size = self.shared.lock().max_receive_window_size;
-        let mut accumulated_max_stream_windows = self.accumulated_max_stream_windows.lock();
-
-        debug_assert!(
-            *accumulated_max_stream_windows >= (max_receive_window_size - DEFAULT_CREDIT) as usize,
-            "{accumulated_max_stream_windows} {max_receive_window_size}"
-        );
-
-        *accumulated_max_stream_windows -= (max_receive_window_size - DEFAULT_CREDIT) as usize;
-    }
-}
-
-#[cfg(test)]
-impl Clone for Stream {
-    fn clone(&self) -> Self {
-        Self {
-            id: self.id.clone(),
-            conn: self.conn.clone(),
-            config: self.config.clone(),
-            sender: self.sender.clone(),
-            flag: self.flag.clone(),
-            shared: Arc::new(Mutex::new(self.shared.lock().clone())),
-            accumulated_max_stream_windows: Arc::new(Mutex::new(
-                self.accumulated_max_stream_windows.lock().clone(),
-            )),
-            rtt: self.rtt.clone(),
-            last_window_update: self.last_window_update.clone(),
-        }
-    }
-}
-
-#[cfg(test)]
-impl quickcheck::Arbitrary for Stream {
-    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
-        use quickcheck::GenRange;
-
-        let mut shared = Shared::arbitrary(g);
-        let config = Arc::new(Config::arbitrary(g));
-        let rtt = rtt::Rtt::arbitrary(g);
-
-        // Update `shared` to align with `config` and rtt.
-        shared.max_receive_window_size = if rtt.get().is_none() {
-            DEFAULT_CREDIT
-        } else {
-            g.gen_range(
-                DEFAULT_CREDIT
-                    ..cmp::min(
-                        config.max_stream_receive_window.unwrap_or(u32::MAX),
-                        (DEFAULT_CREDIT as usize + config.max_connection_receive_window
-                            - (config.max_num_streams * (DEFAULT_CREDIT as usize)))
-                            .try_into()
-                            .unwrap_or(u32::MAX),
-                    )
-                    .saturating_add(1),
-            )
-        };
-        shared.current_receive_window_size = g.gen_range(0..shared.max_receive_window_size);
-
-        Self {
-            id: StreamId::new(0),
-            conn: connection::Id::random(),
-            sender: futures::channel::mpsc::channel(0).0,
-            flag: Flag::arbitrary(g),
-            accumulated_max_stream_windows: Arc::new(Mutex::new(g.gen_range(
-                (shared.max_receive_window_size - DEFAULT_CREDIT) as usize
-                    ..(config.max_connection_receive_window
-                        - config.max_num_streams * DEFAULT_CREDIT as usize
-                        + 1),
-            ))),
-            rtt,
-            last_window_update: Instant::now()
-                - std::time::Duration::from_secs(g.gen_range(0..(60 * 60 * 24))),
-            config,
-            shared: Arc::new(Mutex::new(shared)),
-        }
-    }
-}
-
 #[derive(Debug)]
 pub(crate) struct Shared {
     state: State,
-    pub(crate) current_receive_window_size: u32,
-    pub(crate) max_receive_window_size: u32,
-    pub(crate) current_send_window_size: u32,
+    flow_controller: FlowController,
     pub(crate) buffer: Chunks,
     pub(crate) reader: Option<Waker>,
     pub(crate) writer: Option<Waker>,
 }
 
-#[cfg(test)]
-impl Clone for Shared {
-    fn clone(&self) -> Self {
-        Self {
-            state: self.state.clone(),
-            current_receive_window_size: self.current_receive_window_size.clone(),
-            max_receive_window_size: self.max_receive_window_size.clone(),
-            current_send_window_size: self.current_send_window_size.clone(),
-            buffer: Chunks::new(),
-            reader: self.reader.clone(),
-            writer: self.writer.clone(),
-        }
-    }
-}
-
-#[cfg(test)]
-impl quickcheck::Arbitrary for Shared {
-    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
-        use quickcheck::GenRange;
-
-        let max_receive_window_size = g.gen_range(DEFAULT_CREDIT..u32::MAX);
-
-        Self {
-            state: State::arbitrary(g),
-            current_receive_window_size: g.gen_range(0..max_receive_window_size),
-            max_receive_window_size,
-            current_send_window_size: g.gen_range(0..u32::MAX),
-            buffer: Chunks::new(),
-            reader: None,
-            writer: None,
-        }
-    }
-}
-
 impl Shared {
-    fn new(current_receive_window_size: u32, current_send_window_size: u32) -> Self {
+    fn new(
+        current_receive_window_size: u32,
+        current_send_window_size: u32,
+
+        accumulated_max_stream_windows: Arc<Mutex<usize>>,
+        rtt: Rtt,
+        config: Arc<Config>,
+    ) -> Self {
         Shared {
             state: State::Open {
                 acknowledged: false,
             },
-            current_receive_window_size,
-            max_receive_window_size: DEFAULT_CREDIT,
-            current_send_window_size,
+            flow_controller: FlowController::new(
+                current_receive_window_size,
+                current_send_window_size,
+                accumulated_max_stream_windows,
+                rtt,
+                config,
+            ),
             buffer: Chunks::new(),
             reader: None,
             writer: None,
@@ -784,6 +510,10 @@ impl Shared {
         current // Return the previous stream state for informational purposes.
     }
 
+    pub(crate) fn next_window_update(&mut self) -> Option<u32> {
+        self.flow_controller.next_window_update(self.buffer.len())
+    }
+
     /// Whether we are still waiting for the remote to acknowledge this stream.
     pub fn is_pending_ack(&self) -> bool {
         matches!(
@@ -793,19 +523,28 @@ impl Shared {
             }
         )
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use quickcheck::QuickCheck;
+    pub(crate) fn current_send_window_size(&self) -> u32 {
+        self.flow_controller.current_send_window_size()
+    }
 
-    #[test]
-    fn next_window_update() {
-        fn property(mut stream: Stream) {
-            stream.next_window_update();
-        }
+    pub(crate) fn consume_send_window(&mut self, i: u32) {
+        self.flow_controller.consume_send_window(i)
+    }
 
-        QuickCheck::new().quickcheck(property as fn(_))
+    pub(crate) fn increase_send_window_by(&mut self, i: u32) {
+        self.flow_controller.increase_send_window_by(i)
+    }
+
+    pub(crate) fn current_receive_window_size(&self) -> u32 {
+        self.flow_controller.current_receive_window_size()
+    }
+
+    pub(crate) fn consume_receive_window(&mut self, i: u32) {
+        self.flow_controller.consume_receive_window(i)
+    }
+
+    pub(crate) fn max_receive_window_size(&self) -> u32 {
+        self.flow_controller.max_receive_window_size()
     }
 }
