@@ -107,7 +107,9 @@ impl Config {
 
         assert!(
             self.max_connection_receive_window.unwrap_or(usize::MAX)
-                >= self.max_num_streams * DEFAULT_CREDIT as usize
+                >= self.max_num_streams * DEFAULT_CREDIT as usize,
+            "`max_connection_receive_window` must be `>= 256 KiB * max_num_streams` to allow each
+            stream at least the Yamux default window size"
         );
 
         self
@@ -119,7 +121,9 @@ impl Config {
 
         assert!(
             self.max_connection_receive_window.unwrap_or(usize::MAX)
-                >= self.max_num_streams * DEFAULT_CREDIT as usize
+                >= self.max_num_streams * DEFAULT_CREDIT as usize,
+            "`max_connection_receive_window` must be `>= 256 KiB * max_num_streams` to allow each
+            stream at least the Yamux default window size"
         );
 
         self
