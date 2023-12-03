@@ -68,16 +68,13 @@ const DEFAULT_SPLIT_SEND_SIZE: usize = 16 * 1024;
 ///
 /// The default configuration values are as follows:
 ///
-/// - receive window = 256 KiB
-/// - max. buffer size (per stream) = 1 MiB
-/// - max. number of streams = 8192
-/// - window update mode = on read
+/// - max. sum of stream receive windows per connection = 1 GiB
+/// - max. number of streams = 512
 /// - read after close = true
 /// - split send size = 16 KiB
 #[derive(Debug, Clone)]
 pub struct Config {
-    max_stream_receive_window: Option<u32>,
-    max_connection_receive_window: usize,
+    max_connection_receive_window: Option<usize>,
     max_num_streams: usize,
     read_after_close: bool,
     split_send_size: usize,
@@ -86,11 +83,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            // TODO: Add rational: given that we have a connection window, ...
-            max_stream_receive_window: None,
-            // TODO: reevaluate default.
-            max_connection_receive_window: 1 * 1024 * 1024 * 1024,
-            // TODO
+            max_connection_receive_window: Some(1 * 1024 * 1024 * 1024),
             max_num_streams: 512,
             read_after_close: true,
             split_send_size: DEFAULT_SPLIT_SEND_SIZE,
@@ -99,40 +92,37 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Set the maximum receive window per stream .
+    /// Set the upper limit for the total receive window size across all streams of a connection.
     ///
-    /// Must be `>= 256 KiB`.
+    /// Must be `>= 256 KiB * max_num_streams` to allow each stream at least the Yamux default
+    /// window size.
     ///
     /// The window of a stream starts at 256 KiB and is increased (auto-tuned) based on the
     /// connection's round-trip time and the stream's bandwidth (striving for the
     /// bandwidth-delay-product).
     ///
-    /// Set to `None` to disable the per stream maximum receive window.
-    ///
-    /// # Panics
-    ///
-    /// If the given receive window is < 256 KiB.
-    pub fn set_max_stream_receive_window(&mut self, n: Option<u32>) -> &mut Self {
-        self.max_stream_receive_window = n;
-        self.check();
-        self
-    }
-
-    // TODO: Is a usize really needed here?
-    // TODO: Should this be an option?
-    /// Set the maximum sum of all stream receive windows per connection.
-    ///
-    /// Must be `>= 256 KiB * max_num_streams` to allow each stream the Yamux default window size.
-    pub fn set_max_connection_receive_window(&mut self, n: usize) -> &mut Self {
+    /// Set to `None` to disable limit, i.e. allow each stream to grow receive window based on
+    /// connection's round-trip time and stream's bandwidth without limit.
+    pub fn set_max_connection_receive_window(&mut self, n: Option<usize>) -> &mut Self {
         self.max_connection_receive_window = n;
-        self.check();
+
+        assert!(
+            self.max_connection_receive_window.unwrap_or(usize::MAX)
+                >= self.max_num_streams * DEFAULT_CREDIT as usize
+        );
+
         self
     }
 
     /// Set the max. number of streams per connection.
     pub fn set_max_num_streams(&mut self, n: usize) -> &mut Self {
         self.max_num_streams = n;
-        self.check();
+
+        assert!(
+            self.max_connection_receive_window.unwrap_or(usize::MAX)
+                >= self.max_num_streams * DEFAULT_CREDIT as usize
+        );
+
         self
     }
 
@@ -140,7 +130,6 @@ impl Config {
     /// the connection has been closed.
     pub fn set_read_after_close(&mut self, b: bool) -> &mut Self {
         self.read_after_close = b;
-        self.check();
         self
     }
 
@@ -148,16 +137,7 @@ impl Config {
     /// than the configured max. will be split.
     pub fn set_split_send_size(&mut self, n: usize) -> &mut Self {
         self.split_send_size = n;
-        self.check();
         self
-    }
-
-    // TODO: Consider doing the check on creation, not on each builder method call.
-    fn check(&self) {
-        assert!(self.max_stream_receive_window.unwrap_or(u32::MAX) >= DEFAULT_CREDIT);
-        assert!(
-            self.max_connection_receive_window >= self.max_num_streams * DEFAULT_CREDIT as usize
-        );
     }
 }
 
@@ -179,13 +159,11 @@ impl quickcheck::Arbitrary for Config {
         let max_num_streams = g.gen_range(0..u16::MAX as usize);
 
         Config {
-            max_stream_receive_window: if bool::arbitrary(g) {
-                Some(g.gen_range(DEFAULT_CREDIT..u32::MAX))
+            max_connection_receive_window: if bool::arbitrary(g) {
+                Some(g.gen_range((DEFAULT_CREDIT as usize * max_num_streams)..usize::MAX))
             } else {
                 None
             },
-            max_connection_receive_window: g
-                .gen_range((DEFAULT_CREDIT as usize * max_num_streams)..usize::MAX),
             max_num_streams,
             read_after_close: bool::arbitrary(g),
             split_send_size: g.gen_range(DEFAULT_SPLIT_SEND_SIZE..usize::MAX),

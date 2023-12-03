@@ -88,22 +88,16 @@ impl FlowController {
             // Ideally one can just double it:
             let mut new_max = self.max_receive_window_size.saturating_mul(2);
 
-            // Then one has to consider the configured stream limit:
-            new_max = cmp::min(
-                new_max,
-                self.config.max_stream_receive_window.unwrap_or(u32::MAX),
-            );
-
-            // Then one has to consider the configured connection limit:
+            // But one has to consider the configured connection limit:
             new_max = {
                 let connection_limit: usize = self.max_receive_window_size as usize +
                     // the overall configured conneciton limit
-                    self.config.max_connection_receive_window
+                    (self.config.max_connection_receive_window.unwrap_or(usize::MAX)
                     // minus the minimum amount of window guaranteed to each stream
                     - self.config.max_num_streams * DEFAULT_CREDIT as usize
                     // minus the amount of bytes beyond the minimum amount (`DEFAULT_CREDIT`)
                     // already allocated by this and other streams on the connection.
-                    - *accumulated_max_stream_windows;
+                    - *accumulated_max_stream_windows);
 
                 cmp::min(new_max, connection_limit.try_into().unwrap_or(u32::MAX))
             };
@@ -152,12 +146,8 @@ impl FlowController {
             "The current window never exceeds the maximum."
         );
         assert!(
-            self.max_receive_window_size <= config.max_stream_receive_window.unwrap_or(u32::MAX),
-            "The maximum never exceeds the configured maximum."
-        );
-        assert!(
             (self.max_receive_window_size - DEFAULT_CREDIT) as usize
-                <= config.max_connection_receive_window
+                <= config.max_connection_receive_window.unwrap_or(usize::MAX)
                     - config.max_num_streams * DEFAULT_CREDIT as usize,
             "The maximum never exceeds its maximum portion of the configured connection limit."
         );
@@ -261,28 +251,28 @@ mod tests {
         fn arbitrary(g: &mut quickcheck::Gen) -> Self {
             let config = Arc::new(Config::arbitrary(g));
             let rtt = Rtt::arbitrary(g);
+
+            let max_connection_minus_default =
+                config.max_connection_receive_window.unwrap_or(usize::MAX)
+                    - (config.max_num_streams * (DEFAULT_CREDIT as usize));
+
             let max_receive_window_size = if rtt.get().is_none() {
                 DEFAULT_CREDIT
             } else {
                 g.gen_range(
                     DEFAULT_CREDIT
-                        ..std::cmp::min(
-                            config.max_stream_receive_window.unwrap_or(u32::MAX),
-                            (DEFAULT_CREDIT as usize + config.max_connection_receive_window
-                                - (config.max_num_streams * (DEFAULT_CREDIT as usize)))
-                                .try_into()
-                                .unwrap_or(u32::MAX),
-                        )
-                        .saturating_add(1),
+                        ..(DEFAULT_CREDIT as usize)
+                            .saturating_add(max_connection_minus_default)
+                            .try_into()
+                            .unwrap_or(u32::MAX)
+                            .saturating_add(1),
                 )
             };
             let current_receive_window_size = g.gen_range(0..max_receive_window_size);
             let buffer_len = g.gen_range(0..max_receive_window_size as usize);
             let accumulated_max_stream_windows = Arc::new(Mutex::new(g.gen_range(
                 (max_receive_window_size - DEFAULT_CREDIT) as usize
-                    ..(config.max_connection_receive_window
-                        - config.max_num_streams * DEFAULT_CREDIT as usize
-                        + 1),
+                    ..max_connection_minus_default.saturating_add(1),
             )));
             let last_window_update =
                 Instant::now() - std::time::Duration::from_secs(g.gen_range(0..(60 * 60 * 24)));
