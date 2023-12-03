@@ -455,7 +455,9 @@ impl Arbitrary for TestConfig {
         c.set_read_after_close(Arbitrary::arbitrary(g));
         c.set_max_num_streams(max_num_streams);
         if bool::arbitrary(g) {
-            c.set_max_connection_receive_window(Some(g.gen_range(max_num_streams*(yamux::DEFAULT_CREDIT as usize)..usize::MAX)));
+            c.set_max_connection_receive_window(Some(
+                g.gen_range(max_num_streams * (yamux::DEFAULT_CREDIT as usize)..usize::MAX),
+            ));
         } else {
             c.set_max_connection_receive_window(None);
         }
