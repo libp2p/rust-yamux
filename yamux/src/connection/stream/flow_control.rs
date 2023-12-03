@@ -152,10 +152,10 @@ impl FlowController {
             "The maximum never exceeds its maximum portion of the configured connection limit."
         );
         assert!(
-                         (self.max_receive_window_size - DEFAULT_CREDIT) as usize
-                             <= accumulated_max_stream_windows,
-                             "The amount by which the stream maximum exceeds DEFAULT_CREDIT is tracked in accumulated_max_stream_windows."
-                     );
+            (self.max_receive_window_size - DEFAULT_CREDIT) as usize
+                <= accumulated_max_stream_windows,
+            "The amount by which the stream maximum exceeds DEFAULT_CREDIT is tracked in accumulated_max_stream_windows."
+        );
         if rtt.is_none() {
             assert_eq!(
                 self.max_receive_window_size, DEFAULT_CREDIT,
