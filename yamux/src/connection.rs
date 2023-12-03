@@ -315,8 +315,6 @@ pub(crate) enum Action {
     New(Stream),
     /// A ping should be answered.
     Ping(Frame<Ping>),
-    /// A stream should be reset.
-    Reset(Frame<Data>),
     /// The connection should be terminated.
     Terminate(Frame<GoAway>),
 }
@@ -567,10 +565,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             }
             Action::Ping(f) => {
                 log::trace!("{}/{}: pong", self.id, f.header().stream_id());
-                self.pending_frames.push_back(f.into());
-            }
-            Action::Reset(f) => {
-                log::trace!("{}/{}: sending reset", self.id, f.header().stream_id());
                 self.pending_frames.push_back(f.into());
             }
             Action::Terminate(f) => {

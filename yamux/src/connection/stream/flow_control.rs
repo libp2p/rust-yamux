@@ -192,10 +192,6 @@ impl FlowController {
             .checked_sub(i)
             .expect("not exceed receive window");
     }
-
-    pub(crate) fn max_receive_window_size(&self) -> u32 {
-        self.max_receive_window_size
-    }
 }
 
 impl Drop for FlowController {

@@ -542,8 +542,4 @@ impl Shared {
     pub(crate) fn consume_receive_window(&mut self, i: u32) {
         self.flow_controller.consume_receive_window(i)
     }
-
-    pub(crate) fn max_receive_window_size(&self) -> u32 {
-        self.flow_controller.max_receive_window_size()
-    }
 }
