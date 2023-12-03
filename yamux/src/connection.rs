@@ -650,17 +650,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             if is_finish {
                 shared.update_state(self.id, stream_id, State::RecvClosed);
             }
-            // TODO: Still relevant? This should include frame.body_len() no?
-            if shared.buffer.len() >= shared.max_receive_window_size() as usize {
-                log::error!(
-                    "{}/{}: buffer of stream grows beyond limit",
-                    self.id,
-                    stream_id
-                );
-                let mut header = Header::data(stream_id, 0);
-                header.rst();
-                return Action::Reset(Frame::new(header));
-            }
             shared.consume_receive_window(frame.body_len());
             shared.buffer.push(frame.into_body());
             if let Some(w) = shared.reader.take() {
