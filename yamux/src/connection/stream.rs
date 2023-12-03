@@ -448,7 +448,6 @@ impl Shared {
     fn new(
         current_receive_window_size: u32,
         current_send_window_size: u32,
-
         accumulated_max_stream_windows: Arc<Mutex<usize>>,
         rtt: Rtt,
         config: Arc<Config>,

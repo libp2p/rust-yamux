@@ -63,12 +63,11 @@ const MAX_ACK_BACKLOG: usize = 256;
 /// https://github.com/paritytech/yamux/issues/100.
 const DEFAULT_SPLIT_SEND_SIZE: usize = 16 * 1024;
 
-// TODO: Update
 /// Yamux configuration.
 ///
 /// The default configuration values are as follows:
 ///
-/// - max. sum of stream receive windows per connection = 1 GiB
+/// - max. for the total receive window size across all streams of a connection = 1 GiB
 /// - max. number of streams = 512
 /// - read after close = true
 /// - split send size = 16 KiB
