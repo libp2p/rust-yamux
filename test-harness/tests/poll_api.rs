@@ -173,11 +173,13 @@ fn prop_config_send_recv_single() {
         msgs.insert(0, Msg(vec![1u8; yamux::DEFAULT_CREDIT as usize]));
 
         Runtime::new().unwrap().block_on(async move {
-            let (server, mut client) = connected_peers(cfg1, cfg2, None).await.unwrap();
+            let (server, mut client) = connected_peers(cfg1, cfg2, None).await?;
             let server = echo_server(server);
 
             let client = async {
-                let stream = future::poll_fn(|cx| client.poll_new_outbound(cx)).await?;
+                let stream = future::poll_fn(|cx| client.poll_new_outbound(cx))
+                    .await
+                    .unwrap();
                 let client_task = noop_server(stream::poll_fn(|cx| client.poll_next_inbound(cx)));
 
                 future::select(pin!(client_task), pin!(send_on_single_stream(stream, msgs))).await;
