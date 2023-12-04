@@ -54,9 +54,9 @@ impl FlowController {
 
         log::trace!(
             "received {} mb in {} seconds ({} mbit/s)",
-            next_window_update as f64 / 1024.0 / 1024.0,
+            next_window_update as f64 / crate::MIB as f64,
             self.last_window_update.elapsed().as_secs_f64(),
-            next_window_update as f64 / 1024.0 / 1024.0 * 8.0
+            next_window_update as f64 / crate::MIB as f64 * 8.0
                 / self.last_window_update.elapsed().as_secs_f64()
         );
 
@@ -108,8 +108,8 @@ impl FlowController {
 
             log::debug!(
                 "old window_max: {} mb, new window_max: {} mb",
-                self.max_receive_window_size as f64 / 1024.0 / 1024.0,
-                new_max as f64 / 1024.0 / 1024.0
+                self.max_receive_window_size as f64 / crate::MIB as f64,
+                new_max as f64 / crate::MIB as f64
             );
 
             self.max_receive_window_size = new_max;

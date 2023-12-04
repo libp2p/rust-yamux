@@ -38,7 +38,11 @@ pub use crate::frame::{
     FrameDecodeError,
 };
 
-pub const DEFAULT_CREDIT: u32 = 256 * 1024; // as per yamux specification
+const KIB: usize = 1024;
+const MIB: usize = kib * 1024;
+const GIB: usize = mib * 1024;
+
+pub const DEFAULT_CREDIT: u32 = 256 * KIB as u32; // as per yamux specification
 
 pub type Result<T> = std::result::Result<T, ConnectionError>;
 
@@ -61,7 +65,7 @@ const MAX_ACK_BACKLOG: usize = 256;
 ///
 /// For details on why this concrete value was chosen, see
 /// https://github.com/paritytech/yamux/issues/100.
-const DEFAULT_SPLIT_SEND_SIZE: usize = 16 * 1024;
+const DEFAULT_SPLIT_SEND_SIZE: usize = 16 * KIB;
 
 /// Yamux configuration.
 ///
@@ -82,7 +86,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            max_connection_receive_window: Some(1 * 1024 * 1024 * 1024),
+            max_connection_receive_window: Some(1 * GIB),
             max_num_streams: 512,
             read_after_close: true,
             split_send_size: DEFAULT_SPLIT_SEND_SIZE,
