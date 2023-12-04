@@ -29,7 +29,9 @@ impl Rtt {
     pub(crate) fn new() -> Self {
         Self(Arc::new(Mutex::new(RttInner {
             rtt: None,
-            state: RttState::Initial,
+            state: RttState::Waiting {
+                next: Instant::now(),
+            },
         })))
     }
 
@@ -37,7 +39,6 @@ impl Rtt {
         let state = &mut self.0.lock().state;
 
         match state {
-            RttState::Initial => {}
             RttState::AwaitingPong { .. } => return None,
             RttState::Waiting { next } => {
                 if *next > Instant::now() {
@@ -59,7 +60,7 @@ impl Rtt {
         let inner = &mut self.0.lock();
 
         let (sent_at, expected_nonce) = match inner.state {
-            RttState::Initial | RttState::Waiting { .. } => {
+            RttState::Waiting { .. } => {
                 log::error!("received unexpected pong {}", received_nonce);
                 return Action::Terminate(Frame::protocol_error());
             }
@@ -124,7 +125,6 @@ impl quickcheck::Arbitrary for RttInner {
 #[derive(Debug)]
 #[cfg_attr(test, derive(Clone))]
 enum RttState {
-    Initial,
     AwaitingPong { sent_at: Instant, nonce: u32 },
     Waiting { next: Instant },
 }
@@ -132,17 +132,15 @@ enum RttState {
 #[cfg(test)]
 impl quickcheck::Arbitrary for RttState {
     fn arbitrary(g: &mut quickcheck::Gen) -> Self {
-        use quickcheck::GenRange;
-        match g.gen_range(0u8..3) {
-            0 => RttState::Initial,
-            1 => RttState::AwaitingPong {
+        if bool::arbitrary(g) {
+            RttState::AwaitingPong {
                 sent_at: Instant::now(),
                 nonce: u32::arbitrary(g),
-            },
-            2 => RttState::Waiting {
+            }
+        } else {
+            RttState::Waiting {
                 next: Instant::now(),
-            },
-            _ => unreachable!(),
+            }
         }
     }
 }

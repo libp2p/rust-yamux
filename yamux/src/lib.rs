@@ -39,8 +39,8 @@ pub use crate::frame::{
 };
 
 const KIB: usize = 1024;
-const MIB: usize = kib * 1024;
-const GIB: usize = mib * 1024;
+const MIB: usize = KIB * 1024;
+const GIB: usize = MIB * 1024;
 
 pub const DEFAULT_CREDIT: u32 = 256 * KIB as u32; // as per yamux specification
 
