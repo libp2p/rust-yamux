@@ -101,19 +101,10 @@ impl quickcheck::Arbitrary for Rtt {
 }
 
 #[derive(Debug)]
+#[cfg_attr(test, derive(Clone))]
 struct RttInner {
     state: RttState,
     rtt: Option<Duration>,
-}
-
-#[cfg(test)]
-impl Clone for RttInner {
-    fn clone(&self) -> Self {
-        Self {
-            state: self.state.clone(),
-            rtt: self.rtt.clone(),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -131,24 +122,11 @@ impl quickcheck::Arbitrary for RttInner {
 }
 
 #[derive(Debug)]
+#[cfg_attr(test, derive(Clone))]
 enum RttState {
     Initial,
     AwaitingPong { sent_at: Instant, nonce: u32 },
     Waiting { next: Instant },
-}
-
-#[cfg(test)]
-impl Clone for RttState {
-    fn clone(&self) -> Self {
-        match self {
-            Self::Initial => Self::Initial,
-            Self::AwaitingPong { sent_at, nonce } => Self::AwaitingPong {
-                sent_at: sent_at.clone(),
-                nonce: nonce.clone(),
-            },
-            Self::Waiting { next } => Self::Waiting { next: next.clone() },
-        }
-    }
 }
 
 #[cfg(test)]
