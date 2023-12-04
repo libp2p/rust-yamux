@@ -86,10 +86,10 @@ impl FlowController {
             let mut accumulated_max_stream_windows = self.accumulated_max_stream_windows.lock();
 
             // Ideally one can just double it:
-            let mut new_max = self.max_receive_window_size.saturating_mul(2);
+            let new_max = self.max_receive_window_size.saturating_mul(2);
 
             // But one has to consider the configured connection limit:
-            new_max = {
+            let new_max = {
                 let connection_limit: usize = self.max_receive_window_size as usize +
                     // the overall configured conneciton limit
                     (self.config.max_connection_receive_window.unwrap_or(usize::MAX)
