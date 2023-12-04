@@ -636,7 +636,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
         if let Some(s) = self.streams.get_mut(&stream_id) {
             let mut shared = s.lock();
-            if frame.body_len() > shared.current_receive_window_size() {
+            if frame.body_len() > shared.receive_window() {
                 log::error!(
                     "{}/{}: frame body larger than window of stream",
                     self.id,

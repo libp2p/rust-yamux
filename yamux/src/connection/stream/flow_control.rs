@@ -12,26 +12,26 @@ pub(crate) struct FlowController {
     rtt: Rtt,
     /// See [`Connection::accumulated_max_stream_windows`].
     accumulated_max_stream_windows: Arc<Mutex<usize>>,
-    current_receive_window_size: u32,
-    max_receive_window_size: u32,
-    current_send_window_size: u32,
+    receive_window: u32,
+    max_receive_window: u32,
+    send_window: u32,
 }
 
 impl FlowController {
     pub(crate) fn new(
-        current_receive_window_size: u32,
-        current_send_window_size: u32,
+        receive_window: u32,
+        send_window: u32,
         accumulated_max_stream_windows: Arc<Mutex<usize>>,
         rtt: Rtt,
         config: Arc<Config>,
     ) -> Self {
         Self {
-            current_receive_window_size,
-            current_send_window_size,
+            receive_window,
+            send_window,
             config,
             rtt,
             accumulated_max_stream_windows,
-            max_receive_window_size: DEFAULT_CREDIT,
+            max_receive_window: DEFAULT_CREDIT,
             last_window_update: Instant::now(),
         }
     }
@@ -43,12 +43,12 @@ impl FlowController {
     pub(crate) fn next_window_update(&mut self, buffer_len: usize) -> Option<u32> {
         self.assert_invariants(buffer_len);
 
-        let bytes_received = self.max_receive_window_size - self.current_receive_window_size;
+        let bytes_received = self.max_receive_window - self.receive_window;
         let mut next_window_update =
             bytes_received.saturating_sub(buffer_len.try_into().unwrap_or(u32::MAX));
 
         // Don't send an update in case half or more of the window is still available to the sender.
-        if next_window_update < self.max_receive_window_size / 2 {
+        if next_window_update < self.max_receive_window / 2 {
             return None;
         }
 
@@ -60,18 +60,18 @@ impl FlowController {
                 / self.last_window_update.elapsed().as_secs_f64()
         );
 
-        // Auto-tuning `max_receive_window_size`
+        // Auto-tuning `max_receive_window`
         //
-        // The ideal `max_receive_window_size` is equal to the bandwidth-delay-product (BDP), thus
+        // The ideal `max_receive_window` is equal to the bandwidth-delay-product (BDP), thus
         // allowing the remote sender to exhaust the entire available bandwidth on a single stream.
-        // Choosing `max_receive_window_size` too small prevents the remote sender from exhausting
-        // the available bandwidth. Choosing `max_receive_window_size` to large is wasteful and
-        // delays backpressure from the receiver to the sender on the stream.
+        // Choosing `max_receive_window` too small prevents the remote sender from exhausting the
+        // available bandwidth. Choosing `max_receive_window` to large is wasteful and delays
+        // backpressure from the receiver to the sender on the stream.
         //
         // In case the remote sender has exhausted half or more of its credit in less than 2
-        // round-trips, try to double `max_receive_window_size`.
+        // round-trips, try to double `max_receive_window`.
         //
-        // For simplicity `max_receive_window_size` is never decreased.
+        // For simplicity `max_receive_window` is never decreased.
         //
         // This implementation is heavily influenced by QUIC. See document below for rational on the
         // above strategy.
@@ -86,11 +86,11 @@ impl FlowController {
             let mut accumulated_max_stream_windows = self.accumulated_max_stream_windows.lock();
 
             // Ideally one can just double it:
-            let new_max = self.max_receive_window_size.saturating_mul(2);
+            let new_max = self.max_receive_window.saturating_mul(2);
 
             // But one has to consider the configured connection limit:
             let new_max = {
-                let connection_limit: usize = self.max_receive_window_size as usize +
+                let connection_limit: usize = self.max_receive_window as usize +
                     // the overall configured conneciton limit
                     (self.config.max_connection_receive_window.unwrap_or(usize::MAX)
                     // minus the minimum amount of window guaranteed to each stream
@@ -103,25 +103,25 @@ impl FlowController {
             };
 
             // Account for the additional credit on the accumulated connection counter.
-            *accumulated_max_stream_windows += (new_max - self.max_receive_window_size) as usize;
+            *accumulated_max_stream_windows += (new_max - self.max_receive_window) as usize;
             drop(accumulated_max_stream_windows);
 
             log::debug!(
                 "old window_max: {} mb, new window_max: {} mb",
-                self.max_receive_window_size as f64 / crate::MIB as f64,
+                self.max_receive_window as f64 / crate::MIB as f64,
                 new_max as f64 / crate::MIB as f64
             );
 
-            self.max_receive_window_size = new_max;
+            self.max_receive_window = new_max;
 
-            // Recalculate `next_window_update` with the new `max_receive_window_size`.
-            let bytes_received = self.max_receive_window_size - self.current_receive_window_size;
+            // Recalculate `next_window_update` with the new `max_receive_window`.
+            let bytes_received = self.max_receive_window - self.receive_window;
             next_window_update =
                 bytes_received.saturating_sub(buffer_len.try_into().unwrap_or(u32::MAX));
         }
 
         self.last_window_update = Instant::now();
-        self.current_receive_window_size += next_window_update;
+        self.receive_window += next_window_update;
 
         self.assert_invariants(buffer_len);
 
@@ -138,57 +138,57 @@ impl FlowController {
         let accumulated_max_stream_windows = *self.accumulated_max_stream_windows.lock();
 
         assert!(
-            buffer_len <= self.max_receive_window_size as usize,
+            buffer_len <= self.max_receive_window as usize,
             "The current buffer size never exceeds the maximum stream receive window."
         );
         assert!(
-            self.current_receive_window_size <= self.max_receive_window_size,
+            self.receive_window <= self.max_receive_window,
             "The current window never exceeds the maximum."
         );
         assert!(
-            (self.max_receive_window_size - DEFAULT_CREDIT) as usize
+            (self.max_receive_window - DEFAULT_CREDIT) as usize
                 <= config.max_connection_receive_window.unwrap_or(usize::MAX)
                     - config.max_num_streams * DEFAULT_CREDIT as usize,
             "The maximum never exceeds its maximum portion of the configured connection limit."
         );
         assert!(
-            (self.max_receive_window_size - DEFAULT_CREDIT) as usize
+            (self.max_receive_window - DEFAULT_CREDIT) as usize
                 <= accumulated_max_stream_windows,
             "The amount by which the stream maximum exceeds DEFAULT_CREDIT is tracked in accumulated_max_stream_windows."
         );
         if rtt.is_none() {
             assert_eq!(
-                self.max_receive_window_size, DEFAULT_CREDIT,
+                self.max_receive_window, DEFAULT_CREDIT,
                 "The maximum is only increased iff an rtt measurement is available."
             );
         }
     }
 
-    pub(crate) fn current_send_window_size(&self) -> u32 {
-        self.current_send_window_size
+    pub(crate) fn send_window(&self) -> u32 {
+        self.send_window
     }
 
     pub(crate) fn consume_send_window(&mut self, i: u32) {
-        self.current_send_window_size = self
-            .current_send_window_size
+        self.send_window = self
+            .send_window
             .checked_sub(i)
             .expect("not exceed send window");
     }
 
     pub(crate) fn increase_send_window_by(&mut self, i: u32) {
-        self.current_send_window_size = self
-            .current_send_window_size
+        self.send_window = self
+            .send_window
             .checked_add(i)
             .expect("send window not to exceed u32");
     }
 
-    pub(crate) fn current_receive_window_size(&self) -> u32 {
-        self.current_receive_window_size
+    pub(crate) fn receive_window(&self) -> u32 {
+        self.receive_window
     }
 
     pub(crate) fn consume_receive_window(&mut self, i: u32) {
-        self.current_receive_window_size = self
-            .current_receive_window_size
+        self.receive_window = self
+            .receive_window
             .checked_sub(i)
             .expect("not exceed receive window");
     }
@@ -199,13 +199,12 @@ impl Drop for FlowController {
         let mut accumulated_max_stream_windows = self.accumulated_max_stream_windows.lock();
 
         debug_assert!(
-            *accumulated_max_stream_windows
-                >= (self.max_receive_window_size - DEFAULT_CREDIT) as usize,
+            *accumulated_max_stream_windows >= (self.max_receive_window - DEFAULT_CREDIT) as usize,
             "{accumulated_max_stream_windows} {}",
-            self.max_receive_window_size
+            self.max_receive_window
         );
 
-        *accumulated_max_stream_windows -= (self.max_receive_window_size - DEFAULT_CREDIT) as usize;
+        *accumulated_max_stream_windows -= (self.max_receive_window - DEFAULT_CREDIT) as usize;
     }
 }
 
@@ -234,9 +233,9 @@ mod tests {
                     )),
                     rtt: self.controller.rtt.clone(),
                     last_window_update: self.controller.last_window_update.clone(),
-                    current_receive_window_size: self.controller.current_receive_window_size,
-                    max_receive_window_size: self.controller.max_receive_window_size,
-                    current_send_window_size: self.controller.current_send_window_size,
+                    receive_window: self.controller.receive_window,
+                    max_receive_window: self.controller.max_receive_window,
+                    send_window: self.controller.send_window,
                 },
                 buffer_len: self.buffer_len,
             }
@@ -252,7 +251,7 @@ mod tests {
                 config.max_connection_receive_window.unwrap_or(usize::MAX)
                     - (config.max_num_streams * (DEFAULT_CREDIT as usize));
 
-            let max_receive_window_size = if rtt.get().is_none() {
+            let max_receive_window = if rtt.get().is_none() {
                 DEFAULT_CREDIT
             } else {
                 g.gen_range(
@@ -264,15 +263,15 @@ mod tests {
                             .saturating_add(1),
                 )
             };
-            let current_receive_window_size = g.gen_range(0..max_receive_window_size);
-            let buffer_len = g.gen_range(0..max_receive_window_size as usize);
+            let receive_window = g.gen_range(0..max_receive_window);
+            let buffer_len = g.gen_range(0..max_receive_window as usize);
             let accumulated_max_stream_windows = Arc::new(Mutex::new(g.gen_range(
-                (max_receive_window_size - DEFAULT_CREDIT) as usize
+                (max_receive_window - DEFAULT_CREDIT) as usize
                     ..max_connection_minus_default.saturating_add(1),
             )));
             let last_window_update =
                 Instant::now() - std::time::Duration::from_secs(g.gen_range(0..(60 * 60 * 24)));
-            let current_send_window_size = g.gen_range(0..u32::MAX);
+            let send_window = g.gen_range(0..u32::MAX);
 
             Self {
                 controller: FlowController {
@@ -280,9 +279,9 @@ mod tests {
                     rtt,
                     last_window_update,
                     config,
-                    current_receive_window_size,
-                    max_receive_window_size,
-                    current_send_window_size,
+                    receive_window,
+                    max_receive_window,
+                    send_window,
                 },
                 buffer_len,
             }
