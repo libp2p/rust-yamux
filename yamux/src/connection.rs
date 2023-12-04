@@ -384,6 +384,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Result<Stream>> {
         loop {
             if self.socket.poll_ready_unpin(cx).is_ready() {
+                // Note `next_ping` does not register a waker and thus if not called regularly (idle
+                // connection) no ping is sent. This is deliberate as an idle connection does not
+                // need RTT measurements to increase its stream receive window.
                 if let Some(frame) = self.rtt.next_ping() {
                     self.socket.start_send_unpin(frame.into())?;
                     continue;
