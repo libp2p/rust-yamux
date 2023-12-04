@@ -106,6 +106,23 @@ impl Config {
     ///
     /// Set to `None` to disable limit, i.e. allow each stream to grow receive window based on
     /// connection's round-trip time and stream's bandwidth without limit.
+    ///
+    /// ## DOS attack mitigation
+    ///
+    /// A remote node (attacker) might trick the local node (target) into allocating large stream
+    /// receive windows, trying to make the local node run out of memory.
+    ///
+    /// This attack is difficult, as the local node only increases the stream receive window up to
+    /// 2x the bandwidth-delay-product, where bandwidth is the amount of bytes read, not just
+    /// received. In other words, the attacker has to send (and have the local node read)
+    /// significant amount of bytes on a stream over a long period of time to increase the stream
+    /// receive window. E.g. on a 60ms 10Gbit/s connection the bandwidth-delay-product is ~75 MiB
+    /// and thus the local node will at most allocate ~150 MiB (2x bandwidth-delay-product) per
+    /// stream.
+    ///
+    /// Despite the difficulty of the attack one should choose a reasonable
+    /// `max_connection_receive_window` to protect against this attack, especially since an attacker
+    /// might use more than one stream per connection.
     pub fn set_max_connection_receive_window(&mut self, n: Option<usize>) -> &mut Self {
         self.max_connection_receive_window = n;
 
