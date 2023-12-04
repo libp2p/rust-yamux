@@ -78,8 +78,8 @@ impl Rtt {
 
         inner.rtt = Some(sent_at.elapsed());
         log::debug!(
-            "received pong {received_nonce}, estimated round-trip-time {}s",
-            inner.rtt.as_ref().unwrap().as_secs_f64()
+            "received pong {received_nonce}, estimated round-trip-time {:?}",
+            inner.rtt.as_ref().expect("rtt just set")
         );
 
         inner.state = RttState::Waiting {
