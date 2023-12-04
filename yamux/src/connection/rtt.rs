@@ -61,26 +61,20 @@ impl Rtt {
 
         let (sent_at, expected_nonce) = match inner.state {
             RttState::Waiting { .. } => {
-                log::error!("received unexpected pong {}", received_nonce);
+                log::error!("received unexpected pong {received_nonce}");
                 return Action::Terminate(Frame::protocol_error());
             }
             RttState::AwaitingPong { sent_at, nonce } => (sent_at, nonce),
         };
 
         if received_nonce != expected_nonce {
-            log::error!(
-                "received pong with {} but expected {}",
-                received_nonce,
-                expected_nonce
-            );
+            log::error!("received pong with {received_nonce} but expected {expected_nonce}");
             return Action::Terminate(Frame::protocol_error());
         }
 
-        inner.rtt = Some(sent_at.elapsed());
-        log::debug!(
-            "received pong {received_nonce}, estimated round-trip-time {:?}",
-            inner.rtt.as_ref().expect("rtt just set")
-        );
+        let rtt = sent_at.elapsed();
+        inner.rtt = Some(rtt);
+        log::debug!("received pong {received_nonce}, estimated round-trip-time {rtt:?}");
 
         inner.state = RttState::Waiting {
             next: Instant::now() + PING_INTERVAL,
