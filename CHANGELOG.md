@@ -1,5 +1,8 @@
 # 0.13.0
 
+- Introduce dynamic stream receive window auto-tuning.
+  While low-resourced deployments maintain the benefit of small buffers, high resource deployments eventually end-up with a window of roughly the bandwidth-delay-product (ideal) and are thus able to use the entire available bandwidth.
+  See [PR 176](https://github.com/libp2p/rust-yamux/pull/176) for performance results and details on the implementation.
 - Remove `WindowUpdateMode`.
   Behavior will always be `WindowUpdateMode::OnRead`, thus enabling flow-control and enforcing backpressure.
   See [PR 178](https://github.com/libp2p/rust-yamux/pull/178).

@@ -38,7 +38,11 @@ pub use crate::frame::{
     FrameDecodeError,
 };
 
-pub const DEFAULT_CREDIT: u32 = 256 * 1024; // as per yamux specification
+const KIB: usize = 1024;
+const MIB: usize = KIB * 1024;
+const GIB: usize = MIB * 1024;
+
+pub const DEFAULT_CREDIT: u32 = 256 * KIB as u32; // as per yamux specification
 
 pub type Result<T> = std::result::Result<T, ConnectionError>;
 
@@ -61,22 +65,19 @@ const MAX_ACK_BACKLOG: usize = 256;
 ///
 /// For details on why this concrete value was chosen, see
 /// https://github.com/paritytech/yamux/issues/100.
-const DEFAULT_SPLIT_SEND_SIZE: usize = 16 * 1024;
+const DEFAULT_SPLIT_SEND_SIZE: usize = 16 * KIB;
 
 /// Yamux configuration.
 ///
 /// The default configuration values are as follows:
 ///
-/// - receive window = 256 KiB
-/// - max. buffer size (per stream) = 1 MiB
-/// - max. number of streams = 8192
-/// - window update mode = on read
+/// - max. for the total receive window size across all streams of a connection = 1 GiB
+/// - max. number of streams = 512
 /// - read after close = true
 /// - split send size = 16 KiB
 #[derive(Debug, Clone)]
 pub struct Config {
-    receive_window: u32,
-    max_buffer_size: usize,
+    max_connection_receive_window: Option<usize>,
     max_num_streams: usize,
     read_after_close: bool,
     split_send_size: usize,
@@ -85,9 +86,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            receive_window: DEFAULT_CREDIT,
-            max_buffer_size: 1024 * 1024,
-            max_num_streams: 8192,
+            max_connection_receive_window: Some(1 * GIB),
+            max_num_streams: 512,
             read_after_close: true,
             split_send_size: DEFAULT_SPLIT_SEND_SIZE,
         }
@@ -95,26 +95,58 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Set the receive window per stream (must be >= 256 KiB).
+    /// Set the upper limit for the total receive window size across all streams of a connection.
     ///
-    /// # Panics
+    /// Must be `>= 256 KiB * max_num_streams` to allow each stream at least the Yamux default
+    /// window size.
     ///
-    /// If the given receive window is < 256 KiB.
-    pub fn set_receive_window(&mut self, n: u32) -> &mut Self {
-        assert!(n >= DEFAULT_CREDIT);
-        self.receive_window = n;
+    /// The window of a stream starts at 256 KiB and is increased (auto-tuned) based on the
+    /// connection's round-trip time and the stream's bandwidth (striving for the
+    /// bandwidth-delay-product).
+    ///
+    /// Set to `None` to disable limit, i.e. allow each stream to grow receive window based on
+    /// connection's round-trip time and stream's bandwidth without limit.
+    ///
+    /// ## DOS attack mitigation
+    ///
+    /// A remote node (attacker) might trick the local node (target) into allocating large stream
+    /// receive windows, trying to make the local node run out of memory.
+    ///
+    /// This attack is difficult, as the local node only increases the stream receive window up to
+    /// 2x the bandwidth-delay-product, where bandwidth is the amount of bytes read, not just
+    /// received. In other words, the attacker has to send (and have the local node read)
+    /// significant amount of bytes on a stream over a long period of time to increase the stream
+    /// receive window. E.g. on a 60ms 10Gbit/s connection the bandwidth-delay-product is ~75 MiB
+    /// and thus the local node will at most allocate ~150 MiB (2x bandwidth-delay-product) per
+    /// stream.
+    ///
+    /// Despite the difficulty of the attack one should choose a reasonable
+    /// `max_connection_receive_window` to protect against this attack, especially since an attacker
+    /// might use more than one stream per connection.
+    pub fn set_max_connection_receive_window(&mut self, n: Option<usize>) -> &mut Self {
+        self.max_connection_receive_window = n;
+
+        assert!(
+            self.max_connection_receive_window.unwrap_or(usize::MAX)
+                >= self.max_num_streams * DEFAULT_CREDIT as usize,
+            "`max_connection_receive_window` must be `>= 256 KiB * max_num_streams` to allow each
+            stream at least the Yamux default window size"
+        );
+
         self
     }
 
-    /// Set the max. buffer size per stream.
-    pub fn set_max_buffer_size(&mut self, n: usize) -> &mut Self {
-        self.max_buffer_size = n;
-        self
-    }
-
-    /// Set the max. number of streams.
+    /// Set the max. number of streams per connection.
     pub fn set_max_num_streams(&mut self, n: usize) -> &mut Self {
         self.max_num_streams = n;
+
+        assert!(
+            self.max_connection_receive_window.unwrap_or(usize::MAX)
+                >= self.max_num_streams * DEFAULT_CREDIT as usize,
+            "`max_connection_receive_window` must be `>= 256 KiB * max_num_streams` to allow each
+            stream at least the Yamux default window size"
+        );
+
         self
     }
 
@@ -141,4 +173,24 @@ static_assertions::const_assert! {
 // Check that we can safely cast a `u32` to a `usize`.
 static_assertions::const_assert! {
     std::mem::size_of::<u32>() <= std::mem::size_of::<usize>()
+}
+
+#[cfg(test)]
+impl quickcheck::Arbitrary for Config {
+    fn arbitrary(g: &mut quickcheck::Gen) -> Self {
+        use quickcheck::GenRange;
+
+        let max_num_streams = g.gen_range(0..u16::MAX as usize);
+
+        Config {
+            max_connection_receive_window: if bool::arbitrary(g) {
+                Some(g.gen_range((DEFAULT_CREDIT as usize * max_num_streams)..usize::MAX))
+            } else {
+                None
+            },
+            max_num_streams,
+            read_after_close: bool::arbitrary(g),
+            split_send_size: g.gen_range(DEFAULT_SPLIT_SEND_SIZE..usize::MAX),
+        }
+    }
 }

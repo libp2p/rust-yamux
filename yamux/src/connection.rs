@@ -14,6 +14,7 @@
 
 mod cleanup;
 mod closing;
+mod rtt;
 mod stream;
 
 use crate::tagged_stream::TaggedStream;
@@ -287,8 +288,15 @@ struct Active<T> {
 
     pending_frames: VecDeque<Frame<()>>,
     new_outbound_stream_waker: Option<Waker>,
-}
 
+    rtt: rtt::Rtt,
+
+    /// A stream's `max_stream_receive_window` can grow beyond [`DEFAULT_CREDIT`], see
+    /// [`Stream::next_window_update`]. This field is the sum of the bytes by which all streams'
+    /// `max_stream_receive_window` have each exceeded [`DEFAULT_CREDIT`]. Used to enforce
+    /// [`Config::max_connection_receive_window`].
+    accumulated_max_stream_windows: Arc<Mutex<usize>>,
+}
 /// `Stream` to `Connection` commands.
 #[derive(Debug)]
 pub(crate) enum StreamCommand {
@@ -300,15 +308,13 @@ pub(crate) enum StreamCommand {
 
 /// Possible actions as a result of incoming frame handling.
 #[derive(Debug)]
-enum Action {
+pub(crate) enum Action {
     /// Nothing to be done.
     None,
     /// A new stream has been opened by the remote.
     New(Stream),
     /// A ping should be answered.
     Ping(Frame<Ping>),
-    /// A stream should be reset.
-    Reset(Frame<Data>),
     /// The connection should be terminated.
     Terminate(Frame<GoAway>),
 }
@@ -341,7 +347,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     fn new(socket: T, cfg: Config, mode: Mode) -> Self {
         let id = Id::random();
         log::debug!("new connection: {} ({:?})", id, mode);
-        let socket = frame::Io::new(id, socket, cfg.max_buffer_size).fuse();
+        let socket = frame::Io::new(id, socket).fuse();
         Active {
             id,
             mode,
@@ -356,6 +362,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             },
             pending_frames: VecDeque::default(),
             new_outbound_stream_waker: None,
+            rtt: rtt::Rtt::new(),
+            accumulated_max_stream_windows: Default::default(),
         }
     }
 
@@ -376,6 +384,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Result<Stream>> {
         loop {
             if self.socket.poll_ready_unpin(cx).is_ready() {
+                // Note `next_ping` does not register a waker and thus if not called regularly (idle
+                // connection) no ping is sent. This is deliberate as an idle connection does not
+                // need RTT measurements to increase its stream receive window.
+                if let Some(frame) = self.rtt.next_ping() {
+                    self.socket.start_send_unpin(frame.into())?;
+                    continue;
+                }
+
                 if let Some(frame) = self.pending_frames.pop_front() {
                     self.socket.start_send_unpin(frame)?;
                     continue;
@@ -439,20 +455,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         log::trace!("{}: creating new outbound stream", self.id);
 
         let id = self.next_stream_id()?;
-        let extra_credit = self.config.receive_window - DEFAULT_CREDIT;
-
-        if extra_credit > 0 {
-            let mut frame = Frame::window_update(id, extra_credit);
-            frame.header_mut().syn();
-            log::trace!("{}/{}: sending initial {}", self.id, id, frame.header());
-            self.pending_frames.push_back(frame.into());
-        }
-
-        let mut stream = self.make_new_outbound_stream(id, self.config.receive_window);
-
-        if extra_credit == 0 {
-            stream.set_flag(stream::Flag::Syn)
-        }
+        let stream = self.make_new_outbound_stream(id);
 
         log::debug!("{}: new outbound {} of {}", self.id, stream, self);
         self.streams.insert(id, stream.clone_shared());
@@ -537,7 +540,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     fn on_frame(&mut self, frame: Frame<()>) -> Result<Option<Stream>> {
         log::trace!("{}: received: {}", self.id, frame.header());
 
-        if frame.header().flags().contains(header::ACK) {
+        if frame.header().flags().contains(header::ACK)
+            && matches!(frame.header().tag(), Tag::Data | Tag::WindowUpdate)
+        {
             let id = frame.header().stream_id();
             if let Some(stream) = self.streams.get(&id) {
                 stream
@@ -563,10 +568,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             }
             Action::Ping(f) => {
                 log::trace!("{}/{}: pong", self.id, f.header().stream_id());
-                self.pending_frames.push_back(f.into());
-            }
-            Action::Reset(f) => {
-                log::trace!("{}/{}: sending reset", self.id, f.header().stream_id());
                 self.pending_frames.push_back(f.into());
             }
             Action::Terminate(f) => {
@@ -620,23 +621,22 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 log::error!("{}: maximum number of streams reached", self.id);
                 return Action::Terminate(Frame::internal_error());
             }
-            let mut stream = self.make_new_inbound_stream(stream_id, DEFAULT_CREDIT);
+            let stream = self.make_new_inbound_stream(stream_id, DEFAULT_CREDIT);
             {
                 let mut shared = stream.shared();
                 if is_finish {
                     shared.update_state(self.id, stream_id, State::RecvClosed);
                 }
-                shared.window = shared.window.saturating_sub(frame.body_len());
+                shared.consume_receive_window(frame.body_len());
                 shared.buffer.push(frame.into_body());
             }
-            stream.set_flag(stream::Flag::Ack);
             self.streams.insert(stream_id, stream.clone_shared());
             return Action::New(stream);
         }
 
         if let Some(s) = self.streams.get_mut(&stream_id) {
             let mut shared = s.lock();
-            if frame.body().len() > shared.window as usize {
+            if frame.body_len() > shared.receive_window() {
                 log::error!(
                     "{}/{}: frame body larger than window of stream",
                     self.id,
@@ -647,18 +647,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             if is_finish {
                 shared.update_state(self.id, stream_id, State::RecvClosed);
             }
-            let max_buffer_size = self.config.max_buffer_size;
-            if shared.buffer.len() >= max_buffer_size {
-                log::error!(
-                    "{}/{}: buffer of stream grows beyond limit",
-                    self.id,
-                    stream_id
-                );
-                let mut header = Header::data(stream_id, 0);
-                header.rst();
-                return Action::Reset(Frame::new(header));
-            }
-            shared.window = shared.window.saturating_sub(frame.body_len());
+            shared.consume_receive_window(frame.body_len());
             shared.buffer.push(frame.into_body());
             if let Some(w) = shared.reader.take() {
                 w.wake()
@@ -718,8 +707,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             }
 
             let credit = frame.header().credit() + DEFAULT_CREDIT;
-            let mut stream = self.make_new_inbound_stream(stream_id, credit);
-            stream.set_flag(stream::Flag::Ack);
+            let stream = self.make_new_inbound_stream(stream_id, credit);
 
             if is_finish {
                 stream
@@ -732,7 +720,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
         if let Some(s) = self.streams.get_mut(&stream_id) {
             let mut shared = s.lock();
-            shared.credit += frame.header().credit();
+            shared.increase_send_window_by(frame.header().credit());
             if is_finish {
                 shared.update_state(self.id, stream_id, State::RecvClosed);
             }
@@ -761,15 +749,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     fn on_ping(&mut self, frame: &Frame<Ping>) -> Action {
         let stream_id = frame.header().stream_id();
         if frame.header().flags().contains(header::ACK) {
-            // pong
-            return Action::None;
+            return self.rtt.handle_pong(frame.nonce());
         }
         if stream_id == CONNECTION_ID || self.streams.contains_key(&stream_id) {
             let mut hdr = Header::ping(frame.header().nonce());
             hdr.ack();
             return Action::Ping(Frame::new(hdr));
         }
-        log::trace!(
+        log::debug!(
             "{}/{}: ping for unknown stream, possibly dropped earlier: {:?}",
             self.id,
             stream_id,
@@ -794,10 +781,18 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             waker.wake();
         }
 
-        Stream::new_inbound(id, self.id, config, credit, sender)
+        Stream::new_inbound(
+            id,
+            self.id,
+            config,
+            credit,
+            sender,
+            self.rtt.clone(),
+            self.accumulated_max_stream_windows.clone(),
+        )
     }
 
-    fn make_new_outbound_stream(&mut self, id: StreamId, window: u32) -> Stream {
+    fn make_new_outbound_stream(&mut self, id: StreamId) -> Stream {
         let config = self.config.clone();
 
         let (sender, receiver) = mpsc::channel(10); // 10 is an arbitrary number.
@@ -806,7 +801,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             waker.wake();
         }
 
-        Stream::new_outbound(id, self.id, config, window, sender)
+        Stream::new_outbound(
+            id,
+            self.id,
+            config,
+            sender,
+            self.rtt.clone(),
+            self.accumulated_max_stream_windows.clone(),
+        )
     }
 
     fn next_stream_id(&mut self) -> Result<StreamId> {

@@ -7,7 +7,7 @@ publish = false
 [dependencies]
 yamux = { path = "../yamux" }
 futures = "0.3.4"
-quickcheck = "1.0"
+quickcheck = { package = "quickcheck-ext", path = "../quickcheck-ext" }
 tokio = { version = "1.0", features = ["net", "rt-multi-thread", "macros", "time"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 anyhow = "1"
@@ -17,7 +17,6 @@ log = "0.4.17"
 criterion = "0.5"
 env_logger = "0.10"
 futures = "0.3.4"
-quickcheck = "1.0"
 tokio = { version = "1.0", features = ["net", "rt-multi-thread", "macros", "time"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 constrained-connection = "0.1"

@@ -132,6 +132,22 @@ impl Frame<WindowUpdate> {
     }
 }
 
+impl Frame<Ping> {
+    pub fn ping(nonce: u32) -> Self {
+        let mut header = Header::ping(nonce);
+        header.syn();
+
+        Frame {
+            header,
+            body: Vec::new(),
+        }
+    }
+
+    pub fn nonce(&self) -> u32 {
+        self.header.nonce()
+    }
+}
+
 impl Frame<GoAway> {
     pub fn term() -> Self {
         Frame {

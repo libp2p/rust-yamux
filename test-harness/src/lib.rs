@@ -76,7 +76,7 @@ where
         .try_for_each_concurrent(None, |mut stream| async move {
             {
                 let (mut r, mut w) = AsyncReadExt::split(&mut stream);
-                futures::io::copy(&mut r, &mut w).await?;
+                futures::io::copy(&mut r, &mut w).await.unwrap();
             }
             stream.close().await?;
             Ok(())
@@ -447,9 +447,21 @@ pub struct TestConfig(pub Config);
 
 impl Arbitrary for TestConfig {
     fn arbitrary(g: &mut Gen) -> Self {
+        use quickcheck::GenRange;
+
         let mut c = Config::default();
+        let max_num_streams = 512;
+
         c.set_read_after_close(Arbitrary::arbitrary(g));
-        c.set_receive_window(256 * 1024 + u32::arbitrary(g) % (768 * 1024));
+        c.set_max_num_streams(max_num_streams);
+        if bool::arbitrary(g) {
+            c.set_max_connection_receive_window(Some(
+                g.gen_range(max_num_streams * (yamux::DEFAULT_CREDIT as usize)..usize::MAX),
+            ));
+        } else {
+            c.set_max_connection_receive_window(None);
+        }
+
         TestConfig(c)
     }
 }
