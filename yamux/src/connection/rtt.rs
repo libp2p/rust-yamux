@@ -10,11 +10,9 @@
 
 //! Connection round-trip time measurement
 
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::sync::Arc;
 
+use instant::{Duration, Instant};
 use parking_lot::Mutex;
 
 use crate::connection::Action;
