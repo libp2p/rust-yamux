@@ -1,5 +1,6 @@
-use std::{cmp, sync::Arc, time::Instant};
+use std::{cmp, sync::Arc};
 
+use instant::Instant;
 use parking_lot::Mutex;
 
 use crate::{connection::rtt::Rtt, Config, DEFAULT_CREDIT};
@@ -211,6 +212,7 @@ impl Drop for FlowController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use instant::Duration;
     use quickcheck::{GenRange, QuickCheck};
 
     #[derive(Debug)]
@@ -270,7 +272,7 @@ mod tests {
                     ..max_connection_minus_default.saturating_add(1),
             )));
             let last_window_update =
-                Instant::now() - std::time::Duration::from_secs(g.gen_range(0..(60 * 60 * 24)));
+                Instant::now() - Duration::from_secs(g.gen_range(0..(60 * 60 * 24)));
             let send_window = g.gen_range(0..u32::MAX);
 
             Self {

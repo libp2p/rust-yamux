@@ -1,3 +1,8 @@
+# 0.13.1
+
+- Fix WASM support using `instant::{Duration, Instant}` instead of `std::time::{Duration, Instant}`.
+  See [PR 179](https://github.com/libp2p/rust-yamux/pull/179).
+
 # 0.13.0
 
 - Introduce dynamic stream receive window auto-tuning.
