@@ -401,12 +401,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
                 // Privilege pending `Pong` and `GoAway` `Frame`s
                 // over `Frame`s from the receivers.
-                if let Some(frame) = self.pending_read_frame.take() {
-                    self.socket.start_send_unpin(frame)?;
-                    continue;
-                }
-
-                if let Some(frame) = self.pending_write_frame.take() {
+                if let Some(frame) = self
+                    .pending_read_frame
+                    .take()
+                    .or_else(|| self.pending_write_frame.take())
+                {
                     self.socket.start_send_unpin(frame)?;
                     continue;
                 }
@@ -417,32 +416,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 Poll::Pending => {}
             }
 
-            if self.pending_read_frame.is_none() {
-                match self.socket.poll_next_unpin(cx) {
-                    Poll::Ready(Some(frame)) => {
-                        match self.on_frame(frame?)? {
-                            Action::None => {}
-                            Action::New(stream) => {
-                                log::trace!("{}: new inbound {} of {}", self.id, stream, self);
-                                return Poll::Ready(Ok(stream));
-                            }
-                            Action::Ping(f) => {
-                                log::trace!("{}/{}: pong", self.id, f.header().stream_id());
-                                self.pending_read_frame.replace(f.into());
-                            }
-                            Action::Terminate(f) => {
-                                log::trace!("{}: sending term", self.id);
-                                self.pending_read_frame.replace(f.into());
-                            }
-                        }
-                        continue;
-                    }
-                    Poll::Ready(None) => {
-                        return Poll::Ready(Err(ConnectionError::Closed));
-                    }
-                    Poll::Pending => {}
-                }
-            }
             if self.pending_write_frame.is_none() {
                 match self.stream_receivers.poll_next_unpin(cx) {
                     Poll::Ready(Some((_, Some(StreamCommand::SendFrame(frame))))) => {
@@ -470,6 +443,33 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                     }
                     Poll::Ready(None) => {
                         self.no_streams_waker = Some(cx.waker().clone());
+                    }
+                    Poll::Pending => {}
+                }
+            }
+
+            if self.pending_read_frame.is_none() {
+                match self.socket.poll_next_unpin(cx) {
+                    Poll::Ready(Some(frame)) => {
+                        match self.on_frame(frame?)? {
+                            Action::None => {}
+                            Action::New(stream) => {
+                                log::trace!("{}: new inbound {} of {}", self.id, stream, self);
+                                return Poll::Ready(Ok(stream));
+                            }
+                            Action::Ping(f) => {
+                                log::trace!("{}/{}: pong", self.id, f.header().stream_id());
+                                self.pending_read_frame.replace(f.into());
+                            }
+                            Action::Terminate(f) => {
+                                log::trace!("{}: sending term", self.id);
+                                self.pending_read_frame.replace(f.into());
+                            }
+                        }
+                        continue;
+                    }
+                    Poll::Ready(None) => {
+                        return Poll::Ready(Err(ConnectionError::Closed));
                     }
                     Poll::Pending => {}
                 }
