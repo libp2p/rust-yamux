@@ -49,6 +49,14 @@ where
 
         loop {
             match this.state {
+                State::FlushingPendingFrames => {
+                    ready!(this.socket.poll_ready_unpin(cx))?;
+
+                    match this.pending_frames.pop_front() {
+                        Some(frame) => this.socket.start_send_unpin(frame)?,
+                        None => this.state = State::ClosingStreamReceiver,
+                    }
+                }
                 State::ClosingStreamReceiver => {
                     for stream in this.stream_receivers.iter_mut() {
                         stream.inner_mut().close();
@@ -74,14 +82,6 @@ where
                         }
                     }
                 }
-                State::FlushingPendingFrames => {
-                    ready!(this.socket.poll_ready_unpin(cx))?;
-
-                    match this.pending_frames.pop_front() {
-                        Some(frame) => this.socket.start_send_unpin(frame)?,
-                        None => this.state = State::ClosingStreamReceiver,
-                    }
-                }
                 State::ClosingSocket => {
                     ready!(this.socket.poll_close_unpin(cx))?;
 
@@ -93,8 +93,8 @@ where
 }
 
 enum State {
+    FlushingPendingFrames,
     ClosingStreamReceiver,
     DrainingStreamReceiver,
-    FlushingPendingFrames,
     ClosingSocket,
 }
