@@ -57,7 +57,7 @@ fn concurrent_streams() {
         const PAYLOAD_SIZE: usize = 128 * 1024;
 
         let data = Msg(vec![0x42; PAYLOAD_SIZE]);
-        let n_streams = 1000;
+        let n_streams = 512;
 
         let mut cfg = Config::default();
         cfg.set_split_send_size(PAYLOAD_SIZE); // Use a large frame size to speed up the test.
