@@ -1,3 +1,7 @@
+# 0.13.2
+
+- Bound `Active`'s `pending_frames` to enforce backpressure. 
+  See [460baf2ccb7d5982b266cb3cb9c0bdf75b4fb779](https://github.com/libp2p/rust-yamux/commit/460baf2ccb7d5982b266cb3cb9c0bdf75b4fb779)
 # 0.13.1
 
 - Fix WASM support using `instant::{Duration, Instant}` instead of `std::time::{Duration, Instant}`.
