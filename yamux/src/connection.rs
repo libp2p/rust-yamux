@@ -728,6 +728,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             shared.increase_send_window_by(frame.header().credit());
             if is_finish {
                 shared.update_state(self.id, stream_id, State::RecvClosed);
+
+                if let Some(w) = shared.reader.take() {
+                    w.wake()
+                }
             }
             if let Some(w) = shared.writer.take() {
                 w.wake()
