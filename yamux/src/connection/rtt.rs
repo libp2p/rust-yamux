@@ -12,8 +12,8 @@
 
 use std::sync::Arc;
 
-use instant::{Duration, Instant};
 use parking_lot::Mutex;
+use web_time::{Duration, Instant};
 
 use crate::connection::Action;
 use crate::frame::{header::Ping, Frame};

@@ -1,7 +1,7 @@
 use std::{cmp, sync::Arc};
 
-use instant::Instant;
 use parking_lot::Mutex;
+use web_time::Instant;
 
 use crate::{connection::rtt::Rtt, Config, DEFAULT_CREDIT};
 
@@ -212,8 +212,8 @@ impl Drop for FlowController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use instant::Duration;
     use quickcheck::{GenRange, QuickCheck};
+    use web_time::Duration;
 
     #[derive(Debug)]
     struct Input {
