@@ -11,13 +11,13 @@ edition = "2021"
 
 [dependencies]
 futures = { version = "0.3.12", default-features = false, features = ["std", "executor"] }
-instant = "0.1"
 log = "0.4.8"
 nohash-hasher = "0.2"
 parking_lot = "0.12"
+pin-project = "1.1.0"
 rand = "0.8.3"
 static_assertions = "1"
-pin-project = "1.1.0"
+web-time = "1.1.0"
 
 [dev-dependencies]
 futures = { version = "0.3.12", default-features = false, features = ["executor"] }

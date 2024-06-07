@@ -1,3 +1,8 @@
+# 0.13.3
+
+- Use `web-time` instead of `instant`.
+  See [PR 191](https://github.com/libp2p/rust-yamux/pull/191).
+
 # 0.13.2
 
 - Bound `Active`'s `pending_frames` to enforce backpressure. 
