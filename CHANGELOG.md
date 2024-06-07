@@ -1,5 +1,8 @@
 # 0.13.3
 
+- Wake up readers after setting the state to RecvClosed to not miss EOF.
+  See [PR 190](https://github.com/libp2p/rust-yamux/pull/190).
+
 - Use `web-time` instead of `instant`.
   See [PR 191](https://github.com/libp2p/rust-yamux/pull/191).
 
