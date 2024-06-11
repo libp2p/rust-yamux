@@ -391,14 +391,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<Result<Stream>> {
         loop {
             if self.socket.poll_ready_unpin(cx).is_ready() {
-                // Note `next_ping` does not register a waker and thus if not called regularly (idle
-                // connection) no ping is sent. This is deliberate as an idle connection does not
-                // need RTT measurements to increase its stream receive window.
-                if let Some(frame) = self.rtt.next_ping() {
-                    self.socket.start_send_unpin(frame.into())?;
-                    continue;
-                }
-
                 // Privilege pending `Pong` and `GoAway` `Frame`s
                 // over `Frame`s from the receivers.
                 if let Some(frame) = self
@@ -407,6 +399,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                     .or_else(|| self.pending_write_frame.take())
                 {
                     self.socket.start_send_unpin(frame)?;
+                    continue;
+                }
+
+                // Note `next_ping` does not register a waker and thus if not called regularly (idle
+                // connection) no ping is sent. This is deliberate as an idle connection does not
+                // need RTT measurements to increase its stream receive window.
+                if let Some(frame) = self.rtt.next_ping() {
+                    self.socket.start_send_unpin(frame.into())?;
                     continue;
                 }
             }
