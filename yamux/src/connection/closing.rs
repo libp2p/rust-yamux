@@ -30,7 +30,7 @@ where
         socket: Fuse<frame::Io<T>>,
     ) -> Self {
         Self {
-            state: State::FlushingPendingFrames,
+            state: State::ClosingStreamReceiver,
             stream_receivers,
             pending_frames,
             socket,
@@ -49,14 +49,6 @@ where
 
         loop {
             match this.state {
-                State::FlushingPendingFrames => {
-                    ready!(this.socket.poll_ready_unpin(cx))?;
-
-                    match this.pending_frames.pop_front() {
-                        Some(frame) => this.socket.start_send_unpin(frame)?,
-                        None => this.state = State::ClosingStreamReceiver,
-                    }
-                }
                 State::ClosingStreamReceiver => {
                     for stream in this.stream_receivers.iter_mut() {
                         stream.inner_mut().close();
@@ -77,9 +69,17 @@ where
                         Poll::Pending | Poll::Ready(None) => {
                             // No more frames from streams, append `Term` frame and flush them all.
                             this.pending_frames.push_back(Frame::term().into());
-                            this.state = State::ClosingSocket;
+                            this.state = State::FlushingPendingFrames;
                             continue;
                         }
+                    }
+                }
+                State::FlushingPendingFrames => {
+                    ready!(this.socket.poll_ready_unpin(cx))?;
+
+                    match this.pending_frames.pop_front() {
+                        Some(frame) => this.socket.start_send_unpin(frame)?,
+                        None => this.state = State::ClosingSocket,
                     }
                 }
                 State::ClosingSocket => {
@@ -93,8 +93,8 @@ where
 }
 
 enum State {
-    FlushingPendingFrames,
     ClosingStreamReceiver,
     DrainingStreamReceiver,
+    FlushingPendingFrames,
     ClosingSocket,
 }
