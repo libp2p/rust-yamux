@@ -1,3 +1,7 @@
+# 0.13.4
+
+- Fix sending pending frames after closing. See [PR 194](https://github.com/libp2p/rust-yamux/pull/194).
+
 # 0.13.3
 
 - Wake up readers after setting the state to RecvClosed to not miss EOF.
