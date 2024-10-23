@@ -115,7 +115,7 @@ mod tests {
             _: &mut Context<'_>,
             _: &mut [u8],
         ) -> Poll<std::io::Result<usize>> {
-            todo!()
+            unimplemented!()
         }
     }
     impl AsyncWrite for Socket {
@@ -130,7 +130,7 @@ mod tests {
         }
 
         fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-            todo!()
+            uniplemented!()
         }
 
         fn poll_close(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
@@ -181,7 +181,7 @@ mod tests {
             &frame_close_ack,
             StreamCommand::CloseStream { ack: true },
         ));
-        let pending_frames = vec![frame_pending.clone().into()];
+        let pending_frames = vec![frame_pending.into()];
         let mut socket = Socket {
             written: vec![],
             closed: false,
