@@ -130,7 +130,7 @@ mod tests {
         }
 
         fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-            uniplemented!()
+            unimplemented!()
         }
 
         fn poll_close(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
