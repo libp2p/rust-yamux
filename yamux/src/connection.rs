@@ -784,7 +784,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     fn make_new_inbound_stream(&mut self, id: StreamId, credit: u32) -> Stream {
         let config = self.config.clone();
 
-        let (sender, receiver) = mpsc::channel(10); // 10 is an arbitrary number.
+        let (sender, receiver) = mpsc::channel(config.max_stream_backlog);
         self.stream_receivers.push(TaggedStream::new(id, receiver));
         if let Some(waker) = self.no_streams_waker.take() {
             waker.wake();
