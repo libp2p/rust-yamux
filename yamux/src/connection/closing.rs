@@ -36,6 +36,11 @@ where
             socket,
         }
     }
+
+    /// Retrieve a reference to the socket.
+    pub(crate) fn get_ref(&self) -> &T {
+        self.socket.get_ref().get_ref()
+    }
 }
 
 impl<T> Future for Closing<T>

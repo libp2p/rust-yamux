@@ -88,6 +88,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
         }
     }
 
+    /// Retrieve a reference to the socket.
+    pub fn get_ref(&self) -> Option<&T> {
+        self.inner.get_ref()
+    }
+
     /// Poll for a new outbound stream.
     ///
     /// This function will fail if the current state does not allow opening new outbound streams.
@@ -262,6 +267,19 @@ enum ConnectionState<T> {
     Poisoned,
 }
 
+impl<T: AsyncRead + AsyncWrite + Unpin> ConnectionState<T> {
+    /// Retrieve a reference to the connection, if it still exists.
+    fn get_ref(&self) -> Option<&T> {
+        match self {
+            ConnectionState::Active(active) => Some(active.get_ref()),
+            ConnectionState::Closing(closing) => Some(closing.get_ref()),
+            ConnectionState::Cleanup(_) | ConnectionState::Closed | ConnectionState::Poisoned => {
+                None
+            }
+        }
+    }
+}
+
 impl<T> fmt::Debug for ConnectionState<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -367,6 +385,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             rtt: rtt::Rtt::new(),
             accumulated_max_stream_windows: Default::default(),
         }
+    }
+
+    /// Retrieve a reference to the socket.
+    fn get_ref(&self) -> &T {
+        self.socket.get_ref().get_ref()
     }
 
     /// Gracefully close the connection to the remote.

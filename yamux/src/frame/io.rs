@@ -45,6 +45,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Io<T> {
             write_state: WriteState::Init,
         }
     }
+
+    /// Retrieve a reference reference to the socket.
+    pub(crate) fn get_ref(&self) -> &T {
+        &self.io
+    }
 }
 
 /// The stages of writing a new `Frame`.
