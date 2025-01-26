@@ -8,6 +8,7 @@
 // at https://www.apache.org/licenses/LICENSE-2.0 and a copy of the MIT license
 // at https://opensource.org/licenses/MIT.
 
+use crate::chunks::Chunk;
 use crate::connection::rtt::Rtt;
 use crate::frame::header::ACK;
 use crate::{
@@ -26,7 +27,8 @@ use futures::{
     io::{AsyncRead, AsyncWrite},
     ready, SinkExt,
 };
-use parking_lot::{Mutex, MutexGuard};
+
+use parking_lot::Mutex;
 use std::{
     fmt, io,
     pin::Pin,
@@ -96,7 +98,7 @@ pub struct Stream {
     config: Arc<Config>,
     sender: mpsc::Sender<StreamCommand>,
     flag: Flag,
-    shared: Arc<Mutex<Shared>>,
+    shared: Shared,
 }
 
 impl fmt::Debug for Stream {
@@ -130,13 +132,13 @@ impl Stream {
             config: config.clone(),
             sender,
             flag: Flag::Ack,
-            shared: Arc::new(Mutex::new(Shared::new(
+            shared: Shared::new(
                 DEFAULT_CREDIT,
                 send_window,
                 accumulated_max_stream_windows,
                 rtt,
                 config,
-            ))),
+            ),
         }
     }
 
@@ -154,13 +156,13 @@ impl Stream {
             config: config.clone(),
             sender,
             flag: Flag::Syn,
-            shared: Arc::new(Mutex::new(Shared::new(
+            shared: Shared::new(
                 DEFAULT_CREDIT,
                 DEFAULT_CREDIT,
                 accumulated_max_stream_windows,
                 rtt,
                 config,
-            ))),
+            ),
         }
     }
 
@@ -170,23 +172,24 @@ impl Stream {
     }
 
     pub fn is_write_closed(&self) -> bool {
-        matches!(self.shared().state(), State::SendClosed)
+        matches!(self.shared.state(), State::SendClosed)
     }
 
     pub fn is_closed(&self) -> bool {
-        matches!(self.shared().state(), State::Closed)
+        matches!(self.shared.state(), State::Closed)
     }
 
     /// Whether we are still waiting for the remote to acknowledge this stream.
     pub fn is_pending_ack(&self) -> bool {
-        self.shared().is_pending_ack()
+        self.shared.is_pending_ack()
     }
 
-    pub(crate) fn shared(&self) -> MutexGuard<'_, Shared> {
-        self.shared.lock()
+    /// Returns a reference to the `Shared` concurrency wrapper.
+    pub(crate) fn shared(&self) -> &Shared {
+        &self.shared
     }
 
-    pub(crate) fn clone_shared(&self) -> Arc<Mutex<Shared>> {
+    pub(crate) fn clone_shared(&self) -> Shared {
         self.shared.clone()
     }
 
@@ -213,7 +216,7 @@ impl Stream {
     /// Send new credit to the sending side via a window update message if
     /// permitted.
     fn send_window_update(&mut self, cx: &mut Context) -> Poll<io::Result<()>> {
-        if !self.shared.lock().state.can_read() {
+        if !self.shared.state().can_read() {
             return Poll::Ready(Ok(()));
         }
 
@@ -222,7 +225,7 @@ impl Stream {
             .poll_ready(cx)
             .map_err(|_| self.write_zero_err())?);
 
-        let Some(credit) = self.shared.lock().next_window_update() else {
+        let Some(credit) = self.shared.next_window_update() else {
             return Poll::Ready(Ok(()));
         };
 
@@ -262,9 +265,7 @@ impl futures::stream::Stream for Stream {
             Poll::Pending => {}
         }
 
-        let mut shared = self.shared();
-
-        if let Some(bytes) = shared.buffer.pop() {
+        if let Some(bytes) = self.shared.pop_buffer() {
             let off = bytes.offset();
             let mut vec = bytes.into_vec();
             if off != 0 {
@@ -283,14 +284,14 @@ impl futures::stream::Stream for Stream {
         }
 
         // Buffer is empty, let's check if we can expect to read more data.
-        if !shared.state().can_read() {
+        if !self.shared.state().can_read() {
             log::debug!("{}/{}: eof", self.conn, self.id);
             return Poll::Ready(None); // stream has been reset
         }
 
         // Since we have no more data at this point, we want to be woken up
         // by the connection when more becomes available for us.
-        shared.reader = Some(cx.waker().clone());
+        self.shared.set_reader_waker(Some(cx.waker().clone()));
 
         Poll::Pending
     }
@@ -316,36 +317,46 @@ impl AsyncRead for Stream {
         }
 
         // Copy data from stream buffer.
-        let mut shared = self.shared();
         let mut n = 0;
-        while let Some(chunk) = shared.buffer.front_mut() {
-            if chunk.is_empty() {
-                shared.buffer.pop();
-                continue;
+        let can_read = self.shared.with_mut(|inner| {
+            while let Some(chunk) = inner.buffer.front_mut() {
+                if chunk.is_empty() {
+                    inner.buffer.pop();
+                    continue;
+                }
+                let k = std::cmp::min(chunk.len(), buf.len() - n);
+                buf[n..n + k].copy_from_slice(&chunk.as_ref()[..k]);
+                n += k;
+                chunk.advance(k);
+                if n == buf.len() {
+                    break;
+                }
             }
-            let k = std::cmp::min(chunk.len(), buf.len() - n);
-            buf[n..n + k].copy_from_slice(&chunk.as_ref()[..k]);
-            n += k;
-            chunk.advance(k);
-            if n == buf.len() {
-                break;
+
+            if n > 0 {
+                return true;
             }
-        }
+
+            // Buffer is empty, let's check if we can expect to read more data.
+            if !inner.state.can_read() {
+                return false; // No more data available
+            }
+
+            // Since we have no more data at this point, we want to be woken up
+            // by the connection when more becomes available for us.
+            inner.reader = Some(cx.waker().clone());
+            true
+        });
 
         if n > 0 {
             log::trace!("{}/{}: read {} bytes", self.conn, self.id, n);
             return Poll::Ready(Ok(n));
         }
 
-        // Buffer is empty, let's check if we can expect to read more data.
-        if !shared.state().can_read() {
+        if !can_read {
             log::debug!("{}/{}: eof", self.conn, self.id);
             return Poll::Ready(Ok(0)); // stream has been reset
         }
-
-        // Since we have no more data at this point, we want to be woken up
-        // by the connection when more becomes available for us.
-        shared.reader = Some(cx.waker().clone());
 
         Poll::Pending
     }
@@ -361,28 +372,39 @@ impl AsyncWrite for Stream {
             .sender
             .poll_ready(cx)
             .map_err(|_| self.write_zero_err())?);
-        let body = {
-            let mut shared = self.shared();
-            if !shared.state().can_write() {
+
+        let result = self.shared.with_mut(|inner| {
+            if !inner.state.can_write() {
                 log::debug!("{}/{}: can no longer write", self.conn, self.id);
-                return Poll::Ready(Err(self.write_zero_err()));
+                // Return an error
+                return Err(self.write_zero_err());
             }
-            if shared.send_window() == 0 {
+
+            let window = inner.send_window();
+            if window == 0 {
                 log::trace!("{}/{}: no more credit left", self.conn, self.id);
-                shared.writer = Some(cx.waker().clone());
-                return Poll::Pending;
+                inner.writer = Some(cx.waker().clone());
+                return Ok(None); // means we are Pending
             }
-            let k = std::cmp::min(
-                shared.send_window(),
-                buf.len().try_into().unwrap_or(u32::MAX),
-            );
+
+            let k = std::cmp::min(window, buf.len().try_into().unwrap_or(u32::MAX));
+
             let k = std::cmp::min(
                 k,
                 self.config.split_send_size.try_into().unwrap_or(u32::MAX),
             );
-            shared.consume_send_window(k);
-            Vec::from(&buf[..k as usize])
+
+            inner.consume_send_window(k);
+            let body = Some(Vec::from(&buf[..k as usize]));
+            Ok(body)
+        });
+
+        let body = match result {
+            Err(e) => return Poll::Ready(Err(e)), // can't write
+            Ok(None) => return Poll::Pending,     // no credit => Pending
+            Ok(Some(b)) => b,                     // we have a body
         };
+
         let n = body.len();
         let mut frame = Frame::data(self.id, body).expect("body <= u32::MAX").left();
         self.add_flag(frame.header_mut());
@@ -393,8 +415,9 @@ impl AsyncWrite for Stream {
         // a) to be consistent with outbound streams
         // b) to correctly test our behaviour around timing of when ACKs are sent. See `ack_timing.rs` test.
         if frame.header().flags().contains(ACK) {
-            self.shared()
-                .update_state(self.conn, self.id, State::Open { acknowledged: true });
+            self.shared.with_mut(|inner| {
+                inner.update_state(self.conn, self.id, State::Open { acknowledged: true });
+            });
         }
 
         let cmd = StreamCommand::SendFrame(frame);
@@ -429,19 +452,16 @@ impl AsyncWrite for Stream {
         self.sender
             .start_send(cmd)
             .map_err(|_| self.write_zero_err())?;
-        self.shared()
-            .update_state(self.conn, self.id, State::SendClosed);
+        self.shared.with_mut(|inner| {
+            inner.update_state(self.conn, self.id, State::SendClosed);
+        });
         Poll::Ready(Ok(()))
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Shared {
-    state: State,
-    flow_controller: FlowController,
-    pub(crate) buffer: Chunks,
-    pub(crate) reader: Option<Waker>,
-    pub(crate) writer: Option<Waker>,
+    inner: Arc<Mutex<SharedInner>>,
 }
 
 impl Shared {
@@ -452,7 +472,70 @@ impl Shared {
         rtt: Rtt,
         config: Arc<Config>,
     ) -> Self {
-        Shared {
+        Self {
+            inner: Arc::new(Mutex::new(SharedInner::new(
+                receive_window,
+                send_window,
+                accumulated_max_stream_windows,
+                rtt,
+                config,
+            ))),
+        }
+    }
+
+    pub fn state(&self) -> State {
+        self.inner.lock().state
+    }
+
+    pub fn pop_buffer(&self) -> Option<Chunk> {
+        self.with_mut(|inner| inner.buffer.pop())
+    }
+
+    pub fn is_pending_ack(&self) -> bool {
+        self.inner.lock().is_pending_ack()
+    }
+
+    pub fn next_window_update(&self) -> Option<u32> {
+        self.inner.lock().next_window_update()
+    }
+
+    pub fn set_reader_waker(&self, waker: Option<Waker>) {
+        self.with_mut(|inner| {
+            inner.reader = waker;
+        });
+    }
+
+    pub fn update_state(&self, cid: connection::Id, sid: StreamId, next: State) -> State {
+        self.with_mut(|inner| inner.update_state(cid, sid, next))
+    }
+
+    pub fn with_mut<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&mut SharedInner) -> R,
+    {
+        let mut guard = self.inner.lock();
+        f(&mut guard)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct SharedInner {
+    state: State,
+    flow_controller: FlowController,
+    pub(crate) buffer: Chunks,
+    pub(crate) reader: Option<Waker>,
+    pub(crate) writer: Option<Waker>,
+}
+
+impl SharedInner {
+    fn new(
+        receive_window: u32,
+        send_window: u32,
+        accumulated_max_stream_windows: Arc<Mutex<usize>>,
+        rtt: Rtt,
+        config: Arc<Config>,
+    ) -> Self {
+        Self {
             state: State::Open {
                 acknowledged: false,
             },
@@ -467,10 +550,6 @@ impl Shared {
             reader: None,
             writer: None,
         }
-    }
-
-    pub(crate) fn state(&self) -> State {
-        self.state
     }
 
     /// Update the stream state and return the state before it was updated.
@@ -509,14 +588,14 @@ impl Shared {
         current // Return the previous stream state for informational purposes.
     }
 
-    pub(crate) fn next_window_update(&mut self) -> Option<u32> {
+    fn next_window_update(&mut self) -> Option<u32> {
         self.flow_controller.next_window_update(self.buffer.len())
     }
 
     /// Whether we are still waiting for the remote to acknowledge this stream.
-    pub fn is_pending_ack(&self) -> bool {
+    fn is_pending_ack(&self) -> bool {
         matches!(
-            self.state(),
+            self.state,
             State::Open {
                 acknowledged: false
             }
