@@ -340,7 +340,7 @@ mod tests {
             let body = if header.tag() == header::Tag::Data {
                 header.set_len(header.len().val() % 4096);
                 let mut b = vec![0; header.len().val() as usize];
-                rand::thread_rng().fill_bytes(&mut b);
+                rand::rng().fill_bytes(&mut b);
                 b
             } else {
                 Vec::new()
