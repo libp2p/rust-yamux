@@ -504,7 +504,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     }
 
     fn on_drop_stream(&mut self, stream_id: StreamId) -> Option<Frame<()>> {
-        let s = self.streams.remove(&stream_id).expect("stream not found");
+        let mut s = self.streams.remove(&stream_id).expect("stream not found");
 
         log::trace!("{}: removing dropped stream {}", self.id, stream_id);
         let frame = s.with_mut(|inner| {
@@ -565,7 +565,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             && matches!(frame.header().tag(), Tag::Data | Tag::WindowUpdate)
         {
             let id = frame.header().stream_id();
-            if let Some(shared) = self.streams.get(&id) {
+            if let Some(shared) = self.streams.get_mut(&id) {
                 shared.update_state(self.id, id, State::Open { acknowledged: true });
             }
             if let Some(waker) = self.new_outbound_stream_waker.take() {
@@ -625,16 +625,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 log::error!("{}: maximum number of streams reached", self.id);
                 return Action::Terminate(Frame::internal_error());
             }
-            let stream = self.make_new_inbound_stream(stream_id, DEFAULT_CREDIT);
-            {
-                stream.shared().with_mut(|inner| {
-                    if is_finish {
-                        inner.update_state(self.id, stream_id, State::RecvClosed);
-                    }
-                    inner.consume_receive_window(frame.body_len());
-                    inner.buffer.push(frame.into_body());
-                })
-            }
+            let mut stream = self.make_new_inbound_stream(stream_id, DEFAULT_CREDIT);
+            stream.shared_mut().with_mut(|inner| {
+                if is_finish {
+                    inner.update_state(self.id, stream_id, State::RecvClosed);
+                }
+                inner.consume_receive_window(frame.body_len());
+                inner.buffer.push(frame.into_body());
+            });
             self.streams.insert(stream_id, stream.clone_shared());
             return Action::New(stream);
         }
@@ -660,7 +658,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                     Action::None
                 }
             });
-            return action;
+            action
         } else {
             log::trace!(
                 "{}/{}: data frame for unknown stream, possibly dropped earlier: {:?}",
@@ -675,9 +673,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             // termination for the remote.
             //
             // See https://github.com/paritytech/yamux/issues/110 for details.
+            Action::None
         }
-
-        Action::None
     }
 
     fn on_window_update(&mut self, frame: &Frame<WindowUpdate>) -> Action {
@@ -717,11 +714,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             }
 
             let credit = frame.header().credit() + DEFAULT_CREDIT;
-            let stream = self.make_new_inbound_stream(stream_id, credit);
+            let mut stream = self.make_new_inbound_stream(stream_id, credit);
 
             if is_finish {
                 stream
-                    .shared()
+                    .shared_mut()
                     .update_state(self.id, stream_id, State::RecvClosed);
             }
             self.streams.insert(stream_id, stream.clone_shared());
@@ -874,7 +871,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 impl<T> Active<T> {
     /// Close and drop all `Stream`s and wake any pending `Waker`s.
     fn drop_all_streams(&mut self) {
-        for (id, shared) in self.streams.drain() {
+        for (id, mut shared) in self.streams.drain() {
             shared.with_mut(|inner| {
                 inner.update_state(self.id, id, State::Closed);
                 if let Some(w) = inner.reader.take() {
