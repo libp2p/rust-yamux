@@ -26,7 +26,7 @@ use futures::{
     ready, SinkExt,
 };
 
-use parking_lot::{Mutex, MutexGuard};
+use parking_lot::Mutex;
 use std::{
     fmt, io,
     pin::Pin,
@@ -189,8 +189,8 @@ impl Stream {
         self.shared.clone()
     }
 
-    fn write_zero_err(&self) -> io::Error {
-        let msg = format!("{}/{}: connection is closed", self.conn, self.id);
+    fn write_zero_err(conn: connection::Id, id: StreamId) -> io::Error {
+        let msg = format!("{}/{}: connection is closed", conn, id);
         io::Error::new(io::ErrorKind::WriteZero, msg)
     }
 
@@ -219,9 +219,9 @@ impl Stream {
         ready!(self
             .sender
             .poll_ready(cx)
-            .map_err(|_| self.write_zero_err())?);
+            .map_err(|_| Stream::write_zero_err(self.conn, self.id))?);
 
-        let Some(credit) = self.shared.next_window_update() else {
+        let Some(credit) = self.shared_mut().next_window_update() else {
             return Poll::Ready(Ok(()));
         };
 
@@ -230,7 +230,7 @@ impl Stream {
         let cmd = StreamCommand::SendFrame(frame);
         self.sender
             .start_send(cmd)
-            .map_err(|_| self.write_zero_err())?;
+            .map_err(|_| Stream::write_zero_err(self.conn, self.id))?;
 
         Poll::Ready(Ok(()))
     }
@@ -261,34 +261,35 @@ impl futures::stream::Stream for Stream {
             Poll::Pending => {}
         }
 
-        let mut shared = self.shared.lock();
-        if let Some(bytes) = shared.buffer.pop() {
-            let off = bytes.offset();
-            let mut vec = bytes.into_vec();
-            if off != 0 {
-                // This should generally not happen when the stream is used only as
-                // a `futures::stream::Stream` since the whole point of this impl is
-                // to consume chunks atomically. It may perhaps happen when mixing
-                // this impl and the `AsyncRead` one.
-                log::debug!(
-                    "{}/{}: chunk has been partially consumed",
-                    self.conn,
-                    self.id,
-                );
-                vec = vec.split_off(off)
+        let Self {
+            id, conn, shared, ..
+        } = self.get_mut();
+        let polling_state = shared.with_mut(|inner| {
+            if let Some(bytes) = inner.buffer.pop() {
+                let off = bytes.offset();
+                let mut vec = bytes.into_vec();
+                if off != 0 {
+                    // This should generally not happen when the stream is used only as
+                    // a `futures::stream::Stream` since the whole point of this impl is
+                    // to consume chunks atomically. It may perhaps happen when mixing
+                    // this impl and the `AsyncRead` one.
+                    log::debug!("{}/{}: chunk has been partially consumed", conn, id,);
+                    vec = vec.split_off(off)
+                }
+                return Poll::Ready(Some(Ok(Packet(vec))));
             }
-            return Poll::Ready(Some(Ok(Packet(vec))));
-        }
-        // Buffer is empty, let's check if we can expect to read more data.
-        if !shared.state.can_read() {
-            log::debug!("{}/{}: eof", self.conn, self.id);
-            return Poll::Ready(None); // stream has been reset
-        }
+            // Buffer is empty, let's check if we can expect to read more data.
+            if !inner.state.can_read() {
+                log::debug!("{}/{}: eof", conn, id);
+                return Poll::Ready(None); // stream has been reset
+            }
+            // Since we have no more data at this point, we want to be woken up
+            // by the connection when more becomes available for us.
+            inner.reader = Some(cx.waker().clone());
+            Poll::Pending
+        });
 
-        // Since we have no more data at this point, we want to be woken up
-        // by the connection when more becomes available for us.
-        shared.reader = Some(cx.waker().clone());
-        Poll::Pending
+        polling_state
     }
 }
 
@@ -312,37 +313,43 @@ impl AsyncRead for Stream {
         }
 
         // Copy data from stream buffer.
-        let mut shared = self.shared.lock();
-        let mut n = 0;
-        while let Some(chunk) = shared.buffer.front_mut() {
-            if chunk.is_empty() {
-                shared.buffer.pop();
-                continue;
+        let Self {
+            id, conn, shared, ..
+        } = self.get_mut();
+        let poll_state = shared.with_mut(|inner| {
+            let mut n = 0;
+            while let Some(chunk) = inner.buffer.front_mut() {
+                if chunk.is_empty() {
+                    inner.buffer.pop();
+                    continue;
+                }
+                let k = std::cmp::min(chunk.len(), buf.len() - n);
+                buf[n..n + k].copy_from_slice(&chunk.as_ref()[..k]);
+                n += k;
+                chunk.advance(k);
+                if n == buf.len() {
+                    break;
+                }
             }
-            let k = std::cmp::min(chunk.len(), buf.len() - n);
-            buf[n..n + k].copy_from_slice(&chunk.as_ref()[..k]);
-            n += k;
-            chunk.advance(k);
-            if n == buf.len() {
-                break;
+
+            if n > 0 {
+                log::trace!("{}/{}: read {} bytes", conn, id, n);
+                return Poll::Ready(Ok(n));
             }
-        }
 
-        if n > 0 {
-            log::trace!("{}/{}: read {} bytes", self.conn, self.id, n);
-            return Poll::Ready(Ok(n));
-        }
+            // Buffer is empty, let's check if we can expect to read more data.
+            if !inner.state.can_read() {
+                log::debug!("{}/{}: eof", conn, id);
+                return Poll::Ready(Ok(0)); // stream has been reset
+            }
 
-        // Buffer is empty, let's check if we can expect to read more data.
-        if !shared.state.can_read() {
-            log::debug!("{}/{}: eof", self.conn, self.id);
-            return Poll::Ready(Ok(0)); // stream has been reset
-        }
+            // Since we have no more data at this point, we want to be woken up
+            // by the connection when more becomes available for us.
+            inner.reader = Some(cx.waker().clone());
+            Poll::Pending
+        });
 
-        // Since we have no more data at this point, we want to be woken up
-        // by the connection when more becomes available for us.
-        shared.reader = Some(cx.waker().clone());
-        Poll::Pending
+        poll_state
     }
 }
 
@@ -355,59 +362,65 @@ impl AsyncWrite for Stream {
         ready!(self
             .sender
             .poll_ready(cx)
-            .map_err(|_| self.write_zero_err())?);
+            .map_err(|_| Stream::write_zero_err(self.conn, self.id))?);
 
-        let body = {
-            let mut shared = self.shared.lock();
-            if !shared.state.can_write() {
-                log::debug!("{}/{}: can no longer write", self.conn, self.id);
-                // Return an error
-                return Poll::Ready(Err(self.write_zero_err()));
+        let stream = self.as_mut().get_mut();
+        let result = stream.shared.with_mut(|inner| {
+            if !inner.state.can_write() {
+                log::debug!("{}/{}: can no longer write", stream.conn, stream.id);
+                return Err(Stream::write_zero_err(stream.conn, stream.id));
             }
 
-            let window = shared.send_window();
+            let window = inner.send_window();
             if window == 0 {
-                log::trace!("{}/{}: no more credit left", self.conn, self.id);
-                shared.writer = Some(cx.waker().clone());
-                return Poll::Pending;
+                log::trace!("{}/{}: no more credit left", stream.conn, stream.id);
+                inner.writer = Some(cx.waker().clone());
+                return Ok(None);
             }
 
             let k = std::cmp::min(window, buf.len().try_into().unwrap_or(u32::MAX));
-
             let k = std::cmp::min(
                 k,
-                self.config.split_send_size.try_into().unwrap_or(u32::MAX),
+                stream.config.split_send_size.try_into().unwrap_or(u32::MAX),
             );
 
-            shared.consume_send_window(k);
-            Vec::from(&buf[..k as usize])
+            inner.consume_send_window(k);
+            Ok(Some(Vec::from(&buf[..k as usize])))
+        });
+
+        let body = match result {
+            Err(e) => return Poll::Ready(Err(e)),
+            Ok(None) => return Poll::Pending,
+            Ok(Some(b)) => b,
         };
 
         let n = body.len();
-        let mut frame = Frame::data(self.id, body).expect("body <= u32::MAX").left();
-        self.add_flag(frame.header_mut());
-        log::trace!("{}/{}: write {} bytes", self.conn, self.id, n);
+        let mut frame = Frame::data(stream.id, body)
+            .expect("body <= u32::MAX")
+            .left();
 
-        // technically, the frame hasn't been sent yet on the wire but from the perspective of this data structure, we've queued the frame for sending
-        // We are tracking this information:
-        // a) to be consistent with outbound streams
-        // b) to correctly test our behaviour around timing of when ACKs are sent. See `ack_timing.rs` test.
+        stream.add_flag(frame.header_mut());
+
+        log::trace!("{}/{}: write {} bytes", stream.conn, stream.id, n);
+
         if frame.header().flags().contains(ACK) {
-            self.shared
-                .update_state(self.conn, self.id, State::Open { acknowledged: true });
+            stream
+                .shared
+                .update_state(stream.conn, stream.id, State::Open { acknowledged: true });
         }
 
         let cmd = StreamCommand::SendFrame(frame);
-        self.sender
+        stream
+            .sender
             .start_send(cmd)
-            .map_err(|_| self.write_zero_err())?;
+            .map_err(|_| Stream::write_zero_err(stream.conn, stream.id))?;
         Poll::Ready(Ok(n))
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
         self.sender
             .poll_flush_unpin(cx)
-            .map_err(|_| self.write_zero_err())
+            .map_err(|_| Stream::write_zero_err(self.conn, self.id))
     }
 
     fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
@@ -417,7 +430,7 @@ impl AsyncWrite for Stream {
         ready!(self
             .sender
             .poll_ready(cx)
-            .map_err(|_| self.write_zero_err())?);
+            .map_err(|_| Stream::write_zero_err(self.conn, self.id))?);
         let ack = if self.flag == Flag::Ack {
             self.flag = Flag::None;
             true
@@ -428,9 +441,11 @@ impl AsyncWrite for Stream {
         let cmd = StreamCommand::CloseStream { ack };
         self.sender
             .start_send(cmd)
-            .map_err(|_| self.write_zero_err())?;
-        self.shared
-            .update_state(self.conn, self.id, State::SendClosed);
+            .map_err(|_| Stream::write_zero_err(self.conn, self.id))?;
+        let Self {
+            id, conn, shared, ..
+        } = self.get_mut();
+        shared.update_state(*conn, *id, State::SendClosed);
         Poll::Ready(Ok(()))
     }
 }
@@ -467,16 +482,12 @@ impl Shared {
         self.inner.lock().is_pending_ack()
     }
 
-    pub fn next_window_update(&self) -> Option<u32> {
-        self.inner.lock().next_window_update()
+    pub fn next_window_update(&mut self) -> Option<u32> {
+        self.with_mut(|inner| inner.next_window_update())
     }
 
-    pub fn update_state(&self, cid: connection::Id, sid: StreamId, next: State) -> State {
-        self.inner.lock().update_state(cid, sid, next)
-    }
-
-    pub fn lock(&self) -> MutexGuard<'_, SharedInner> {
-        self.inner.lock()
+    pub fn update_state(&mut self, cid: connection::Id, sid: StreamId, next: State) -> State {
+        self.with_mut(|inner| inner.update_state(cid, sid, next))
     }
 
     pub fn with_mut<F, R>(&mut self, f: F) -> R
