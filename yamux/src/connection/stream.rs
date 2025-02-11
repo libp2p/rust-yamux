@@ -403,6 +403,10 @@ impl AsyncWrite for Stream {
 
         log::trace!("{}/{}: write {} bytes", stream.conn, stream.id, n);
 
+        // technically, the frame hasn't been sent yet on the wire but from the perspective of this data structure, we've queued the frame for sending
+        // We are tracking this information:
+        // a) to be consistent with outbound streams
+        // b) to correctly test our behaviour around timing of when ACKs are sent. See `ack_timing.rs` test.
         if frame.header().flags().contains(ACK) {
             stream
                 .shared
