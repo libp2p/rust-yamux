@@ -1,3 +1,7 @@
+# 0.13.5
+
+- Fix possible poisoned connection when closing. See [PR 199](https://github.com/libp2p/rust-yamux/pull/199).
+
 # 0.13.4
 
 - Fix sending pending frames after closing. See [PR 194](https://github.com/libp2p/rust-yamux/pull/194).

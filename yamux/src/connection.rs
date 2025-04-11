@@ -205,9 +205,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 ConnectionState::Active(active) => {
                     self.inner = ConnectionState::Closing(active.close());
                 }
-                ConnectionState::Closing(mut inner) => match inner.poll_unpin(cx)? {
-                    Poll::Ready(()) => {
+                ConnectionState::Closing(mut inner) => match inner.poll_unpin(cx) {
+                    Poll::Ready(Ok(())) => {
                         self.inner = ConnectionState::Closed;
+                    }
+                    Poll::Ready(Err(e)) => {
+                        log::warn!("Failure while closing connection: {}", e);
+                        self.inner = ConnectionState::Closed;
+                        return Poll::Ready(Err(e));
                     }
                     Poll::Pending => {
                         self.inner = ConnectionState::Closing(inner);
