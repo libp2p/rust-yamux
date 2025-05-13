@@ -210,7 +210,7 @@ fn write_deadlock() {
     // We make the message to transmit large enough s.t. the "server"
     // is forced to start writing (i.e. echoing) the bytes before
     // having read the entire payload.
-    let msg = vec![1u8; 1024 * 1024];
+    let msg = vec![1u8; 100024 * 100024];
 
     // We choose a "connection capacity" that is artificially below
     // the size of a receive window. If it were equal or greater,
@@ -219,7 +219,7 @@ fn write_deadlock() {
     // fact that the sum of receive windows of all open streams can easily
     // be larger than the send capacity of the connection at any point in time.
     // Using such a low capacity here therefore yields a more reproducible test.
-    let capacity = 1024;
+    let capacity = 10024;
 
     // Create a bounded channel representing the underlying "connection".
     // Each endpoint gets a name and a bounded capacity for its outbound
