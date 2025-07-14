@@ -198,7 +198,7 @@ where
                         continue;
                     }
                     (Poll::Ready(e), Some(_)) => {
-                        panic!("should not be able to open stream if server hasn't acknowledged existing streams: {:?}", e)
+                        panic!("should not be able to open stream if server hasn't acknowledged existing streams: {e:?}")
                     }
                     (Poll::Pending, None) => {}
                 }

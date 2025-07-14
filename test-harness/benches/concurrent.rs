@@ -57,8 +57,7 @@ fn concurrent(c: &mut Criterion) {
                 ));
                 group.bench_function(
                     BenchmarkId::from_parameter(format!(
-                        "{}/#streams{}/#messages{}",
-                        network_name, nstreams, nmessages
+                        "{network_name}/#streams{nstreams}/#messages{nmessages}"
                     )),
                     |b| {
                         b.iter(|| {

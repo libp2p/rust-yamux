@@ -126,7 +126,7 @@ impl FlowController {
 
         self.assert_invariants(buffer_len);
 
-        return Some(next_window_update);
+        Some(next_window_update)
     }
 
     fn assert_invariants(&self, buffer_len: usize) {
@@ -228,13 +228,10 @@ mod tests {
                 controller: FlowController {
                     config: self.controller.config.clone(),
                     accumulated_max_stream_windows: Arc::new(Mutex::new(
-                        self.controller
-                            .accumulated_max_stream_windows
-                            .lock()
-                            .clone(),
+                        *self.controller.accumulated_max_stream_windows.lock(),
                     )),
                     rtt: self.controller.rtt.clone(),
-                    last_window_update: self.controller.last_window_update.clone(),
+                    last_window_update: self.controller.last_window_update,
                     receive_window: self.controller.receive_window,
                     max_receive_window: self.controller.max_receive_window,
                     send_window: self.controller.send_window,
