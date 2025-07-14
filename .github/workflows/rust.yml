@@ -11,15 +11,32 @@ env:
   RUSTFLAGS: '-Dwarnings' # Never tolerate warnings.
 
 jobs:
-  build:
+  fmt:
 
     runs-on: ubuntu-latest
 
     steps:
     - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
     - name: Check formatting
       run: cargo fmt -- --check
-    - name: Build
-      run: cargo build --verbose
+
+  clippy:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - name: Check Clippy lints
+      run: cargo clippy --all-targets --all-features
+
+  test:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test --all-features --verbose

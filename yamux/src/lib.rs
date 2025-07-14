@@ -86,7 +86,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            max_connection_receive_window: Some(1 * GIB),
+            max_connection_receive_window: Some(GIB),
             max_num_streams: 512,
             read_after_close: true,
             split_send_size: DEFAULT_SPLIT_SEND_SIZE,

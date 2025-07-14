@@ -298,7 +298,7 @@ impl StreamId {
     }
 
     pub fn is_server(self) -> bool {
-        self.0 % 2 == 0
+        self.0.is_multiple_of(2)
     }
 
     pub fn is_client(self) -> bool {
@@ -399,8 +399,8 @@ pub enum HeaderDecodeError {
 impl std::fmt::Display for HeaderDecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            HeaderDecodeError::Version(v) => write!(f, "unknown version: {}", v),
-            HeaderDecodeError::Type(t) => write!(f, "unknown frame type: {}", t),
+            HeaderDecodeError::Version(v) => write!(f, "unknown version: {v}"),
+            HeaderDecodeError::Type(t) => write!(f, "unknown frame type: {t}"),
         }
     }
 }
@@ -435,7 +435,7 @@ mod tests {
             match decode(&encode(&hdr)) {
                 Ok(x) => x == hdr,
                 Err(e) => {
-                    eprintln!("decode error: {}", e);
+                    eprintln!("decode error: {e}");
                     false
                 }
             }

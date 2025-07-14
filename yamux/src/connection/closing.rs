@@ -181,7 +181,7 @@ mod tests {
             &frame_close_ack,
             StreamCommand::CloseStream { ack: true },
         ));
-        let pending_frames = vec![frame_pending.into()];
+        let pending_frames = vec![frame_pending];
         let mut socket = Socket {
             written: vec![],
             closed: false,
