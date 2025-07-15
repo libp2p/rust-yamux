@@ -29,8 +29,8 @@ pub enum ConnectionError {
 impl std::fmt::Display for ConnectionError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            ConnectionError::Io(e) => write!(f, "i/o error: {}", e),
-            ConnectionError::Decode(e) => write!(f, "decode error: {}", e),
+            ConnectionError::Io(e) => write!(f, "i/o error: {e}"),
+            ConnectionError::Decode(e) => write!(f, "decode error: {e}"),
             ConnectionError::NoMoreStreamIds => {
                 f.write_str("number of stream ids has been exhausted")
             }

@@ -210,7 +210,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                         self.inner = ConnectionState::Closed;
                     }
                     Poll::Ready(Err(e)) => {
-                        log::warn!("Failure while closing connection: {}", e);
+                        log::warn!("Failure while closing connection: {e}");
                         self.inner = ConnectionState::Closed;
                         return Poll::Ready(Err(e));
                     }
@@ -221,7 +221,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                 },
                 ConnectionState::Cleanup(mut cleanup) => match cleanup.poll_unpin(cx) {
                     Poll::Ready(reason) => {
-                        log::warn!("Failure while closing connection: {}", reason);
+                        log::warn!("Failure while closing connection: {reason}");
                         self.inner = ConnectionState::Closed;
                         return Poll::Ready(Ok(()));
                     }
@@ -352,7 +352,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     /// Create a new `Connection` from the given I/O resource.
     fn new(socket: T, cfg: Config, mode: Mode) -> Self {
         let id = Id::random();
-        log::debug!("new connection: {} ({:?})", id, mode);
+        log::debug!("new connection: {id} ({mode:?})");
         let socket = frame::Io::new(id, socket).fuse();
         Active {
             id,

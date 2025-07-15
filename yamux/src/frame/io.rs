@@ -25,7 +25,7 @@ use std::{
 /// Limits the amount of bytes a remote can cause the local node to allocate at once when reading.
 ///
 /// Chosen based on intuition in past iterations.
-const MAX_FRAME_BODY_LEN: usize = 1 * crate::MIB;
+const MAX_FRAME_BODY_LEN: usize = crate::MIB;
 
 /// A [`Stream`] and writer of [`Frame`] values.
 #[derive(Debug)]
@@ -66,7 +66,7 @@ impl fmt::Debug for WriteState {
         match self {
             WriteState::Init => f.write_str("(WriteState::Init)"),
             WriteState::Header { offset, .. } => {
-                write!(f, "(WriteState::Header (offset {}))", offset)
+                write!(f, "(WriteState::Header (offset {offset}))")
             }
             WriteState::Body { offset, buffer } => {
                 write!(
@@ -287,7 +287,7 @@ impl fmt::Debug for ReadState {
         match self {
             ReadState::Init => f.write_str("(ReadState::Init)"),
             ReadState::Header { offset, .. } => {
-                write!(f, "(ReadState::Header (offset {}))", offset)
+                write!(f, "(ReadState::Header (offset {offset}))")
             }
             ReadState::Body {
                 header,
@@ -321,9 +321,9 @@ pub enum FrameDecodeError {
 impl std::fmt::Display for FrameDecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            FrameDecodeError::Io(e) => write!(f, "i/o error: {}", e),
-            FrameDecodeError::Header(e) => write!(f, "decode error: {}", e),
-            FrameDecodeError::FrameTooLarge(n) => write!(f, "frame body is too large ({})", n),
+            FrameDecodeError::Io(e) => write!(f, "i/o error: {e}"),
+            FrameDecodeError::Header(e) => write!(f, "decode error: {e}"),
+            FrameDecodeError::FrameTooLarge(n) => write!(f, "frame body is too large ({n})"),
         }
     }
 }

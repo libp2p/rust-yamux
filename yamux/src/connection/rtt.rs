@@ -78,7 +78,7 @@ impl Rtt {
             next: Instant::now() + PING_INTERVAL,
         };
 
-        return Action::None;
+        Action::None
     }
 
     pub(crate) fn get(&self) -> Option<Duration> {

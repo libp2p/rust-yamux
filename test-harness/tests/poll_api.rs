@@ -4,7 +4,6 @@ use futures::prelude::*;
 use futures::task::{Spawn, SpawnExt};
 use futures::{future, stream, AsyncReadExt, AsyncWriteExt, FutureExt, StreamExt};
 use quickcheck::QuickCheck;
-use std::iter;
 use std::panic::panic_any;
 use std::pin::pin;
 use test_harness::*;
@@ -70,7 +69,7 @@ fn concurrent_streams() {
             task::spawn(echo_server(server));
             let client = MessageSender::new(
                 client,
-                iter::repeat(data).take(n_streams).collect::<Vec<_>>(),
+                std::iter::repeat_n(data, n_streams).collect::<Vec<_>>(),
                 true,
             );
 
