@@ -103,13 +103,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Sink<Frame<()>> for Io<T> {
                         *offset += n;
 
                         if *offset > header.len() {
-                            return Poll::Ready(Err(io::Error::new(
-                                io::ErrorKind::Other,
-                                format!(
-                                    "Writer header returned invalid write count n={n}: {offset} > {} ",
-                                    header.len(),
-                                ),
-                            )));
+                            return Poll::Ready(Err(io::Error::other(format!(
+                                "Writer header returned invalid write count n={n}: {offset} > {} ",
+                                header.len(),
+                            ))));
                         }
 
                         if *offset == header.len() {
@@ -135,13 +132,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Sink<Frame<()>> for Io<T> {
                         *offset += n;
 
                         if *offset > buffer.len() {
-                            return Poll::Ready(Err(io::Error::new(
-                                io::ErrorKind::Other,
-                                format!(
-                                    "Writer body returned invalid write count n={n}: {offset} > {} ",
-                                    buffer.len(),
-                                ),
-                            )));
+                            return Poll::Ready(Err(io::Error::other(format!(
+                                "Writer body returned invalid write count n={n}: {offset} > {} ",
+                                buffer.len(),
+                            ))));
                         }
 
                         if *offset == buffer.len() {
