@@ -1,3 +1,8 @@
+# 0.13.6
+
+- Fix panic on frame io when the returned number of bytes from a write operation is bigger than the header size.
+  See [PR 202](https://github.com/libp2p/rust-yamux/pull/179).
+
 # 0.13.5
 
 - Fix possible poisoned connection when closing. See [PR 199](https://github.com/libp2p/rust-yamux/pull/199).
