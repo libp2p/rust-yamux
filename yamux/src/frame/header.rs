@@ -297,8 +297,10 @@ impl StreamId {
         StreamId(val)
     }
 
+    // TODO: remove and use is multiple_of() on the next minor release.
+    #[allow(clippy::manual_is_multiple_of)]
     pub fn is_server(self) -> bool {
-        self.0.is_multiple_of(2)
+        self.0 % 2 == 0
     }
 
     pub fn is_client(self) -> bool {
