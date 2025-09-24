@@ -1,3 +1,8 @@
+# 0.13.7
+
+- Fix compilation on rust versions < 1.87.0.
+  See [PR 208](https://github.com/libp2p/rust-yamux/pull/208).
+
 # 0.13.6
 
 - Fix panic on frame io when the returned number of bytes from a write operation is bigger than the header size.
