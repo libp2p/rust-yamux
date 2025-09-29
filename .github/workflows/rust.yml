@@ -18,6 +18,8 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt
     - name: Check formatting
       run: cargo fmt -- --check
 
@@ -28,6 +30,8 @@ jobs:
     steps:
     - uses: actions/checkout@v4
     - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy
     - name: Check Clippy lints
       run: cargo clippy --all-targets --all-features
 
