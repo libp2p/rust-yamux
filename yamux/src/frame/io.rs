@@ -59,6 +59,7 @@ enum WriteState {
         buffer: Vec<u8>,
         offset: usize,
     },
+    Poisoned,
 }
 
 impl fmt::Debug for WriteState {
@@ -76,6 +77,7 @@ impl fmt::Debug for WriteState {
                     buffer.len()
                 )
             }
+            WriteState::Poisoned => f.write_str("(WriteState::Poisoned)"),
         }
     }
 }
@@ -103,10 +105,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Sink<Frame<()>> for Io<T> {
                         *offset += n;
 
                         if *offset > header.len() {
-                            return Poll::Ready(Err(io::Error::other(format!(
+                            let err = io::Error::other(format!(
                                 "Writer header returned invalid write count n={n}: {offset} > {} ",
                                 header.len(),
-                            ))));
+                            ));
+
+                            this.write_state = WriteState::Poisoned;
+
+                            return Poll::Ready(Err(err));
                         }
 
                         if *offset == header.len() {
@@ -132,10 +138,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Sink<Frame<()>> for Io<T> {
                         *offset += n;
 
                         if *offset > buffer.len() {
-                            return Poll::Ready(Err(io::Error::other(format!(
+                            let err = io::Error::other(format!(
                                 "Writer body returned invalid write count n={n}: {offset} > {} ",
                                 buffer.len(),
-                            ))));
+                            ));
+
+                            this.write_state = WriteState::Poisoned;
+
+                            return Poll::Ready(Err(err));
                         }
 
                         if *offset == buffer.len() {
@@ -143,6 +153,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Sink<Frame<()>> for Io<T> {
                         }
                     }
                 },
+                WriteState::Poisoned => {
+                    return Poll::Ready(Err(io::Error::other(
+                        "Sink is in poisoned state due to previous write error",
+                    )))
+                }
             }
         }
     }
