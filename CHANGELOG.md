@@ -1,3 +1,8 @@
+# 0.13.8
+
+- Introduce `WriteState::Poisoned` to avoid further reads after the returned number of bytes from a write operation is bigger than the header size.
+  See [PR 211](https://github.com/libp2p/rust-yamux/pull/211).
+
 # 0.13.7
 
 - Fix compilation on rust versions < 1.87.0.
