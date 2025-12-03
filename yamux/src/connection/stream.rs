@@ -241,6 +241,14 @@ impl Stream {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Packet(Vec<u8>);
 
+impl Packet {
+    pub fn new(buf: Vec<u8>) -> Self {
+        Self {
+            0: buf,
+        }
+    }
+}
+
 impl AsRef<[u8]> for Packet {
     fn as_ref(&self) -> &[u8] {
         self.0.as_ref()
