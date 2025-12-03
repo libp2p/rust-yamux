@@ -126,7 +126,8 @@ fn prop_send_recv_half_closed() {
                 let mut buf = vec![0; msg_len];
                 first_stream.read_exact(&mut buf).await?;
                 first_stream.write_all(&buf).await?;
-                first_stream.close().await?;
+                // We have multiple candidate for close
+                AsyncWriteExt::close(&mut first_stream).await?;
 
                 Result::<(), ConnectionError>::Ok(())
             };
@@ -141,7 +142,8 @@ fn prop_send_recv_half_closed() {
                 })));
 
                 stream.write_all(&msg.0).await?;
-                stream.close().await?;
+                // We have multiple candidate for close
+                AsyncWriteExt::close(&mut stream).await?;
 
                 assert!(stream.is_write_closed());
                 let mut buf = vec![0; msg_len];
@@ -268,7 +270,8 @@ fn write_deadlock() {
                     )
                     .await;
                     let mut stream = reader.reunite(writer).unwrap();
-                    stream.close().await.unwrap();
+                    // We have multiple candidate for close
+                    AsyncWriteExt::close(&mut stream).await.unwrap();
                     log::debug!("C: Stream {} done.", stream.id());
                     assert_eq!(b, msg);
                 }
