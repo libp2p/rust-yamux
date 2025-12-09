@@ -235,6 +235,79 @@ impl Stream {
 
         Poll::Ready(Ok(()))
     }
+
+    fn poll_ready(self: &mut Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), io::Error>> {
+        // Ensure the outgoing mpsc is ready.
+        ready!(self
+            .sender
+            .poll_ready(cx)
+            .map_err(|_| self.write_zero_err())?)
+        ;
+
+        let mut shared = self.shared();
+
+        // If we cannot write any more (stream closed for writing) -> error.
+        if !shared.state().can_write() {
+            return Poll::Ready(Err(self.write_zero_err()));
+        }
+
+        // If no send credit, arrange to be woken when credit arrives and return Pending.
+        if shared.send_window() == 0 {
+            shared.writer = Some(cx.waker().clone());
+            return Poll::Pending;
+        }
+
+        Poll::Ready(Ok(()))
+    }
+
+    fn start_send(self: &mut Pin<&mut Self>, cx: Option<&mut Context<'_>>, buf: &[u8]) -> Result<usize, io::Error> {
+        // Limit the mutex guard scope
+        let body = {
+            let mut shared = self.shared();
+            if !shared.state().can_write() {
+                log::debug!("{}/{}: can no longer write", self.conn, self.id);
+                return Err(self.write_zero_err());
+            }
+            if shared.send_window() == 0 {
+                log::trace!("{}/{}: no more credit left", self.conn, self.id);
+                if let Some(cx) = cx {
+                    shared.writer = Some(cx.waker().clone());
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "no credit"
+                ));
+            }
+            let k = std::cmp::min(
+                shared.send_window(),
+                buf.len().try_into().unwrap_or(u32::MAX),
+            );
+            shared.consume_send_window(k);
+            Vec::from(&buf[..k as usize])
+        }; // guard dropped
+
+        // Now we can mutate self
+        let n = body.len();
+        let mut frame = Frame::data(self.id, body).expect("body <= u32::MAX").left();
+        self.add_flag(frame.header_mut());
+        log::trace!("{}/{}: write {} bytes", self.conn, self.id, n);
+
+        // technically, the frame hasn't been sent yet on the wire but from the perspective of this data structure, we've queued the frame for sending
+        // We are tracking this information:
+        // a) to be consistent with outbound streams
+        // b) to correctly test our behaviour around timing of when ACKs are sent. See `ack_timing.rs` test.
+        if frame.header().flags().contains(ACK) {
+            self.shared()
+                .update_state(self.conn, self.id, State::Open { acknowledged: true });
+        }
+
+        let cmd = StreamCommand::SendFrame(frame);
+        self.sender
+            .start_send(cmd)
+            .map_err(|_| self.write_zero_err())?;
+
+        Ok(n)
+    }
 }
 
 /// Byte data produced by the [`futures::stream::Stream`] impl of [`Stream`].
@@ -308,59 +381,12 @@ impl futures::sink::Sink<Packet> for Stream {
     type Error = io::Error;
 
     fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        // Ensure the outgoing mpsc is ready.
-        ready!(self
-            .sender
-            .poll_ready(cx)
-            .map_err(|_| self.write_zero_err())?)
-        ;
-
-        let mut shared = self.shared();
-
-        // If we cannot write any more (stream closed for writing) -> error.
-        if !shared.state().can_write() {
-            return Poll::Ready(Err(self.write_zero_err()));
-        }
-
-        // If no send credit, arrange to be woken when credit arrives and return Pending.
-        if shared.send_window() == 0 {
-            shared.writer = Some(cx.waker().clone());
-            return Poll::Pending;
-        }
-
-        Poll::Ready(Ok(()))
+        Self::poll_ready(&mut self, cx)
     }
 
     fn start_send(mut self: Pin<&mut Self>, item: Packet) -> Result<(), Self::Error> {
-        let body = item.0;
-
-        // Limit the mutex guard scope
-        {
-            let mut shared = self.shared();
-            if !shared.state().can_write() {
-                return Err(self.write_zero_err());
-            }
-            if shared.send_window() == 0 {
-                return Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "no credit"
-                ));
-            }
-            let k = std::cmp::min(
-                shared.send_window(),
-                body.len().try_into().unwrap_or(u32::MAX),
-            );
-            shared.consume_send_window(k);
-        } // guard dropped
-
-        // Now we can mutate self
-        let mut frame = Frame::data(self.id, body).unwrap().left();
-        self.add_flag(frame.header_mut());
-
-        let cmd = StreamCommand::SendFrame(frame);
-        self.sender
-            .start_send(cmd)
-            .map_err(|_| self.write_zero_err())
+        Self::start_send(&mut self, None, &item.0)?;
+        Ok(())
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
@@ -433,51 +459,8 @@ impl AsyncWrite for Stream {
         cx: &mut Context,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        ready!(self
-            .sender
-            .poll_ready(cx)
-            .map_err(|_| self.write_zero_err())?);
-        let body = {
-            let mut shared = self.shared();
-            if !shared.state().can_write() {
-                log::debug!("{}/{}: can no longer write", self.conn, self.id);
-                return Poll::Ready(Err(self.write_zero_err()));
-            }
-            if shared.send_window() == 0 {
-                log::trace!("{}/{}: no more credit left", self.conn, self.id);
-                shared.writer = Some(cx.waker().clone());
-                return Poll::Pending;
-            }
-            let k = std::cmp::min(
-                shared.send_window(),
-                buf.len().try_into().unwrap_or(u32::MAX),
-            );
-            let k = std::cmp::min(
-                k,
-                self.config.split_send_size.try_into().unwrap_or(u32::MAX),
-            );
-            shared.consume_send_window(k);
-            Vec::from(&buf[..k as usize])
-        };
-        let n = body.len();
-        let mut frame = Frame::data(self.id, body).expect("body <= u32::MAX").left();
-        self.add_flag(frame.header_mut());
-        log::trace!("{}/{}: write {} bytes", self.conn, self.id, n);
-
-        // technically, the frame hasn't been sent yet on the wire but from the perspective of this data structure, we've queued the frame for sending
-        // We are tracking this information:
-        // a) to be consistent with outbound streams
-        // b) to correctly test our behaviour around timing of when ACKs are sent. See `ack_timing.rs` test.
-        if frame.header().flags().contains(ACK) {
-            self.shared()
-                .update_state(self.conn, self.id, State::Open { acknowledged: true });
-        }
-
-        let cmd = StreamCommand::SendFrame(frame);
-        self.sender
-            .start_send(cmd)
-            .map_err(|_| self.write_zero_err())?;
-        Poll::Ready(Ok(n))
+        ready!(Self::poll_ready(&mut self, cx)?);
+        Poll::Ready(Self::start_send(&mut self, Some(cx), buf))
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
