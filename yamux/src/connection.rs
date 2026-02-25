@@ -381,7 +381,12 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             .into_iter()
             .chain(self.pending_write_frame)
             .collect::<VecDeque<Frame<()>>>();
-        Closing::new(self.stream_receivers, pending_frames, self.socket)
+        Closing::new(
+            self.stream_receivers,
+            pending_frames,
+            self.socket,
+            self.config.connection_close_timeout,
+        )
     }
 
     /// Cleanup all our resources.
