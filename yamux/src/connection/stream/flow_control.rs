@@ -3,7 +3,7 @@ use std::{cmp, sync::Arc};
 use parking_lot::Mutex;
 use web_time::Instant;
 
-use crate::{connection::rtt::Rtt, Config, DEFAULT_CREDIT};
+use crate::{connection::rtt::Rtt, Config, ConnectionError, DEFAULT_CREDIT};
 
 #[derive(Debug)]
 pub(crate) struct FlowController {
@@ -169,29 +169,28 @@ impl FlowController {
         self.send_window
     }
 
-    pub(crate) fn consume_send_window(&mut self, i: u32) {
+    pub(crate) fn consume_send_window(&mut self, i: u32) -> Result<(), ConnectionError> {
         self.send_window = self
             .send_window
             .checked_sub(i)
-            .expect("not exceed send window");
+            .ok_or(ConnectionError::InvalidWindowUpdate)?;
+        Ok(())
     }
 
-    pub(crate) fn increase_send_window_by(&mut self, i: u32) {
+    pub(crate) fn increase_send_window_by(&mut self, i: u32) -> Result<(), ConnectionError> {
         self.send_window = self
             .send_window
             .checked_add(i)
-            .expect("send window not to exceed u32");
+            .ok_or(ConnectionError::InvalidWindowUpdate)?;
+        Ok(())
     }
 
-    pub(crate) fn receive_window(&self) -> u32 {
-        self.receive_window
-    }
-
-    pub(crate) fn consume_receive_window(&mut self, i: u32) {
+    pub(crate) fn consume_receive_window(&mut self, i: u32) -> Result<(), ConnectionError> {
         self.receive_window = self
             .receive_window
             .checked_sub(i)
-            .expect("not exceed receive window");
+            .ok_or(ConnectionError::InvalidWindowUpdate)?;
+        Ok(())
     }
 }
 

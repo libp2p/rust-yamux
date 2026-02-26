@@ -615,14 +615,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 log::error!("{}: invalid stream id {}", self.id, stream_id);
                 return Action::Terminate(Frame::protocol_error());
             }
-            if frame.body().len() > DEFAULT_CREDIT as usize {
-                log::error!(
-                    "{}/{}: 1st body of stream exceeds default credit",
-                    self.id,
-                    stream_id
-                );
-                return Action::Terminate(Frame::protocol_error());
-            }
             if self.streams.contains_key(&stream_id) {
                 log::error!("{}/{}: stream already exists", self.id, stream_id);
                 return Action::Terminate(Frame::protocol_error());
@@ -637,7 +629,15 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 if is_finish {
                     shared.update_state(self.id, stream_id, State::RecvClosed);
                 }
-                shared.consume_receive_window(frame.body_len());
+                if let Err(_err) = shared.consume_receive_window(frame.body_len()) {
+                    log::error!(
+                        "{}/{}: 1st body of stream exceeds default credit",
+                        self.id,
+                        stream_id
+                    );
+
+                    return Action::Terminate(Frame::protocol_error());
+                }
                 shared.buffer.push(frame.into_body());
             }
             self.streams.insert(stream_id, stream.clone_shared());
@@ -646,18 +646,21 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
         if let Some(s) = self.streams.get_mut(&stream_id) {
             let mut shared = s.lock();
-            if frame.body_len() > shared.receive_window() {
+
+            if let Err(_err) = shared.consume_receive_window(frame.body_len()) {
                 log::error!(
                     "{}/{}: frame body larger than window of stream",
                     self.id,
                     stream_id
                 );
+
                 return Action::Terminate(Frame::protocol_error());
             }
+
             if is_finish {
                 shared.update_state(self.id, stream_id, State::RecvClosed);
             }
-            shared.consume_receive_window(frame.body_len());
+
             shared.buffer.push(frame.into_body());
             if let Some(w) = shared.reader.take() {
                 w.wake()
@@ -730,7 +733,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
         if let Some(s) = self.streams.get_mut(&stream_id) {
             let mut shared = s.lock();
-            shared.increase_send_window_by(frame.header().credit());
+            if let Err(err) = shared.increase_send_window_by(frame.header().credit()) {
+                log::error!(
+                    "{}/{}: could not increase the send window, {err}",
+                    self.id,
+                    stream_id
+                );
+                return Action::Terminate(Frame::protocol_error());
+            }
             if is_finish {
                 shared.update_state(self.id, stream_id, State::RecvClosed);
 

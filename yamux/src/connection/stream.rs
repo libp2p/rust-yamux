@@ -10,6 +10,7 @@
 
 use crate::connection::rtt::Rtt;
 use crate::frame::header::ACK;
+use crate::ConnectionError;
 use crate::{
     chunks::Chunks,
     connection::{self, rtt, StreamCommand},
@@ -380,7 +381,9 @@ impl AsyncWrite for Stream {
                 k,
                 self.config.split_send_size.try_into().unwrap_or(u32::MAX),
             );
-            shared.consume_send_window(k);
+            shared
+                .consume_send_window(k)
+                .expect("not exceed receive window");
             Vec::from(&buf[..k as usize])
         };
         let n = body.len();
@@ -527,19 +530,15 @@ impl Shared {
         self.flow_controller.send_window()
     }
 
-    pub(crate) fn consume_send_window(&mut self, i: u32) {
+    pub(crate) fn consume_send_window(&mut self, i: u32) -> Result<(), ConnectionError> {
         self.flow_controller.consume_send_window(i)
     }
 
-    pub(crate) fn increase_send_window_by(&mut self, i: u32) {
+    pub(crate) fn increase_send_window_by(&mut self, i: u32) -> Result<(), ConnectionError> {
         self.flow_controller.increase_send_window_by(i)
     }
 
-    pub(crate) fn receive_window(&self) -> u32 {
-        self.flow_controller.receive_window()
-    }
-
-    pub(crate) fn consume_receive_window(&mut self, i: u32) {
+    pub(crate) fn consume_receive_window(&mut self, i: u32) -> Result<(), ConnectionError> {
         self.flow_controller.consume_receive_window(i)
     }
 }

@@ -24,6 +24,9 @@ pub enum ConnectionError {
     Closed,
     /// Too many streams are open, so no further ones can be opened at this time.
     TooManyStreams,
+    /// A window update operation was rejected because the supplied credit
+    /// is invalid for the current flow-control window (e.g. overflow).
+    InvalidWindowUpdate,
 }
 
 impl std::fmt::Display for ConnectionError {
@@ -36,6 +39,9 @@ impl std::fmt::Display for ConnectionError {
             }
             ConnectionError::Closed => f.write_str("connection is closed"),
             ConnectionError::TooManyStreams => f.write_str("maximum number of streams reached"),
+            ConnectionError::InvalidWindowUpdate => {
+                f.write_str("invalid window update for the current flow control window")
+            }
         }
     }
 }
@@ -48,6 +54,7 @@ impl std::error::Error for ConnectionError {
             ConnectionError::NoMoreStreamIds
             | ConnectionError::Closed
             | ConnectionError::TooManyStreams => None,
+            ConnectionError::InvalidWindowUpdate => None,
         }
     }
 }
