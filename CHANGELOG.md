@@ -1,3 +1,8 @@
+# 0.13.9
+
+- Improve flow-control credit verification for window updates.
+  See [PR 221](https://github.com/libp2p/rust-yamux/pull/221).
+
 # 0.13.8
 
 - Introduce `WriteState::Poisoned` to avoid further reads after the returned number of bytes from a write operation is bigger than the header size.
