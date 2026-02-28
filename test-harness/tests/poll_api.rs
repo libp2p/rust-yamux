@@ -329,3 +329,37 @@ fn close_through_drop_of_stream_propagates_to_remote() {
     })
     .unwrap();
 }
+
+#[test]
+fn close_timeout_force_closes_when_remote_stops_reading() {
+    let _ = env_logger::try_init();
+    Runtime::new().unwrap().block_on(async move {
+        let capacity = 1024;
+        let (server_endpoint, client_endpoint) =
+            futures_ringbuf::Endpoint::pair(capacity, capacity);
+        // Keep server connection alive but intentionally never poll it.
+        let _server = Connection::new(server_endpoint, Config::default(), Mode::Server);
+        let mut client_cfg = Config::default();
+        client_cfg.set_split_send_size(64 * 1024);
+        client_cfg.set_connection_timeout(std::time::Duration::from_millis(100));
+        let mut client = Connection::new(client_endpoint, client_cfg, Mode::Client);
+        let mut stream = future::poll_fn(|cx| client.poll_new_outbound(cx))
+            .await
+            .expect("open outbound stream");
+        // Queue data so close has pending writes to flush.
+        let payload = vec![0x42; 64 * 1024];
+        stream.write_all(&payload).await.expect("write payload");
+
+        // poll_close should not hang forever, even though remote never reads.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            future::poll_fn(|cx| client.poll_close(cx)),
+        )
+        .await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => panic!("poll_close returned error: {e}"),
+            Err(_) => panic!("poll_close timed out; expected force-close path to complete"),
+        }
+    });
+}

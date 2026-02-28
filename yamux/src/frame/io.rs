@@ -82,6 +82,16 @@ impl fmt::Debug for WriteState {
     }
 }
 
+impl<T: AsyncRead + AsyncWrite + Unpin> Io<T> {
+    pub(crate) fn poll_force_close(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<(), io::Error>> {
+        let this = Pin::into_inner(self);
+        Pin::new(&mut this.io).poll_close(cx)
+    }
+}
+
 impl<T: AsyncRead + AsyncWrite + Unpin> Sink<Frame<()>> for Io<T> {
     type Error = io::Error;
 
