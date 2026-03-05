@@ -103,6 +103,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Connection<T> {
                         self.inner = ConnectionState::Active(active);
                         return Poll::Pending;
                     }
+                    Poll::Ready(Err(ConnectionError::TooManyStreams)) => {
+                        // Capacity limit is transient — keep the connection alive
+                        // so existing streams continue working. The caller can
+                        // retry on another connection.
+                        self.inner = ConnectionState::Active(active);
+                        return Poll::Ready(Err(ConnectionError::TooManyStreams));
+                    }
                     Poll::Ready(Err(e)) => {
                         self.inner = ConnectionState::Cleanup(active.cleanup(e));
                         continue;
@@ -487,7 +494,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
     fn poll_new_outbound(&mut self, cx: &mut Context<'_>) -> Poll<Result<Stream>> {
         if self.streams.len() >= self.config.max_num_streams {
-            log::error!("{}: maximum number of streams reached", self.id);
+            log::debug!("{}: maximum number of streams reached", self.id);
             return Poll::Ready(Err(ConnectionError::TooManyStreams));
         }
 

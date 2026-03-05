@@ -96,11 +96,21 @@ fn prop_max_streams() {
 
             let client = OpenStreamsClient::new(client, max_streams);
 
-            let (client, streams) = client.await?;
+            let (mut client, streams) = client.await?;
             assert_eq!(streams.len(), max_streams);
 
-            let open_result = OpenStreamsClient::new(client, 1).await;
-            Ok(matches!(open_result, Err(ConnectionError::TooManyStreams)))
+            // At capacity: TooManyStreams is returned but connection stays alive.
+            let result = future::poll_fn(|cx| client.poll_new_outbound(cx)).now_or_never();
+            assert!(matches!(
+                result,
+                Some(Err(ConnectionError::TooManyStreams))
+            ));
+
+            drop(streams);
+
+            // Connection still alive — can open new streams.
+            let (_, new_streams) = OpenStreamsClient::new(client, 1).await?;
+            Ok(new_streams.len() == 1)
         })
     }
     QuickCheck::new().tests(7).quickcheck(prop as fn(_) -> _)
