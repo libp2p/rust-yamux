@@ -375,7 +375,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     }
 
     /// Gracefully close the connection to the remote.
-    fn close(self) -> Closing<T> {
+    fn close(mut self) -> Closing<T> {
+        self.drop_all_streams();
+
         let pending_frames = self
             .pending_read_frame
             .into_iter()
