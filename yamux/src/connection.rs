@@ -623,6 +623,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 log::error!("{}: maximum number of streams reached", self.id);
                 return Action::Terminate(Frame::internal_error());
             }
+            if frame.body().len() > DEFAULT_CREDIT as usize {
+                log::error!(
+                    "{}/{}: 1st body of stream exceeds default credit",
+                    self.id,
+                    stream_id
+                );
+                return Action::Terminate(Frame::protocol_error());
+            }
             let stream = self.make_new_inbound_stream(stream_id, DEFAULT_CREDIT);
             {
                 let mut shared = stream.shared();
