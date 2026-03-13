@@ -1,3 +1,9 @@
+# 0.13.10
+
+- Fix panic when processing oversized inbound Data|SYN frames.
+  See [ac71745](https://github.com/libp2p/rust-yamux/commit/ac71745226b99191249bbbb0420aceba052c150c) 
+  and [GHSA-vxx9-2994-q338](https://github.com/libp2p/rust-yamux/security/advisories/GHSA-vxx9-2994-q338).
+
 # 0.13.9
 
 - Improve flow-control credit verification for window updates.
