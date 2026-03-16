@@ -5,11 +5,13 @@ use crate::Result;
 use crate::{frame, StreamId};
 use futures::channel::mpsc;
 use futures::stream::{Fuse, SelectAll};
-use futures::{ready, AsyncRead, AsyncWrite, SinkExt, StreamExt};
+use futures::{ready, AsyncRead, AsyncWrite, FutureExt, SinkExt, StreamExt};
+use futures_timer::Delay;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 /// A [`Future`] that gracefully closes the yamux connection.
 #[must_use]
@@ -18,6 +20,7 @@ pub struct Closing<T> {
     stream_receivers: SelectAll<TaggedStream<StreamId, mpsc::Receiver<StreamCommand>>>,
     pending_frames: VecDeque<Frame<()>>,
     socket: Fuse<frame::Io<T>>,
+    timeout: Option<Delay>,
 }
 
 impl<T> Closing<T>
@@ -28,12 +31,14 @@ where
         stream_receivers: SelectAll<TaggedStream<StreamId, mpsc::Receiver<StreamCommand>>>,
         pending_frames: VecDeque<Frame<()>>,
         socket: Fuse<frame::Io<T>>,
+        timeout: Option<Duration>,
     ) -> Self {
         Self {
             state: State::ClosingStreamReceiver,
             stream_receivers,
             pending_frames,
             socket,
+            timeout: timeout.map(Delay::new),
         }
     }
 }
@@ -57,6 +62,13 @@ where
                 }
 
                 State::DrainingStreamReceiver => {
+                    if let Some(timeout) = &mut this.timeout {
+                        if timeout.poll_unpin(cx).is_ready() {
+                            this.state = State::ForceClosingSocket;
+                            continue;
+                        }
+                    }
+
                     match this.stream_receivers.poll_next_unpin(cx) {
                         Poll::Ready(Some((_, Some(StreamCommand::SendFrame(frame))))) => {
                             this.pending_frames.push_back(frame.into());
@@ -75,6 +87,13 @@ where
                     }
                 }
                 State::FlushingPendingFrames => {
+                    if let Some(timeout) = &mut this.timeout {
+                        if timeout.poll_unpin(cx).is_ready() {
+                            this.state = State::ForceClosingSocket;
+                            continue;
+                        }
+                    }
+
                     ready!(this.socket.poll_ready_unpin(cx))?;
 
                     match this.pending_frames.pop_front() {
@@ -83,7 +102,19 @@ where
                     }
                 }
                 State::ClosingSocket => {
+                    if let Some(timeout) = &mut this.timeout {
+                        if timeout.poll_unpin(cx).is_ready() {
+                            this.state = State::ForceClosingSocket;
+                            continue;
+                        }
+                    }
+
                     ready!(this.socket.poll_close_unpin(cx))?;
+
+                    return Poll::Ready(Ok(()));
+                }
+                State::ForceClosingSocket => {
+                    ready!(Pin::new(this.socket.get_mut()).poll_force_close(cx))?;
 
                     return Poll::Ready(Ok(()));
                 }
@@ -97,6 +128,7 @@ enum State {
     DrainingStreamReceiver,
     FlushingPendingFrames,
     ClosingSocket,
+    ForceClosingSocket,
 }
 
 #[cfg(test)]
@@ -190,6 +222,7 @@ mod tests {
             stream_receivers,
             pending_frames.into(),
             frame::Io::new(crate::connection::Id(0), &mut socket).fuse(),
+            None,
         );
         futures::executor::block_on(async { poll_fn(|cx| closing.poll_unpin(cx)).await.unwrap() });
         assert!(closing.pending_frames.is_empty());
