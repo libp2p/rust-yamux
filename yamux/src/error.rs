@@ -14,7 +14,7 @@ use crate::frame::FrameDecodeError;
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum ConnectionError {
-    /// An underlying I/O error occured.
+    /// An underlying I/O error occurred.
     Io(std::io::Error),
     /// Decoding a Yamux message frame failed.
     Decode(FrameDecodeError),
