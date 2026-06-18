@@ -31,6 +31,8 @@ mod frame;
 pub(crate) mod connection;
 mod tagged_stream;
 
+use std::time::Duration;
+
 pub use crate::connection::{Connection, Mode, Packet, Stream};
 pub use crate::error::ConnectionError;
 pub use crate::frame::{
@@ -75,12 +77,14 @@ const DEFAULT_SPLIT_SEND_SIZE: usize = 16 * KIB;
 /// - max. number of streams = 512
 /// - read after close = true
 /// - split send size = 16 KiB
+/// - connection_close_timeout = None,
 #[derive(Debug, Clone)]
 pub struct Config {
     max_connection_receive_window: Option<usize>,
     max_num_streams: usize,
     read_after_close: bool,
     split_send_size: usize,
+    connection_close_timeout: Option<Duration>,
 }
 
 impl Default for Config {
@@ -90,6 +94,7 @@ impl Default for Config {
             max_num_streams: 512,
             read_after_close: true,
             split_send_size: DEFAULT_SPLIT_SEND_SIZE,
+            connection_close_timeout: None,
         }
     }
 }
@@ -163,6 +168,12 @@ impl Config {
         self.split_send_size = n;
         self
     }
+
+    /// Sets the timeout duration for closing the connection.
+    pub fn set_connection_timeout(&mut self, duration: Duration) -> &mut Self {
+        self.connection_close_timeout = Some(duration);
+        self
+    }
 }
 
 // Check that we can safely cast a `usize` to a `u64`.
@@ -191,6 +202,7 @@ impl quickcheck::Arbitrary for Config {
             max_num_streams,
             read_after_close: bool::arbitrary(g),
             split_send_size: g.gen_range(DEFAULT_SPLIT_SEND_SIZE..usize::MAX),
+            connection_close_timeout: None,
         }
     }
 }
