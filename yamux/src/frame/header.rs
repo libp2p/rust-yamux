@@ -166,19 +166,19 @@ impl Header<WindowUpdate> {
 
 impl Header<Ping> {
     /// Create a new ping frame header.
-    pub fn ping(nonce: u32) -> Self {
+    pub fn ping(id: u32) -> Self {
         Header {
             version: Version(0),
             tag: Tag::Ping,
             flags: Flags(0),
             stream_id: StreamId(0),
-            length: Len(nonce),
+            length: Len(id),
             _marker: std::marker::PhantomData,
         }
     }
 
-    /// The nonce of this ping.
-    pub fn nonce(&self) -> u32 {
+    /// The id of this ping.
+    pub fn id(&self) -> u32 {
         self.length.0
     }
 }

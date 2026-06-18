@@ -10,7 +10,10 @@
 
 //! Connection round-trip time measurement
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU32, Ordering},
+    Arc,
+};
 
 use parking_lot::Mutex;
 use web_time::{Duration, Instant};
@@ -21,20 +24,27 @@ use crate::frame::{header::Ping, Frame};
 const PING_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug)]
-pub(crate) struct Rtt(Arc<Mutex<RttInner>>);
+pub(crate) struct Rtt {
+    inner: Arc<Mutex<RttInner>>,
+    /// Next ping identifier, used for matching pongs.
+    next_id: Arc<AtomicU32>,
+}
 
 impl Rtt {
     pub(crate) fn new() -> Self {
-        Self(Arc::new(Mutex::new(RttInner {
-            rtt: None,
-            state: RttState::Waiting {
-                next: Instant::now(),
-            },
-        })))
+        Self {
+            inner: Arc::new(Mutex::new(RttInner {
+                rtt: None,
+                state: RttState::Waiting {
+                    next: Instant::now(),
+                },
+            })),
+            next_id: Arc::new(AtomicU32::new(0)),
+        }
     }
 
     pub(crate) fn next_ping(&mut self) -> Option<Frame<Ping>> {
-        let state = &mut self.0.lock().state;
+        let state = &mut self.inner.lock().state;
 
         match state {
             RttState::AwaitingPong { .. } => return None,
@@ -45,34 +55,34 @@ impl Rtt {
             }
         }
 
-        let nonce = rand::random();
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         *state = RttState::AwaitingPong {
             sent_at: Instant::now(),
-            nonce,
+            id,
         };
-        log::debug!("sending ping {nonce}");
-        Some(Frame::ping(nonce))
+        log::debug!("sending ping {id}");
+        Some(Frame::ping(id))
     }
 
-    pub(crate) fn handle_pong(&mut self, received_nonce: u32) -> Action {
-        let inner = &mut self.0.lock();
+    pub(crate) fn handle_pong(&mut self, received_id: u32) -> Action {
+        let inner = &mut self.inner.lock();
 
-        let (sent_at, expected_nonce) = match inner.state {
+        let (sent_at, expected_id) = match inner.state {
             RttState::Waiting { .. } => {
-                log::error!("received unexpected pong {received_nonce}");
+                log::error!("received unexpected pong {received_id}");
                 return Action::Terminate(Frame::protocol_error());
             }
-            RttState::AwaitingPong { sent_at, nonce } => (sent_at, nonce),
+            RttState::AwaitingPong { sent_at, id } => (sent_at, id),
         };
 
-        if received_nonce != expected_nonce {
-            log::error!("received pong with {received_nonce} but expected {expected_nonce}");
+        if received_id != expected_id {
+            log::error!("received pong with {received_id} but expected {expected_id}");
             return Action::Terminate(Frame::protocol_error());
         }
 
         let rtt = sent_at.elapsed();
         inner.rtt = Some(rtt);
-        log::debug!("received pong {received_nonce}, estimated round-trip-time {rtt:?}");
+        log::debug!("received pong {received_id}, estimated round-trip-time {rtt:?}");
 
         inner.state = RttState::Waiting {
             next: Instant::now() + PING_INTERVAL,
@@ -82,14 +92,17 @@ impl Rtt {
     }
 
     pub(crate) fn get(&self) -> Option<Duration> {
-        self.0.lock().rtt
+        self.inner.lock().rtt
     }
 }
 
 #[cfg(test)]
 impl quickcheck::Arbitrary for Rtt {
     fn arbitrary(g: &mut quickcheck::Gen) -> Self {
-        Self(Arc::new(Mutex::new(RttInner::arbitrary(g))))
+        Self {
+            inner: Arc::new(Mutex::new(RttInner::arbitrary(g))),
+            next_id: Arc::new(AtomicU32::new(0)),
+        }
     }
 }
 
@@ -117,7 +130,7 @@ impl quickcheck::Arbitrary for RttInner {
 #[derive(Debug)]
 #[cfg_attr(test, derive(Clone))]
 enum RttState {
-    AwaitingPong { sent_at: Instant, nonce: u32 },
+    AwaitingPong { sent_at: Instant, id: u32 },
     Waiting { next: Instant },
 }
 
@@ -127,7 +140,7 @@ impl quickcheck::Arbitrary for RttState {
         if bool::arbitrary(g) {
             RttState::AwaitingPong {
                 sent_at: Instant::now(),
-                nonce: u32::arbitrary(g),
+                id: u32::arbitrary(g),
             }
         } else {
             RttState::Waiting {

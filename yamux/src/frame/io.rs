@@ -384,7 +384,7 @@ mod tests {
     fn encode_decode_identity() {
         fn property(f: Frame<()>) -> bool {
             futures::executor::block_on(async move {
-                let id = crate::connection::Id::random();
+                let id = crate::connection::Id::next();
                 let mut io = Io::new(id, futures::io::Cursor::new(Vec::new()));
                 if io.send(f.clone()).await.is_err() {
                     return false;
