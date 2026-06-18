@@ -727,7 +727,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 return Action::Terminate(Frame::protocol_error());
             }
 
-            let credit = frame.header().credit() + DEFAULT_CREDIT;
+            let Some(credit) = frame.header().credit().checked_add(DEFAULT_CREDIT) else {
+                log::error!("{}: header contains invalid credit", self.id);
+                return Action::Terminate(Frame::protocol_error());
+            };
             let stream = self.make_new_inbound_stream(stream_id, credit);
 
             if is_finish {
