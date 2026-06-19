@@ -133,8 +133,8 @@ impl Frame<WindowUpdate> {
 }
 
 impl Frame<Ping> {
-    pub fn ping(nonce: u32) -> Self {
-        let mut header = Header::ping(nonce);
+    pub fn ping(id: u32) -> Self {
+        let mut header = Header::ping(id);
         header.syn();
 
         Frame {
@@ -143,8 +143,8 @@ impl Frame<Ping> {
         }
     }
 
-    pub fn nonce(&self) -> u32 {
-        self.header.nonce()
+    pub fn id(&self) -> u32 {
+        self.header.id()
     }
 }
 

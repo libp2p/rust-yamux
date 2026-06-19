@@ -17,6 +17,8 @@ mod closing;
 mod rtt;
 mod stream;
 
+use std::sync::atomic::{AtomicU32, Ordering};
+
 use crate::tagged_stream::TaggedStream;
 use crate::{
     error::ConnectionError,
@@ -37,6 +39,9 @@ use std::{fmt, sync::Arc, task::Poll};
 
 pub use stream::{Packet, State, Stream};
 
+/// Next connection identifier, used for debug logging.
+static NEXT_ID: AtomicU32 = AtomicU32::new(1);
+
 /// How the connection is used.
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
 pub enum Mode {
@@ -48,14 +53,14 @@ pub enum Mode {
 
 /// The connection identifier.
 ///
-/// Randomly generated, this is mainly intended to improve log output.
+/// Sequentially generated, this is mainly intended to improve log output.
 #[derive(Clone, Copy)]
 pub(crate) struct Id(u32);
 
 impl Id {
-    /// Create a random connection ID.
-    pub(crate) fn random() -> Self {
-        Id(rand::random())
+    /// Create a new connection ID.
+    pub(crate) fn next() -> Self {
+        Id(NEXT_ID.fetch_add(1, Ordering::Relaxed))
     }
 }
 
@@ -351,7 +356,7 @@ impl<T> fmt::Display for Active<T> {
 impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     /// Create a new `Connection` from the given I/O resource.
     fn new(socket: T, cfg: Config, mode: Mode) -> Self {
-        let id = Id::random();
+        let id = Id::next();
         log::debug!("new connection: {id} ({mode:?})");
         let socket = frame::Io::new(id, socket).fuse();
         Active {
@@ -784,10 +789,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     fn on_ping(&mut self, frame: &Frame<Ping>) -> Action {
         let stream_id = frame.header().stream_id();
         if frame.header().flags().contains(header::ACK) {
-            return self.rtt.handle_pong(frame.nonce());
+            return self.rtt.handle_pong(frame.id());
         }
         if stream_id == CONNECTION_ID || self.streams.contains_key(&stream_id) {
-            let mut hdr = Header::ping(frame.header().nonce());
+            let mut hdr = Header::ping(frame.header().id());
             hdr.ack();
             return Action::Ping(Frame::new(hdr));
         }
