@@ -10,15 +10,15 @@ repository = "https://github.com/paritytech/yamux"
 edition = "2021"
 
 [dependencies]
-futures = { version = "0.3.12", default-features = false, features = ["std", "executor"] }
-log = "0.4.8"
+futures = { version = "0.3", default-features = false, features = ["std", "executor"] }
+log = "0.4"
 nohash-hasher = "0.2"
 parking_lot = "0.12"
 static_assertions = "1"
-pin-project = "1.1.0"
-web-time = "1.1.0"
+pin-project = "1"
+web-time = "1"
 
 [dev-dependencies]
-futures = { version = "0.3.12", default-features = false, features = ["executor"] }
+futures = { version = "0.3", default-features = false, features = ["executor"] }
 quickcheck = { package = "quickcheck-ext", path = "../quickcheck-ext" }
-rand = "0.9.0"
+rand = { version = "0.10", default-features = false, features = ["std", "std_rng", "thread_rng"] }

@@ -363,7 +363,7 @@ impl From<HeaderDecodeError> for FrameDecodeError {
 mod tests {
     use super::*;
     use quickcheck::{Arbitrary, Gen, QuickCheck};
-    use rand::RngCore;
+    use rand::Rng;
 
     impl Arbitrary for Frame<()> {
         fn arbitrary(g: &mut Gen) -> Self {
