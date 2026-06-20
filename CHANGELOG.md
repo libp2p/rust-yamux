@@ -1,3 +1,10 @@
+# 0.14.0
+
+- Replace `rand`-based connection IDs and ping nonces with per-connection atomic counters.
+  Removes `rand` from runtime dependencies.
+  See [PR 229](https://github.com/libp2p/rust-yamux/pull/229).
+- Update dependencies. See [PR 230](https://github.com/libp2p/rust-yamux/pull/230).
+
 # 0.13.10
 
 - Fix panic when processing oversized inbound Data|SYN frames.
