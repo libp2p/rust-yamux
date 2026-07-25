@@ -6,6 +6,8 @@ use futures::{future, stream, AsyncReadExt, AsyncWriteExt, FutureExt, StreamExt}
 use quickcheck::QuickCheck;
 use std::panic::panic_any;
 use std::pin::pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use test_harness::*;
 use tokio::net::TcpStream;
 use tokio::runtime::Runtime;
@@ -328,4 +330,100 @@ fn close_through_drop_of_stream_propagates_to_remote() {
         Ok::<(), std::io::Error>(())
     })
     .unwrap();
+}
+
+/// Reading and writing on a split stream must work when each half is driven by its own task.
+///
+/// Both halves send frames to the connection over the stream's command channel. Sharing a
+/// single `mpsc::Sender` between them makes the half polled last overwrite the waker of the
+/// other one, which is then never woken again.
+///
+/// See https://github.com/libp2p/rust-yamux/issues/232.
+#[test]
+fn concurrent_read_and_write_tasks_on_a_split_stream() {
+    let _ = env_logger::try_init();
+    let mut pool = LocalPool::new();
+
+    const MSG: &[u8] = &[42u8; 1024];
+    // Transfer more than `DEFAULT_CREDIT` so that window updates are actually exchanged.
+    const ROUNDS: usize = 512;
+
+    // A small connection capacity makes the connection block on writing to the socket, which
+    // in turn is what fills up the command channel of the stream.
+    let (server_endpoint, client_endpoint) = futures_ringbuf::Endpoint::pair(256, 256);
+
+    // Create and spawn a "server" that echoes every message back to the client.
+    let server = Connection::new(server_endpoint, Config::default(), Mode::Server);
+    pool.spawner()
+        .spawn_obj(
+            async move { echo_server(server).await.unwrap() }
+                .boxed()
+                .into(),
+        )
+        .unwrap();
+
+    let mut client = Connection::new(client_endpoint, Config::default(), Mode::Client);
+    let stream = pool
+        .run_until(future::poll_fn(|cx| client.poll_new_outbound(cx)))
+        .unwrap();
+
+    // Continuously advance the Yamux connection of the client in a background task.
+    pool.spawner()
+        .spawn_obj(
+            noop_server(stream::poll_fn(move |cx| client.poll_next_inbound(cx)))
+                .boxed()
+                .into(),
+        )
+        .unwrap();
+
+    let (mut reader, mut writer) = AsyncReadExt::split(stream);
+    let written = Arc::new(AtomicUsize::new(0));
+    let echoed = Arc::new(AtomicUsize::new(0));
+
+    // Both halves have to be driven by separate tasks, i.e. by separate wakers. Driving them
+    // from within a single task, as `send_recv_message` does, hides the problem.
+    pool.spawner()
+        .spawn_obj({
+            let written = written.clone();
+            async move {
+                for _ in 0..ROUNDS {
+                    writer.write_all(MSG).await.unwrap();
+                    written.fetch_add(MSG.len(), Ordering::SeqCst);
+                }
+            }
+            .boxed()
+            .into()
+        })
+        .unwrap();
+
+    pool.spawner()
+        .spawn_obj({
+            let echoed = echoed.clone();
+            async move {
+                let mut buf = vec![0; MSG.len()];
+                for _ in 0..ROUNDS {
+                    reader.read_exact(&mut buf).await.unwrap();
+                    assert_eq!(buf, MSG);
+                    echoed.fetch_add(buf.len(), Ordering::SeqCst);
+                }
+            }
+            .boxed()
+            .into()
+        })
+        .unwrap();
+
+    // Runs every task until none of them can make progress any more. As all wake-ups
+    // originate from within the pool, a stalled pool means a deadlocked connection.
+    pool.run_until_stalled();
+
+    assert_eq!(
+        written.load(Ordering::SeqCst),
+        ROUNDS * MSG.len(),
+        "the writing task got stuck, its wake-up was lost"
+    );
+    assert_eq!(
+        echoed.load(Ordering::SeqCst),
+        ROUNDS * MSG.len(),
+        "the reading task got stuck, its wake-up was lost"
+    );
 }
