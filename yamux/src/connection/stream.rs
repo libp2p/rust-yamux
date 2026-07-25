@@ -95,7 +95,18 @@ pub struct Stream {
     id: StreamId,
     conn: connection::Id,
     config: Arc<Config>,
+    /// Sends the commands of the writing side of this stream to the connection.
     sender: mpsc::Sender<StreamCommand>,
+    /// Sends the window updates of the reading side of this stream to the connection.
+    ///
+    /// This is a second handle to the same channel as [`Stream::sender`]. A
+    /// [`mpsc::Sender`] has room for exactly one waker, which it overwrites whenever the
+    /// channel is full. Sharing a single handle between the two halves of a split stream
+    /// therefore makes the half polled last discard the waker of the other one, which is then
+    /// never woken again.
+    ///
+    /// See https://github.com/libp2p/rust-yamux/issues/232.
+    window_update_sender: mpsc::Sender<StreamCommand>,
     flag: Flag,
     shared: Arc<Mutex<Shared>>,
 }
@@ -129,6 +140,7 @@ impl Stream {
             id,
             conn,
             config: config.clone(),
+            window_update_sender: sender.clone(),
             sender,
             flag: Flag::Ack,
             shared: Arc::new(Mutex::new(Shared::new(
@@ -153,6 +165,7 @@ impl Stream {
             id,
             conn,
             config: config.clone(),
+            window_update_sender: sender.clone(),
             sender,
             flag: Flag::Syn,
             shared: Arc::new(Mutex::new(Shared::new(
@@ -219,7 +232,7 @@ impl Stream {
         }
 
         ready!(self
-            .sender
+            .window_update_sender
             .poll_ready(cx)
             .map_err(|_| self.write_zero_err())?);
 
@@ -230,7 +243,7 @@ impl Stream {
         let mut frame = Frame::window_update(self.id, credit).right();
         self.add_flag(frame.header_mut());
         let cmd = StreamCommand::SendFrame(frame);
-        self.sender
+        self.window_update_sender
             .start_send(cmd)
             .map_err(|_| self.write_zero_err())?;
 
