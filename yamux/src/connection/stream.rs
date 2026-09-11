@@ -104,8 +104,6 @@ pub struct Stream {
     /// channel is full. Sharing a single handle between the two halves of a split stream
     /// therefore makes the half polled last discard the waker of the other one, which is then
     /// never woken again.
-    ///
-    /// See https://github.com/libp2p/rust-yamux/issues/232.
     window_update_sender: mpsc::Sender<StreamCommand>,
     flag: Flag,
     shared: Arc<Mutex<Shared>>,

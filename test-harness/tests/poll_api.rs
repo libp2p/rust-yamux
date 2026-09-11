@@ -337,8 +337,6 @@ fn close_through_drop_of_stream_propagates_to_remote() {
 /// Both halves send frames to the connection over the stream's command channel. Sharing a
 /// single `mpsc::Sender` between them makes the half polled last overwrite the waker of the
 /// other one, which is then never woken again.
-///
-/// See https://github.com/libp2p/rust-yamux/issues/232.
 #[test]
 fn concurrent_read_and_write_tasks_on_a_split_stream() {
     let _ = env_logger::try_init();
