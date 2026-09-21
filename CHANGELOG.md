@@ -1,3 +1,10 @@
+# 0.14.1
+
+- Fix a deadlock when a `Stream` is split and its two halves are driven by separate tasks.
+  Both halves used to share a single channel handle to the connection, whose only waker slot
+  the half polled last would overwrite, so the other half was never woken again.
+  See [PR 233](https://github.com/libp2p/rust-yamux/pull/233).
+
 # 0.14.0
 
 - Replace `rand`-based connection IDs and ping nonces with per-connection atomic counters.

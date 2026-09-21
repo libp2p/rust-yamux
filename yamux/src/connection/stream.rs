@@ -95,7 +95,16 @@ pub struct Stream {
     id: StreamId,
     conn: connection::Id,
     config: Arc<Config>,
+    /// Sends the commands of the writing side of this stream to the connection.
     sender: mpsc::Sender<StreamCommand>,
+    /// Sends the window updates of the reading side of this stream to the connection.
+    ///
+    /// This is a second handle to the same channel as [`Stream::sender`]. A
+    /// [`mpsc::Sender`] has room for exactly one waker, which it overwrites whenever the
+    /// channel is full. Sharing a single handle between the two halves of a split stream
+    /// therefore makes the half polled last discard the waker of the other one, which is then
+    /// never woken again.
+    window_update_sender: mpsc::Sender<StreamCommand>,
     flag: Flag,
     shared: Arc<Mutex<Shared>>,
 }
@@ -129,6 +138,7 @@ impl Stream {
             id,
             conn,
             config: config.clone(),
+            window_update_sender: sender.clone(),
             sender,
             flag: Flag::Ack,
             shared: Arc::new(Mutex::new(Shared::new(
@@ -153,6 +163,7 @@ impl Stream {
             id,
             conn,
             config: config.clone(),
+            window_update_sender: sender.clone(),
             sender,
             flag: Flag::Syn,
             shared: Arc::new(Mutex::new(Shared::new(
@@ -219,7 +230,7 @@ impl Stream {
         }
 
         ready!(self
-            .sender
+            .window_update_sender
             .poll_ready(cx)
             .map_err(|_| self.write_zero_err())?);
 
@@ -230,7 +241,7 @@ impl Stream {
         let mut frame = Frame::window_update(self.id, credit).right();
         self.add_flag(frame.header_mut());
         let cmd = StreamCommand::SendFrame(frame);
-        self.sender
+        self.window_update_sender
             .start_send(cmd)
             .map_err(|_| self.write_zero_err())?;
 
@@ -534,5 +545,80 @@ impl Shared {
 
     pub(crate) fn consume_receive_window(&mut self, i: u32) -> Result<(), ConnectionError> {
         self.flow_controller.consume_receive_window(i)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::task::{waker, ArcWake};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// A [`Waker`] that only records whether it has been woken.
+    #[derive(Default)]
+    struct FlagWaker(AtomicBool);
+
+    impl FlagWaker {
+        fn woken(&self) -> bool {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    impl ArcWake for FlagWaker {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Both halves of a split [`Stream`] send commands to the connection. If they shared a
+    /// single [`mpsc::Sender`], the one polled last would overwrite the waker of the other
+    /// one, whose wake-up would then be lost forever.
+    ///
+    /// See https://github.com/libp2p/rust-yamux/issues/232.
+    #[test]
+    fn read_half_does_not_steal_the_write_half_wakeup() {
+        // A channel accepts `buffer + num_senders` commands before the sending handle parks
+        // itself, so with a buffer of zero a single frame suffices to fill it up.
+        let (sender, mut receiver) = mpsc::channel(0);
+
+        let mut stream = Stream::new_outbound(
+            StreamId::new(1),
+            connection::Id::next(),
+            Arc::new(Config::default()),
+            sender,
+            Rtt::new(),
+            Default::default(),
+        );
+
+        let write_waker = Arc::new(FlagWaker::default());
+        let read_waker = Arc::new(FlagWaker::default());
+        let (write_waker_ref, read_waker_ref) =
+            (waker(write_waker.clone()), waker(read_waker.clone()));
+        let mut write_cx = Context::from_waker(&write_waker_ref);
+        let mut read_cx = Context::from_waker(&read_waker_ref);
+
+        // The write half queues a frame, filling up the channel.
+        assert!(Pin::new(&mut stream)
+            .poll_write(&mut write_cx, b"hello")
+            .is_ready());
+
+        // It wants to send more, hence it waits for capacity and registers `write_waker`.
+        assert!(Pin::new(&mut stream)
+            .poll_write(&mut write_cx, b"world")
+            .is_pending());
+
+        // In the meantime the read half is polled from another task. It sends window updates
+        // over the very same channel and thus must not clobber `write_waker`.
+        assert!(Pin::new(&mut stream)
+            .poll_read(&mut read_cx, &mut [0u8; 16])
+            .is_pending());
+
+        // The connection consumes one command, making room for the write half again.
+        receiver.try_recv().unwrap();
+
+        assert!(
+            write_waker.woken(),
+            "the write half must be woken once the channel has capacity again"
+        );
     }
 }
