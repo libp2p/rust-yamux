@@ -344,6 +344,71 @@ fn close_through_drop_of_stream_propagates_to_remote() {
     .unwrap();
 }
 
+/// Resetting a stream with an error code ends it for the remote.
+#[test]
+fn reset_propagates_to_remote() {
+    let _ = env_logger::try_init();
+    let mut pool = LocalPool::new();
+
+    let (server_endpoint, client_endpoint) = futures_ringbuf::Endpoint::pair(1024, 1024);
+    let mut server = Connection::new(server_endpoint, Config::default(), Mode::Server);
+    let mut client = Connection::new(client_endpoint, Config::default(), Mode::Client);
+
+    // Spawn client, opening a stream, writing to the stream, resetting it with an error
+    // code, driving the client connection state machine.
+    pool.spawner()
+        .spawn_obj(
+            async {
+                let mut stream = future::poll_fn(|cx| client.poll_new_outbound(cx))
+                    .await
+                    .unwrap();
+                stream.write_all(&[42]).await.unwrap();
+                stream.reset(0xDEAD_BEEF);
+
+                noop_server(stream::poll_fn(move |cx| client.poll_next_inbound(cx))).await;
+            }
+            .boxed()
+            .into(),
+        )
+        .unwrap();
+
+    // Accept inbound stream.
+    let mut stream_server_side = pool
+        .run_until(future::poll_fn(|cx| server.poll_next_inbound(cx)))
+        .unwrap()
+        .unwrap();
+
+    // Spawn server connection state machine.
+    pool.spawner()
+        .spawn_obj(
+            noop_server(stream::poll_fn(move |cx| server.poll_next_inbound(cx)))
+                .boxed()
+                .into(),
+        )
+        .unwrap();
+
+    // Expect the data, then the reset error carrying the code.
+    pool.run_until(async {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 8];
+        let err = loop {
+            match stream_server_side.read(&mut chunk).await {
+                Ok(0) => panic!("a reset must surface as an error, not end of file"),
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Err(err) => break err,
+            }
+        };
+        assert_eq!(buf, vec![42]);
+        let reset = err
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<StreamReset>())
+            .expect("read fails with a stream reset");
+        assert_eq!(reset.code(), Some(0xDEAD_BEEF));
+        Ok::<(), std::io::Error>(())
+    })
+    .unwrap();
+}
+
 /// Reading and writing on a split stream must work when each half is driven by its own task.
 ///
 /// Both halves send frames to the connection over the stream's command channel. Sharing a

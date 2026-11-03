@@ -191,13 +191,18 @@ impl Stream {
     }
 
     /// Whether the remote reset this stream.
-    pub fn is_reset(&self) -> bool {
+    pub fn is_reset(&self) -> Option<StreamReset> {
         self.shared().remote_reset
     }
 
     /// Whether we are still waiting for the remote to acknowledge this stream.
     pub fn is_pending_ack(&self) -> bool {
         self.shared().is_pending_ack()
+    }
+
+    /// Resets the stream with the given error code.
+    pub fn reset(self, code: u32) {
+        self.shared().pending_reset_code = Some(code);
     }
 
     pub(crate) fn shared(&self) -> MutexGuard<'_, Shared> {
@@ -211,10 +216,6 @@ impl Stream {
     fn write_zero_err(&self) -> io::Error {
         let msg = format!("{}/{}: stream is closed", self.conn, self.id);
         io::Error::new(io::ErrorKind::WriteZero, msg)
-    }
-
-    fn reset_err(&self, code: Option<u32>) -> io::Error {
-        io::Error::new(io::ErrorKind::ConnectionReset, StreamReset { code })
     }
 
     /// Set ACK or SYN flag if necessary.
@@ -306,9 +307,12 @@ impl futures::stream::Stream for Stream {
 
         // Buffer is empty, let's check if we can expect to read more data.
         if !shared.state().can_read() {
-            if shared.remote_reset {
+            if let Some(reset) = shared.remote_reset {
                 log::debug!("{}/{}: reset", self.conn, self.id);
-                return Poll::Ready(Some(Err(self.reset_err(shared.remote_error_code))));
+                return Poll::Ready(Some(Err(io::Error::new(
+                    io::ErrorKind::ConnectionReset,
+                    reset,
+                ))));
             }
             log::debug!("{}/{}: eof", self.conn, self.id);
             return Poll::Ready(None);
@@ -365,9 +369,9 @@ impl AsyncRead for Stream {
 
         // Buffer is empty, let's check if we can expect to read more data.
         if !shared.state().can_read() {
-            if shared.remote_reset {
+            if let Some(reset) = shared.remote_reset {
                 log::debug!("{}/{}: reset", self.conn, self.id);
-                return Poll::Ready(Err(self.reset_err(shared.remote_error_code)));
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::ConnectionReset, reset)));
             }
             log::debug!("{}/{}: eof", self.conn, self.id);
             return Poll::Ready(Ok(0));
@@ -468,8 +472,8 @@ pub(crate) struct Shared {
     pub(crate) buffer: Chunks,
     pub(crate) reader: Option<Waker>,
     pub(crate) writer: Option<Waker>,
-    pub(crate) remote_reset: bool,
-    pub(crate) remote_error_code: Option<u32>,
+    pub(crate) remote_reset: Option<StreamReset>,
+    pub(crate) pending_reset_code: Option<u32>,
 }
 
 impl Shared {
@@ -494,8 +498,8 @@ impl Shared {
             buffer: Chunks::new(),
             reader: None,
             writer: None,
-            remote_reset: false,
-            remote_error_code: None,
+            remote_reset: None,
+            pending_reset_code: None,
         }
     }
 

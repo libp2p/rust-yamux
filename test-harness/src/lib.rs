@@ -90,7 +90,7 @@ where
                     assert!(is_reset, "echo copy failed: {err}");
                 }
                 Ok(_) => assert!(
-                    !stream.is_reset(),
+                    !stream.is_reset().is_some(),
                     "a reset must surface as an error, not end of file"
                 ),
             }
