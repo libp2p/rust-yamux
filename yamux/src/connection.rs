@@ -514,7 +514,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
     }
 
     fn on_drop_stream(&mut self, stream_id: StreamId) -> Option<Frame<()>> {
-        let s = self.streams.remove(&stream_id).expect("stream not found");
+        // A reset or a completed close already removed the entry.
+        let s = self.streams.remove(&stream_id)?;
 
         log::trace!("{}: removing dropped stream {}", self.id, stream_id);
         let frame = {
@@ -585,6 +586,25 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             }
         }
 
+        // Frames for streams we no longer have are dropped. They can race a
+        // reset or a drop that already removed the entry. Replying would
+        // interfere with frames we still owe and close the remote early.
+        // SYN is exempt because it creates streams.
+        //
+        // See https://github.com/libp2p/rust-yamux/issues/110 for details.
+        if !frame.header().flags().contains(header::SYN)
+            && matches!(frame.header().tag(), Tag::Data | Tag::WindowUpdate)
+            && !self.streams.contains_key(&frame.header().stream_id())
+        {
+            log::trace!(
+                "{}/{}: dropping frame for unknown stream: {}",
+                self.id,
+                frame.header().stream_id(),
+                frame.header()
+            );
+            return Ok(Action::None);
+        }
+
         let action = match frame.header().tag() {
             Tag::Data => self.on_data(frame.into_data()),
             Tag::WindowUpdate => self.on_window_update(&frame.into_window_update()),
@@ -599,8 +619,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
         if frame.header().flags().contains(header::RST) {
             // stream reset
-            if let Some(s) = self.streams.get_mut(&stream_id) {
+            if let Some(s) = self.streams.get(&stream_id) {
                 let mut shared = s.lock();
+                // Update the state before removing the entry, so a concurrent
+                // writer sees the closed stream.
                 shared.update_state(self.id, stream_id, State::Closed);
                 if let Some(w) = shared.reader.take() {
                     w.wake()
@@ -609,6 +631,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                     w.wake()
                 }
             }
+            self.streams.remove(&stream_id);
             return Action::None;
         }
 
@@ -657,6 +680,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             return Action::New(stream);
         }
 
+        let mut closed = false;
         if let Some(s) = self.streams.get_mut(&stream_id) {
             let mut shared = s.lock();
 
@@ -672,26 +696,18 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
             if is_finish {
                 shared.update_state(self.id, stream_id, State::RecvClosed);
+                closed = shared.state() == State::Closed;
             }
 
             shared.buffer.push(frame.into_body());
             if let Some(w) = shared.reader.take() {
                 w.wake()
             }
-        } else {
-            log::trace!(
-                "{}/{}: data frame for unknown stream, possibly dropped earlier: {:?}",
-                self.id,
-                stream_id,
-                frame
-            );
-            // We do not consider this a protocol violation and thus do not send a stream reset
-            // because we may still be processing pending `StreamCommand`s of this stream that were
-            // sent before it has been dropped and "garbage collected". Such a stream reset would
-            // interfere with the frames that still need to be sent, causing premature stream
-            // termination for the remote.
-            //
-            // See https://github.com/paritytech/yamux/issues/110 for details.
+        }
+
+        if closed {
+            // Both sides closed the stream. The handle keeps the state alive.
+            self.streams.remove(&stream_id);
         }
 
         Action::None
@@ -702,8 +718,10 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
 
         if frame.header().flags().contains(header::RST) {
             // stream reset
-            if let Some(s) = self.streams.get_mut(&stream_id) {
+            if let Some(s) = self.streams.get(&stream_id) {
                 let mut shared = s.lock();
+                // Update the state before removing the entry, so a concurrent
+                // writer sees the closed stream.
                 shared.update_state(self.id, stream_id, State::Closed);
                 if let Some(w) = shared.reader.take() {
                     w.wake()
@@ -712,6 +730,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                     w.wake()
                 }
             }
+            self.streams.remove(&stream_id);
             return Action::None;
         }
 
@@ -747,6 +766,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             return Action::New(stream);
         }
 
+        let mut closed = false;
         if let Some(s) = self.streams.get_mut(&stream_id) {
             let mut shared = s.lock();
             if let Err(err) = shared.increase_send_window_by(frame.header().credit()) {
@@ -759,6 +779,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             }
             if is_finish {
                 shared.update_state(self.id, stream_id, State::RecvClosed);
+                closed = shared.state() == State::Closed;
 
                 if let Some(w) = shared.reader.take() {
                     w.wake()
@@ -767,20 +788,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             if let Some(w) = shared.writer.take() {
                 w.wake()
             }
-        } else {
-            log::trace!(
-                "{}/{}: window update for unknown stream, possibly dropped earlier: {:?}",
-                self.id,
-                stream_id,
-                frame
-            );
-            // We do not consider this a protocol violation and thus do not send a stream reset
-            // because we may still be processing pending `StreamCommand`s of this stream that were
-            // sent before it has been dropped and "garbage collected". Such a stream reset would
-            // interfere with the frames that still need to be sent, causing premature stream
-            // termination for the remote.
-            //
-            // See https://github.com/paritytech/yamux/issues/110 for details.
+        }
+
+        if closed {
+            // Both sides closed the stream. The handle keeps the state alive.
+            self.streams.remove(&stream_id);
         }
 
         Action::None
