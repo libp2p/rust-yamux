@@ -1,3 +1,10 @@
+# 0.15.0
+
+- remove stream entries on remote reset or completed close instead of waiting for the local handle. 
+  Freed slots count against the stream limits again, frames arriving after the end are ignored, 
+  and drop handling no longer expects the entry to exist.
+  See [PR 235](https://github.com/libp2p/rust-yamux/pull/235).
+
 # 0.14.1
 
 - Fix a deadlock when a `Stream` is split and its two halves are driven by separate tasks.

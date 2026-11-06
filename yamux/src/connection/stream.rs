@@ -203,7 +203,7 @@ impl Stream {
     }
 
     fn write_zero_err(&self) -> io::Error {
-        let msg = format!("{}/{}: connection is closed", self.conn, self.id);
+        let msg = format!("{}/{}: stream is closed", self.conn, self.id);
         io::Error::new(io::ErrorKind::WriteZero, msg)
     }
 
