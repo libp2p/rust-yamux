@@ -13,7 +13,7 @@ use tokio::net::TcpStream;
 use tokio::runtime::Runtime;
 use tokio::task;
 use tokio_util::compat::TokioAsyncReadCompatExt;
-use yamux::{Config, Connection, ConnectionError, Mode};
+use yamux::{Config, Connection, ConnectionError, Mode, StreamReset};
 
 #[test]
 fn prop_config_send_recv_multi() {
@@ -322,11 +322,23 @@ fn close_through_drop_of_stream_propagates_to_remote() {
         )
         .unwrap();
 
-    // Expect to eventually receive close on stream.
+    // Expect the data, then the reset error the stream ended with.
     pool.run_until(async {
         let mut buf = Vec::new();
-        stream_server_side.read_to_end(&mut buf).await?;
+        let mut chunk = [0u8; 8];
+        let err = loop {
+            match stream_server_side.read(&mut chunk).await {
+                Ok(0) => panic!("a reset must surface as an error, not end of file"),
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                Err(err) => break err,
+            }
+        };
         assert_eq!(buf, vec![42]);
+        let reset = err
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<StreamReset>())
+            .expect("read fails with a stream reset");
+        assert_eq!(reset.code(), None);
         Ok::<(), std::io::Error>(())
     })
     .unwrap();

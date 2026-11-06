@@ -621,6 +621,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             // stream reset
             if let Some(s) = self.streams.get(&stream_id) {
                 let mut shared = s.lock();
+                shared.remote_reset = true;
                 // Update the state before removing the entry, so a concurrent
                 // writer sees the closed stream.
                 shared.update_state(self.id, stream_id, State::Closed);
@@ -720,6 +721,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             // stream reset
             if let Some(s) = self.streams.get(&stream_id) {
                 let mut shared = s.lock();
+                shared.remote_reset = true;
+                shared.remote_error_code = Some(frame.header().credit());
                 // Update the state before removing the entry, so a concurrent
                 // writer sees the closed stream.
                 shared.update_state(self.id, stream_id, State::Closed);

@@ -11,6 +11,7 @@
 use crate::connection::rtt::Rtt;
 use crate::frame::header::ACK;
 use crate::ConnectionError;
+use crate::StreamReset;
 use crate::{
     chunks::Chunks,
     connection::{self, rtt, StreamCommand},
@@ -189,6 +190,11 @@ impl Stream {
         matches!(self.shared().state(), State::Closed)
     }
 
+    /// Whether the remote reset this stream.
+    pub fn is_reset(&self) -> bool {
+        self.shared().remote_reset
+    }
+
     /// Whether we are still waiting for the remote to acknowledge this stream.
     pub fn is_pending_ack(&self) -> bool {
         self.shared().is_pending_ack()
@@ -205,6 +211,10 @@ impl Stream {
     fn write_zero_err(&self) -> io::Error {
         let msg = format!("{}/{}: stream is closed", self.conn, self.id);
         io::Error::new(io::ErrorKind::WriteZero, msg)
+    }
+
+    fn reset_err(&self, code: Option<u32>) -> io::Error {
+        io::Error::new(io::ErrorKind::ConnectionReset, StreamReset { code })
     }
 
     /// Set ACK or SYN flag if necessary.
@@ -296,8 +306,12 @@ impl futures::stream::Stream for Stream {
 
         // Buffer is empty, let's check if we can expect to read more data.
         if !shared.state().can_read() {
+            if shared.remote_reset {
+                log::debug!("{}/{}: reset", self.conn, self.id);
+                return Poll::Ready(Some(Err(self.reset_err(shared.remote_error_code))));
+            }
             log::debug!("{}/{}: eof", self.conn, self.id);
-            return Poll::Ready(None); // stream has been reset
+            return Poll::Ready(None);
         }
 
         // Since we have no more data at this point, we want to be woken up
@@ -351,8 +365,12 @@ impl AsyncRead for Stream {
 
         // Buffer is empty, let's check if we can expect to read more data.
         if !shared.state().can_read() {
+            if shared.remote_reset {
+                log::debug!("{}/{}: reset", self.conn, self.id);
+                return Poll::Ready(Err(self.reset_err(shared.remote_error_code)));
+            }
             log::debug!("{}/{}: eof", self.conn, self.id);
-            return Poll::Ready(Ok(0)); // stream has been reset
+            return Poll::Ready(Ok(0));
         }
 
         // Since we have no more data at this point, we want to be woken up
@@ -450,6 +468,8 @@ pub(crate) struct Shared {
     pub(crate) buffer: Chunks,
     pub(crate) reader: Option<Waker>,
     pub(crate) writer: Option<Waker>,
+    pub(crate) remote_reset: bool,
+    pub(crate) remote_error_code: Option<u32>,
 }
 
 impl Shared {
@@ -474,6 +494,8 @@ impl Shared {
             buffer: Chunks::new(),
             reader: None,
             writer: None,
+            remote_reset: false,
+            remote_error_code: None,
         }
     }
 

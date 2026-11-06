@@ -15,6 +15,7 @@ use tokio::task;
 use tokio_util::compat::{Compat, TokioAsyncReadCompatExt};
 use yamux::Config;
 use yamux::ConnectionError;
+use yamux::StreamReset;
 use yamux::{Connection, Mode};
 
 pub async fn connected_peers(
@@ -74,9 +75,24 @@ where
 {
     stream::poll_fn(|cx| c.poll_next_inbound(cx))
         .try_for_each_concurrent(None, |mut stream| async move {
-            {
+            // A clean close ends the copy with end of file. A reset ends
+            // it with a StreamReset error.
+            let result = {
                 let (mut r, mut w) = AsyncReadExt::split(&mut stream);
-                futures::io::copy(&mut r, &mut w).await.unwrap();
+                futures::io::copy(&mut r, &mut w).await
+            };
+            match result {
+                Err(err) => {
+                    let is_reset = err
+                        .get_ref()
+                        .and_then(|inner| inner.downcast_ref::<StreamReset>())
+                        .is_some();
+                    assert!(is_reset, "echo copy failed: {err}");
+                }
+                Ok(_) => assert!(
+                    !stream.is_reset(),
+                    "a reset must surface as an error, not end of file"
+                ),
             }
             stream.close().await?;
             Ok(())
