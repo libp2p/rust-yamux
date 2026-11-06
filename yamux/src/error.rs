@@ -82,3 +82,29 @@ impl From<futures::channel::oneshot::Canceled> for ConnectionError {
         ConnectionError::Closed
     }
 }
+
+/// The remote reset the stream, optionally with an error code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamReset {
+    pub(crate) code: Option<u32>,
+}
+
+impl StreamReset {
+    /// The error code the remote sent with the reset, if any.
+    ///
+    /// Resets sent in data frames carry no code.
+    pub fn code(&self) -> Option<u32> {
+        self.code
+    }
+}
+
+impl std::fmt::Display for StreamReset {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self.code {
+            Some(code) => write!(f, "stream reset by remote, error code {code}"),
+            None => f.write_str("stream reset by remote"),
+        }
+    }
+}
+
+impl std::error::Error for StreamReset {}

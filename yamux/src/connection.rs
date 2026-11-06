@@ -24,7 +24,7 @@ use crate::{
     error::ConnectionError,
     frame::header::{self, Data, GoAway, Header, Ping, StreamId, Tag, WindowUpdate, CONNECTION_ID},
     frame::{self, Frame},
-    Config, DEFAULT_CREDIT,
+    Config, StreamReset, DEFAULT_CREDIT,
 };
 use crate::{Result, MAX_ACK_BACKLOG};
 use cleanup::Cleanup;
@@ -520,13 +520,38 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         log::trace!("{}: removing dropped stream {}", self.id, stream_id);
         let frame = {
             let mut shared = s.lock();
-            let frame = match shared.update_state(self.id, stream_id, State::Closed) {
+            let previous = shared.update_state(self.id, stream_id, State::Closed);
+            if let Some(w) = shared.reader.take() {
+                w.wake()
+            }
+            if let Some(w) = shared.writer.take() {
+                w.wake()
+            }
+
+            // An explicit reset carries the error code and comes first.
+            if let Some(code) = shared.pending_reset_code.take() {
+                // Both sides closed the stream, so no frame is sent.
+                if previous == State::Closed {
+                    log::debug!(
+                        "{}/{}: reset with code {} skipped, stream already closed",
+                        self.id,
+                        stream_id,
+                        code
+                    );
+                    return None;
+                }
+                let mut header = Header::window_update(stream_id, code);
+                header.rst();
+                return Some(Frame::new(header).into());
+            }
+
+            match previous {
                 // The stream was dropped without calling `poll_close`.
                 // We reset the stream to inform the remote of the closure.
                 State::Open { .. } => {
                     let mut header = Header::data(stream_id, 0);
                     header.rst();
-                    Some(Frame::new(header))
+                    Some(Frame::new(header).into())
                 }
                 // The stream was dropped without calling `poll_close`.
                 // We have already received a FIN from remote and send one
@@ -534,7 +559,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 State::RecvClosed => {
                     let mut header = Header::data(stream_id, 0);
                     header.fin();
-                    Some(Frame::new(header))
+                    Some(Frame::new(header).into())
                 }
                 // The stream was properly closed. We already sent our FIN frame.
                 // The remote may be out of credit though and blocked on
@@ -551,16 +576,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
                 // The stream was properly closed. We already have sent our FIN frame. The
                 // remote end has already done so in the past.
                 State::Closed => None,
-            };
-            if let Some(w) = shared.reader.take() {
-                w.wake()
             }
-            if let Some(w) = shared.writer.take() {
-                w.wake()
-            }
-            frame
         };
-        frame.map(Into::into)
+        frame
     }
 
     /// Process the result of reading from the socket.
@@ -621,6 +639,7 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             // stream reset
             if let Some(s) = self.streams.get(&stream_id) {
                 let mut shared = s.lock();
+                shared.remote_reset = Some(StreamReset { code: None });
                 // Update the state before removing the entry, so a concurrent
                 // writer sees the closed stream.
                 shared.update_state(self.id, stream_id, State::Closed);
@@ -720,6 +739,9 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
             // stream reset
             if let Some(s) = self.streams.get(&stream_id) {
                 let mut shared = s.lock();
+                shared.remote_reset = Some(StreamReset {
+                    code: Some(frame.header().credit()),
+                });
                 // Update the state before removing the entry, so a concurrent
                 // writer sees the closed stream.
                 shared.update_state(self.id, stream_id, State::Closed);
@@ -920,5 +942,150 @@ impl<T> Active<T> {
                 w.wake()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::task::noop_waker;
+    use std::pin::Pin;
+
+    /// A reset sends a window update with the RST flag and the error code.
+    #[test]
+    fn reset_sends_window_update_with_rst_and_code() {
+        const CODE: u32 = 0xDEAD_BEEF;
+
+        let (endpoint, _peer) = futures_ringbuf::Endpoint::pair(64, 64);
+        let mut conn = Connection::new(endpoint, Config::default(), Mode::Client);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let stream = match conn.poll_new_outbound(&mut cx) {
+            Poll::Ready(Ok(stream)) => stream,
+            other => panic!("expected an outbound stream, got {other:?}"),
+        };
+        let stream_id = stream.id();
+        stream.reset(CODE);
+
+        let frame = match &mut conn.inner {
+            ConnectionState::Active(active) => active.on_drop_stream(stream_id),
+            _ => panic!("connection should be active"),
+        }
+        .expect("reset sends a frame");
+
+        assert_eq!(frame.header().tag(), Tag::WindowUpdate);
+        assert!(frame.header().flags().contains(header::RST));
+        assert_eq!(frame.header().len().val(), CODE);
+    }
+
+    /// A plain drop sends a data frame reset without a code.
+    #[test]
+    fn plain_drop_sends_data_frame_reset() {
+        let (endpoint, _peer) = futures_ringbuf::Endpoint::pair(64, 64);
+        let mut conn = Connection::new(endpoint, Config::default(), Mode::Client);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let stream = match conn.poll_new_outbound(&mut cx) {
+            Poll::Ready(Ok(stream)) => stream,
+            other => panic!("expected an outbound stream, got {other:?}"),
+        };
+        let stream_id = stream.id();
+        drop(stream);
+
+        let frame = match &mut conn.inner {
+            ConnectionState::Active(active) => active.on_drop_stream(stream_id),
+            _ => panic!("connection should be active"),
+        }
+        .expect("drop sends a frame");
+
+        assert_eq!(frame.header().tag(), Tag::Data);
+        assert!(frame.header().flags().contains(header::RST));
+        assert_eq!(frame.header().len().val(), 0);
+    }
+
+    /// A reset after a remote FIN overrides the FIN reply.
+    /// The only state with a Data+FIN default, so the only test that proves the reset wins.
+    #[test]
+    fn reset_after_remote_fin_sends_window_update_reset() {
+        const CODE: u32 = 0xDEAD_BEEF;
+
+        let (endpoint, _peer) = futures_ringbuf::Endpoint::pair(64, 64);
+        let mut conn = Connection::new(endpoint, Config::default(), Mode::Client);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let stream = match conn.poll_new_outbound(&mut cx) {
+            Poll::Ready(Ok(stream)) => stream,
+            other => panic!("expected an outbound stream, got {other:?}"),
+        };
+        let stream_id = stream.id();
+
+        // The remote closes first, putting the stream into `RecvClosed`.
+        let fin = Frame::close_stream(stream_id, false);
+        match &mut conn.inner {
+            ConnectionState::Active(active) => {
+                active.on_frame(fin.into()).expect("fin is processed");
+            }
+            _ => panic!("connection should be active"),
+        }
+
+        stream.reset(CODE);
+
+        let frame = match &mut conn.inner {
+            ConnectionState::Active(active) => active.on_drop_stream(stream_id),
+            _ => panic!("connection should be active"),
+        }
+        .expect("reset sends a frame");
+
+        assert_eq!(frame.header().tag(), Tag::WindowUpdate);
+        assert!(frame.header().flags().contains(header::RST));
+        assert!(
+            !frame.header().flags().contains(header::FIN),
+            "the reset overrides the fin reply"
+        );
+        assert_eq!(frame.header().len().val(), CODE);
+    }
+
+    /// A reset after both sides closed sends no frame.
+    #[test]
+    fn reset_after_full_close_sends_nothing() {
+        const CODE: u32 = 0xDEAD_BEEF;
+
+        let (endpoint, _peer) = futures_ringbuf::Endpoint::pair(64, 64);
+        let mut conn = Connection::new(endpoint, Config::default(), Mode::Client);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut stream = match conn.poll_new_outbound(&mut cx) {
+            Poll::Ready(Ok(stream)) => stream,
+            other => panic!("expected an outbound stream, got {other:?}"),
+        };
+        let stream_id = stream.id();
+
+        // The remote closes first, putting the stream into `RecvClosed`.
+        let fin = Frame::close_stream(stream_id, false);
+        match &mut conn.inner {
+            ConnectionState::Active(active) => {
+                active.on_frame(fin.into()).expect("fin is processed");
+            }
+            _ => panic!("connection should be active"),
+        }
+
+        // Our close completes the handshake and the stream reaches `Closed`.
+        match Pin::new(&mut stream).poll_close(&mut cx) {
+            Poll::Ready(Ok(())) => {}
+            other => panic!("close completes, got {other:?}"),
+        }
+        assert!(stream.is_closed());
+
+        stream.reset(CODE);
+
+        let frame = match &mut conn.inner {
+            ConnectionState::Active(active) => active.on_drop_stream(stream_id),
+            _ => panic!("connection should be active"),
+        };
+        assert!(frame.is_none(), "no frame after a completed close");
     }
 }
