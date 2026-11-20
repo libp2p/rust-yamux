@@ -518,67 +518,65 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Active<T> {
         let s = self.streams.remove(&stream_id)?;
 
         log::trace!("{}: removing dropped stream {}", self.id, stream_id);
-        let frame = {
-            let mut shared = s.lock();
-            let previous = shared.update_state(self.id, stream_id, State::Closed);
-            if let Some(w) = shared.reader.take() {
-                w.wake()
-            }
-            if let Some(w) = shared.writer.take() {
-                w.wake()
-            }
 
-            // An explicit reset carries the error code and comes first.
-            if let Some(code) = shared.pending_reset_code.take() {
-                // Both sides closed the stream, so no frame is sent.
-                if previous == State::Closed {
+        let mut shared = s.lock();
+        let previous = shared.update_state(self.id, stream_id, State::Closed);
+        if let Some(w) = shared.reader.take() {
+            w.wake()
+        }
+        if let Some(w) = shared.writer.take() {
+            w.wake()
+        }
+
+        // An explicit reset carries the error code and comes first.
+        match (previous, shared.pending_reset_code.take()) {
+            // The stream was properly closed. We already have sent our FIN frame. The
+            // remote end has already done so in the past. Both sides closed the
+            // stream, so no frame is sent — not even for a pending reset.
+            (State::Closed, code) => {
+                if let Some(code) = code {
                     log::debug!(
                         "{}/{}: reset with code {} skipped, stream already closed",
                         self.id,
                         stream_id,
                         code
                     );
-                    return None;
                 }
+                None
+            }
+            (_, Some(code)) => {
                 let mut header = Header::window_update(stream_id, code);
                 header.rst();
-                return Some(Frame::new(header).into());
+                Some(Frame::new(header).into())
             }
-
-            match previous {
-                // The stream was dropped without calling `poll_close`.
-                // We reset the stream to inform the remote of the closure.
-                State::Open { .. } => {
-                    let mut header = Header::data(stream_id, 0);
-                    header.rst();
-                    Some(Frame::new(header).into())
-                }
-                // The stream was dropped without calling `poll_close`.
-                // We have already received a FIN from remote and send one
-                // back which closes the stream for good.
-                State::RecvClosed => {
-                    let mut header = Header::data(stream_id, 0);
-                    header.fin();
-                    Some(Frame::new(header).into())
-                }
-                // The stream was properly closed. We already sent our FIN frame.
-                // The remote may be out of credit though and blocked on
-                // writing more data. We may need to reset the stream.
-                State::SendClosed => {
-                    // The remote has either still credit or will be given more
-                    // due to an enqueued window update or we already have
-                    // inbound frames in the socket buffer which will be
-                    // processed later. In any case we will reply with an RST in
-                    // `Connection::on_data` because the stream will no longer
-                    // be known.
-                    None
-                }
-                // The stream was properly closed. We already have sent our FIN frame. The
-                // remote end has already done so in the past.
-                State::Closed => None,
+            // The stream was dropped without calling `poll_close`.
+            // We reset the stream to inform the remote of the closure.
+            (State::Open { .. }, None) => {
+                let mut header = Header::data(stream_id, 0);
+                header.rst();
+                Some(Frame::new(header).into())
             }
-        };
-        frame
+            // The stream was dropped without calling `poll_close`.
+            // We have already received a FIN from remote and send one
+            // back which closes the stream for good.
+            (State::RecvClosed, None) => {
+                let mut header = Header::data(stream_id, 0);
+                header.fin();
+                Some(Frame::new(header).into())
+            }
+            // The stream was properly closed. We already sent our FIN frame.
+            // The remote may be out of credit though and blocked on
+            // writing more data. We may need to reset the stream.
+            (State::SendClosed, None) => {
+                // The remote has either still credit or will be given more
+                // due to an enqueued window update or we already have
+                // inbound frames in the socket buffer which will be
+                // processed later. In any case we will reply with an RST in
+                // `Connection::on_data` because the stream will no longer
+                // be known.
+                None
+            }
+        }
     }
 
     /// Process the result of reading from the socket.
