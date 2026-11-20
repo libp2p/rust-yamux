@@ -20,5 +20,6 @@ web-time = "1"
 
 [dev-dependencies]
 futures = { version = "0.3", default-features = false, features = ["executor"] }
+futures_ringbuf = "0.4.0"
 quickcheck = { package = "quickcheck-ext", path = "../quickcheck-ext" }
 rand = { version = "0.10", default-features = false, features = ["std", "std_rng", "thread_rng"] }

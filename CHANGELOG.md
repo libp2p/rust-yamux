@@ -1,7 +1,13 @@
 # 0.15.0
 
-- remove stream entries on remote reset or completed close instead of waiting for the local handle. 
-  Freed slots count against the stream limits again, frames arriving after the end are ignored, 
+- send stream resets with an error code, and report received resets as errors so the code reaches the application.
+  `Stream::reset` sends a window update frame with the RST flag set, with the code in its length field.
+  A plain drop keeps sending the data frame reset without a code, so existing peers are unaffected.
+  Reads drain buffered data first and then fail with `StreamReset`, which carries the code when the reset included one.
+  [PR 236](https://github.com/libp2p/rust-yamux/pull/236)
+
+- remove stream entries on remote reset or completed close instead of waiting for the local handle.
+  Freed slots count against the stream limits again, frames arriving after the end are ignored,
   and drop handling no longer expects the entry to exist.
   See [PR 235](https://github.com/libp2p/rust-yamux/pull/235).
 
